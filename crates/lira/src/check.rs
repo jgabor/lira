@@ -79,8 +79,7 @@ pub fn command(folder: &Path) -> Result<bool, String> {
     let on_main = if file.scores.is_empty() {
         Scores::default()
     } else {
-        let name = main.split_once('/').map_or(main.as_str(), |(_, name)| name);
-        github::main_scores(folder, name)?
+        github::main_scores(folder, git::name_on_github(&main))?
     };
     let outcome = run(&file, folder, &base)?;
     for line in report(&file.scores, &outcome.scores, &on_main) {
