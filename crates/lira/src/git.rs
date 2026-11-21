@@ -1,32 +1,36 @@
 //! What Lira asks git about the repository in a folder.
 
 use crate::lira_file::{self, LiraFile};
+use crate::process;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
-/// Runs git in `folder`, and returns what it prints when it succeeds.
-fn git(folder: &Path, args: &[&str]) -> Result<Option<String>, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(folder)
-        .output()
+/// Runs git in `folder`. The inner result is what git printed, or what git
+/// wrote to its error output when git failed. The outer error is for a git
+/// that Lira could not run.
+fn ask<S: AsRef<OsStr>>(folder: &Path, args: &[S]) -> Result<Result<String, String>, String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(folder);
+    // A hook of the repository can leave a process behind. Lira does not
+    // wait for it.
+    let ended = process::run(command, false)
         .map_err(|e| format!("couldn't run `git`: {e}. Install git, or add it to PATH"))?;
-    let printed = String::from_utf8_lossy(&output.stdout).into_owned();
-    Ok(output.status.success().then_some(printed))
+    Ok(if ended.status.success() {
+        Ok(String::from_utf8_lossy(&ended.output).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&ended.errors).trim().to_string())
+    })
 }
 
 /// Runs git in `folder`. When git fails, the error is what git wrote.
-fn run(folder: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(folder)
-        .output()
-        .map_err(|e| format!("couldn't run `git`: {e}. Install git, or add it to PATH"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
+fn run<S: AsRef<OsStr>>(folder: &Path, args: &[S]) -> Result<String, String> {
+    ask(folder, args)?
+}
+
+/// Runs git in `folder`, and returns what it prints when it succeeds.
+fn git(folder: &Path, args: &[&str]) -> Result<Option<String>, String> {
+    Ok(ask(folder, args)?.ok())
 }
 
 /// The main branch of the repository in a folder.
@@ -88,7 +92,12 @@ pub fn base(folder: &Path, main: &str) -> Result<String, String> {
 
 /// The Lira file, as the main branch has it.
 pub fn lira_file(folder: &Path, main: &MainBranch) -> Result<LiraFile, String> {
-    let text = file_on(folder, &main.full, lira_file::NAME)?.ok_or_else(|| {
+    lira_file_at(folder, main, &main.full)
+}
+
+/// The Lira file, as one commit of the main branch has it.
+pub fn lira_file_at(folder: &Path, main: &MainBranch, commit: &str) -> Result<LiraFile, String> {
+    let text = file_on(folder, commit, lira_file::NAME)?.ok_or_else(|| {
         format!(
             "the main branch, `{}`, has no `{}`. Lira reads the Lira file from the main branch, so merge the pull request that adds it first",
             main.full,
@@ -104,13 +113,24 @@ pub fn file_on(folder: &Path, main: &str, path: &str) -> Result<Option<String>, 
     git(folder, &["show", &format!("{main}:{path}")])
 }
 
+/// The newest main branch of a remote.
+pub struct Newest {
+    pub main: MainBranch,
+    /// The name of the remote: `origin`, or the first remote when there is
+    /// no `origin`.
+    pub remote: String,
+    /// The newest commit of the main branch. Lira reads the Lira file from
+    /// this commit and starts the worktree from it, so the two fit, also
+    /// when the main branch gets a newer commit in between.
+    pub commit: String,
+}
+
 /// Asks the remote which branch is its main branch now, and gets the newest
-/// commits of that branch. It returns the main branch and the name of the
-/// remote: `origin`, or the first remote when there is no `origin`.
+/// commits of that branch.
 ///
 /// What the host knew about the remote before can be old: the main branch
 /// can have new commits, and the remote can have another main branch.
-pub fn newest_main(folder: &Path) -> Result<(MainBranch, String), String> {
+pub fn newest_main(folder: &Path) -> Result<Newest, String> {
     let remotes = git(folder, &["remote"])?.unwrap_or_default();
     let mut remotes: Vec<&str> = remotes.lines().collect();
     remotes.sort_by_key(|remote| *remote != "origin");
@@ -125,7 +145,8 @@ pub fn newest_main(folder: &Path) -> Result<(MainBranch, String), String> {
             "Lira can't get the newest main branch from the remote `{remote}`. git wrote:\n{wrote}"
         )
     };
-    let head = run(folder, &["ls-remote", "--symref", remote, "HEAD"]).map_err(failed)?;
+    // After `--`, git takes a name that starts with `-` as a name.
+    let head = run(folder, &["ls-remote", "--symref", "--", remote, "HEAD"]).map_err(failed)?;
     let name = head
         .lines()
         .find_map(|line| {
@@ -140,17 +161,34 @@ pub fn newest_main(folder: &Path) -> Result<(MainBranch, String), String> {
         name: name.to_string(),
     };
     let branch = format!("+refs/heads/{name}:{}", main.full);
-    run(folder, &["fetch", "--quiet", "--no-tags", remote, &branch]).map_err(failed)?;
+    run(
+        folder,
+        &["fetch", "--quiet", "--no-tags", "--", remote, &branch],
+    )
+    .map_err(failed)?;
     // The host keeps which branch is the main branch of the remote, and
     // `main_branch` reads it there.
-    run(folder, &["remote", "set-head", remote, name]).map_err(failed)?;
-    Ok((main, remote.to_string()))
+    run(folder, &["remote", "set-head", "--", remote, name]).map_err(failed)?;
+    let commit = run(
+        folder,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", main.full),
+        ],
+    )
+    .map_err(failed)?;
+    Ok(Newest {
+        main,
+        remote: remote.to_string(),
+        commit: commit.trim().to_string(),
+    })
 }
 
 /// The repository of a remote, as `<owner>/<repository>`: the last two
 /// parts of the address of the remote.
 pub fn repository_of(folder: &Path, remote: &str) -> Result<(String, String), String> {
-    let address = run(folder, &["remote", "get-url", remote]).map_err(|wrote| {
+    let address = run(folder, &["remote", "get-url", "--", remote]).map_err(|wrote| {
         format!("Lira can't read the address of the remote `{remote}`: {wrote}")
     })?;
     let address = address.trim();
@@ -199,44 +237,61 @@ pub fn has_branch(folder: &Path, branch: &str) -> Result<bool, String> {
     Ok(git(folder, &["rev-parse", "--verify", "--quiet", &full])?.is_some())
 }
 
-/// Makes a worktree in `worktree`, on the new branch `branch`, which starts
-/// at `start`. The branch follows no other branch.
-pub fn add_worktree(
-    folder: &Path,
-    worktree: &Path,
-    branch: &str,
-    start: &str,
-) -> Result<(), String> {
-    let worktree = worktree.to_string_lossy();
-    run(
-        folder,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            "--no-track",
-            "-b",
-            branch,
-            &worktree,
-            start,
-        ],
-    )
-    .map(|_| ())
-    .map_err(|wrote| format!("Lira can't make the worktree `{worktree}`. git wrote:\n{wrote}"))
+/// Makes the new branch `branch` at a commit. The branch follows no other
+/// branch. It fails when the branch is there already, so after it the
+/// branch is Lira's own.
+pub fn add_branch(folder: &Path, branch: &str, commit: &str) -> Result<(), String> {
+    run(folder, &["branch", "--quiet", "--no-track", branch, commit])
+        .map(|_| ())
+        .map_err(|wrote| format!("Lira can't make the branch `{branch}`. git wrote:\n{wrote}"))
+}
+
+/// Makes a worktree of the branch `branch` in the empty folder `worktree`.
+pub fn add_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), String> {
+    let args = [
+        OsStr::new("worktree"),
+        OsStr::new("add"),
+        OsStr::new("--quiet"),
+        worktree.as_os_str(),
+        OsStr::new(branch),
+    ];
+    run(folder, &args).map(|_| ()).map_err(|wrote| {
+        format!(
+            "Lira can't make the worktree `{}`. git wrote:\n{wrote}",
+            worktree.display()
+        )
+    })
 }
 
 /// Removes a worktree and its branch, with all that is in them. It is for
-/// a worktree and a branch that Lira made just now. When a part can't be
-/// removed, the error is what git wrote.
+/// a folder and a branch that Lira made just now, and no other. When a part
+/// can't be removed, the error says why.
 pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), String> {
     let mut wrote = Vec::new();
-    if worktree.exists()
-        && let Err(error) = run(
-            folder,
-            &["worktree", "remove", "--force", &worktree.to_string_lossy()],
-        )
+    // git removes its record of the worktree, also when the folder is gone.
+    let args = [
+        OsStr::new("worktree"),
+        OsStr::new("remove"),
+        OsStr::new("--force"),
+        worktree.as_os_str(),
+    ];
+    let removed = run(folder, &args);
+    let listed = run(folder, &["worktree", "list", "--porcelain"])?;
+    let line = format!("branch refs/heads/{branch}");
+    if let Err(error) = removed
+        && listed.lines().any(|listed| listed == line)
     {
         wrote.push(error);
+    }
+    // When git had no record of the worktree, the empty folder that Lira
+    // made is still there.
+    if worktree.symlink_metadata().is_ok()
+        && let Err(error) = std::fs::remove_dir(worktree)
+    {
+        wrote.push(format!(
+            "Lira can't remove the folder `{}`: {error}",
+            worktree.display()
+        ));
     }
     if has_branch(folder, branch)?
         && let Err(error) = run(folder, &["branch", "--quiet", "-D", branch])

@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 struct Repository {
-    /// The folder where the files of the main branch are written, and
-    /// pushed from. It stands in for the work of other people.
+    /// The folder where a test writes the files of the main branch, and
+    /// pushes them from. It stands in for the work of other people.
     seed: PathBuf,
     /// The remote: the repository `<owner>/<name>`.
     remote: PathBuf,
@@ -478,6 +478,13 @@ fn the_error_shows_spaces_that_the_setup_command_wrote() {
     let error = repository.make("feat/spaces").unwrap_err();
     assert!(error.ends_with("It wrote:\n  "), "{error:?}");
 
+    let repository = Repository::new(
+        "setup-newline",
+        &format!("{CHECK}setup = \"printf '\\\\n'; exit 7\"\n"),
+    );
+    let error = repository.make("feat/newline").unwrap_err();
+    assert!(error.ends_with("It wrote:\n"), "{error:?}");
+
     let repository = Repository::new("setup-silent", &format!("{CHECK}setup = \"exit 7\"\n"));
     let error = repository.make("feat/silent").unwrap_err();
     assert!(error.ends_with("It wrote nothing"), "{error:?}");
@@ -504,13 +511,13 @@ fn a_setup_command_that_leaves_a_process_behind_does_not_hold_lira() {
     }
 }
 
-#[test]
-fn a_worktree_that_git_makes_and_then_refuses_is_removed() {
-    // A hook of the repository runs when git made the worktree. When it
-    // fails, git says so, and the worktree and the branch are there.
-    let repository = Repository::new("hook", CHECK);
+/// Gives the repository a hook that git runs when it made a worktree.
+fn hook(repository: &Repository, script: &str) {
     let hooks = repository.root.join(".git").join("hooks");
     fs::create_dir_all(&hooks).unwrap();
+    // A child process writes the file. If this process had it open for
+    // writing while another test started a process, running the file could
+    // fail with `Text file busy`.
     let mut writer = Command::new("sh")
         .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
         .arg(hooks.join("post-checkout"))
@@ -518,9 +525,7 @@ fn a_worktree_that_git_makes_and_then_refuses_is_removed() {
         .spawn()
         .unwrap();
     let mut input = writer.stdin.take().unwrap();
-    input
-        .write_all(b"#!/bin/sh\necho the hook says no >&2\nexit 9\n")
-        .unwrap();
+    input.write_all(script.as_bytes()).unwrap();
     drop(input);
     assert!(writer.wait().unwrap().success());
     // A setting of the host must not turn the hook off.
@@ -528,11 +533,127 @@ fn a_worktree_that_git_makes_and_then_refuses_is_removed() {
         &repository.root,
         &["config", "core.hooksPath", hooks.to_str().unwrap()],
     );
+}
 
-    let error = repository.make("feat/hook").unwrap_err();
-    assert!(error.contains("the hook says no"), "{error}");
-    assert!(!repository.worktree("feat/hook").exists());
-    assert!(!repository.has_branch("feat/hook"));
+#[test]
+fn a_worktree_that_git_makes_and_then_refuses_is_removed() {
+    // When the hook fails, git says so, and the worktree and the branch
+    // are there. The second hook also leaves a process behind, which has
+    // the output of git.
+    let hooks = [
+        ("hook", "#!/bin/sh\necho the hook says no >&2\nexit 9\n"),
+        (
+            "hook-stays",
+            "#!/bin/sh\nsleep 20 &\necho the hook says no >&2\nexit 9\n",
+        ),
+    ];
+    for (name, script) in hooks {
+        let repository = Repository::new(name, CHECK);
+        hook(&repository, script);
+        let started = Instant::now();
+        let error = repository.make("feat/hook").unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10), "{name}");
+        assert!(error.contains("the hook says no"), "{error}");
+        assert!(!repository.worktree("feat/hook").exists());
+        assert!(!repository.has_branch("feat/hook"));
+        let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains("feat/hook"), "{listed}");
+    }
+}
+
+#[test]
+fn two_calls_for_one_branch_make_one_worktree() {
+    // The calls start at the same time. At most one makes the worktree, and
+    // the others must not remove what that one made.
+    let repository = std::sync::Arc::new(Repository::new("two-calls", CHECK));
+    let together = std::sync::Arc::new(std::sync::Barrier::new(6));
+    let calls: Vec<_> = (0..6)
+        .map(|_| {
+            let repository = std::sync::Arc::clone(&repository);
+            let together = std::sync::Arc::clone(&together);
+            std::thread::spawn(move || {
+                together.wait();
+                repository.make("feat/same")
+            })
+        })
+        .collect();
+    let made: Vec<_> = calls.into_iter().map(|call| call.join().unwrap()).collect();
+    let good = made.iter().filter(|made| made.is_ok()).count();
+    assert!(good <= 1, "{made:?}");
+    let folder = repository.worktree("feat/same");
+    if good == 1 {
+        assert!(folder.join("README.md").is_file(), "{made:?}");
+        assert!(repository.has_branch("feat/same"), "{made:?}");
+        assert_eq!(
+            git_ok(&folder, &["symbolic-ref", "HEAD"]),
+            "refs/heads/feat/same"
+        );
+    } else {
+        assert!(!folder.exists(), "{made:?}");
+        assert!(!repository.has_branch("feat/same"), "{made:?}");
+    }
+}
+
+#[test]
+fn a_data_folder_with_a_name_that_is_not_utf_8_gets_the_worktree() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut repository = Repository::new(
+        "not-utf-8",
+        &format!("{CHECK}setup = \"echo made > made.txt\"\n"),
+    );
+    repository.data = repository
+        .top
+        .join(std::ffi::OsStr::from_bytes(b"data-\xff"));
+    let folder = repository.make("feat/bytes").unwrap();
+    assert_eq!(folder, repository.worktree("feat/bytes"));
+    assert!(folder.join("README.md").is_file());
+    assert_eq!(
+        fs::read_to_string(folder.join("made.txt")).unwrap(),
+        "made\n"
+    );
+
+    // A failure removes it again.
+    repository.push("lira.toml", &format!("{CHECK}setup = \"exit 7\"\n"));
+    repository.make("feat/more-bytes").unwrap_err();
+    assert!(!repository.worktree("feat/more-bytes").exists());
+    assert!(!repository.has_branch("feat/more-bytes"));
+}
+
+#[test]
+fn a_name_of_the_remote_that_starts_with_a_dash_is_not_an_option_of_git() {
+    let repository = Repository::new("dashes", CHECK);
+    // The remote is `--quiet`, and its main branch is `-trunk`.
+    let remote = repository.remote.to_str().unwrap();
+    git_ok(
+        &repository.seed,
+        &["push", "--quiet", remote, "main:refs/heads/-trunk"],
+    );
+    git_ok(
+        &repository.remote,
+        &["symbolic-ref", "HEAD", "refs/heads/-trunk"],
+    );
+    git_ok(&repository.root, &["remote", "remove", "origin"]);
+    git_ok(
+        &repository.root,
+        &["remote", "add", "--", "--quiet", remote],
+    );
+
+    let folder = repository.make("feat/dashes").unwrap();
+    assert_eq!(
+        git_ok(&folder, &["rev-parse", "HEAD"]),
+        git_ok(&repository.seed, &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn a_setup_command_that_moves_the_worktree_and_fails_leaves_no_branch() {
+    let repository = Repository::new(
+        "setup-moves",
+        &format!("{CHECK}setup = 'mv \"$PWD\" \"$PWD.moved\"; exit 7'\n"),
+    );
+    repository.make("feat/moves").unwrap_err();
+    assert!(!repository.worktree("feat/moves").exists());
+    assert!(!repository.has_branch("feat/moves"));
     let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
-    assert!(!listed.contains("feat/hook"), "{listed}");
+    assert!(!listed.contains("feat/moves"), "{listed}");
 }
