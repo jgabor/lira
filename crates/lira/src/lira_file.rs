@@ -180,12 +180,20 @@ fn table_of<'a>(entry: &'a Entry, key: &str) -> Result<&'a Table, Error> {
 
 fn protected(entry: &Entry) -> Result<Vec<String>, Error> {
     let paths = texts_of(entry, "protected")?;
-    if let Some(path) = paths.iter().find(|path| path.starts_with('/')) {
-        let relative = path.trim_start_matches('/');
+    // Two ways to write one path would let a path look protected when it is
+    // not, so there is only one way.
+    let from_root = |path: &&String| {
+        let parts = path.strip_suffix('/').unwrap_or(path).split('/');
+        !path.is_empty()
+            && parts
+                .into_iter()
+                .all(|part| !matches!(part, "" | "." | ".."))
+    };
+    if let Some(path) = paths.iter().find(|path| !from_root(path)) {
         return Err(error(
             entry,
             format!(
-                "`{path}` in `protected` starts with `/`. A protected path is relative to the root of the repository: write `{relative}`"
+                "`{path}` in `protected` must be a path from the root of the repository, with no `/` at its start and no `.` or `..` part, such as `SPEC.md` or `docs/`"
             ),
         ));
     }
@@ -279,14 +287,9 @@ fn scores(entry: &Entry) -> Result<Vec<Score>, Error> {
                 key => return Err(unknown(entry, &format!("score.{key}"), "name and better")),
             }
         }
-        let missing = |key: &str| {
-            let line = table.entries.first().map_or(entry.line, |first| first.line);
-            Error {
-                line: Some(line),
-                message: format!(
-                    "this score has no `{key}`. Each score has a `name` and a `better`"
-                ),
-            }
+        let missing = |key: &str| Error {
+            line: Some(table.line),
+            message: format!("this score has no `{key}`. Each score has a `name` and a `better`"),
         };
         let (name, name_entry) = name.ok_or_else(|| missing("name"))?;
         let better = better.ok_or_else(|| missing("better"))?;
@@ -512,7 +515,13 @@ mod tests {
         );
         let error = error_of(&format!("{CHECK}[[score]]\nname = \"spec\"\n"));
         assert!(
-            error.starts_with("lira.toml:3: this score has no `better`"),
+            error.starts_with("lira.toml:2: this score has no `better`"),
+            "{error}"
+        );
+        let two = "[[score]]\nname = \"a\"\nbetter = \"lower\"\n[[score]]\n";
+        let error = error_of(&format!("{CHECK}{two}"));
+        assert!(
+            error.starts_with("lira.toml:5: this score has no `name`"),
             "{error}"
         );
         let error = error_of(&format!("{CHECK}[[score]]\nbetter = \"lower\"\n"));
@@ -604,12 +613,12 @@ mod tests {
         assert!(!file.protects("docs/SPEC.md"));
         assert!(file.protects("xtask/src/main.rs"));
         assert!(!file.protects("crates/xtask/src/main.rs"));
-        let error = error_of(&format!("{CHECK}protected = [\"/SPEC.md\"]\n"));
-        assert!(
-            error.starts_with("lira.toml:2: `/SPEC.md` in `protected` starts with `/`"),
-            "{error}"
-        );
-        assert!(error.ends_with("write `SPEC.md`"), "{error}");
+        for wrong in ["/SPEC.md", "./docs/", "docs/../SPEC.md", "docs//a.md", ""] {
+            let error = error_of(&format!("{CHECK}protected = [\"{wrong}\"]\n"));
+            let start =
+                format!("lira.toml:2: `{wrong}` in `protected` must be a path from the root");
+            assert!(error.starts_with(&start), "{error}");
+        }
     }
 
     // spec(Protected paths): `lira.toml` is always a protected path.

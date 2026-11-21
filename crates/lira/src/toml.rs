@@ -17,6 +17,17 @@ pub enum Value {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Table {
     pub entries: Vec<Entry>,
+    /// The line of the header or the key that made the table. The root has 0.
+    pub line: usize,
+}
+
+impl Table {
+    fn at(line: usize) -> Table {
+        Table {
+            entries: Vec::new(),
+            line,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +51,7 @@ pub fn read(text: &str) -> Result<Table, Error> {
         at: 0,
         line: 1,
     };
+    reader.refuse_control_characters()?;
     let mut root = Table::default();
     let mut open = Open::Root;
     loop {
@@ -99,7 +111,7 @@ fn insert(table: &mut Table, path: &[String], value: Value, line: usize) -> Resu
             None => {
                 table.entries.push(Entry {
                     key: key.clone(),
-                    value: Value::Table(Table::default()),
+                    value: Value::Table(Table::at(line)),
                     line,
                 });
                 table.entries.len() - 1
@@ -153,6 +165,27 @@ impl Reader {
         self.error(&format!(
             "{what} is a form of TOML that the Lira file can't have. {write}"
         ))
+    }
+
+    /// TOML has no control character but the tab and the end of a line, which
+    /// is `\n` or `\r\n`.
+    fn refuse_control_characters(&self) -> Result<(), Error> {
+        let mut line = 1;
+        for (index, c) in self.chars.iter().enumerate() {
+            let end_of_line =
+                *c == '\n' || (*c == '\r' && self.chars.get(index + 1) == Some(&'\n'));
+            if c.is_control() && *c != '\t' && !end_of_line {
+                let message = format!(
+                    "there is a control character here (U+{:04X}), which TOML can't have. Remove it",
+                    *c as u32
+                );
+                return Err(Error { line, message });
+            }
+            if *c == '\n' {
+                line += 1;
+            }
+        }
+        Ok(())
     }
 
     fn skip_spaces(&mut self) {
@@ -252,13 +285,13 @@ impl Reader {
         let index = root.entries.iter().position(|entry| entry.key == name);
         let existing = index.map(|index| &mut root.entries[index].value);
         match (existing, list) {
-            (Some(Value::Tables(tables)), true) => tables.push(Table::default()),
+            (Some(Value::Tables(tables)), true) => tables.push(Table::at(line)),
             (None, _) => root.entries.push(Entry {
                 key: name.clone(),
                 value: if list {
-                    Value::Tables(vec![Table::default()])
+                    Value::Tables(vec![Table::at(line)])
                 } else {
-                    Value::Table(Table::default())
+                    Value::Table(Table::at(line))
                 },
                 line,
             }),
@@ -355,7 +388,7 @@ impl Reader {
         };
         let end = (self.at + digits).min(self.chars.len());
         let hex: String = self.chars[self.at..end].iter().collect();
-        let character = (hex.len() == digits)
+        let character = (hex.len() == digits && hex.chars().all(|c| c.is_ascii_hexdigit()))
             .then(|| u32::from_str_radix(&hex, 16).ok())
             .flatten()
             .and_then(char::from_u32);
@@ -374,6 +407,9 @@ impl Reader {
                     return Ok(Value::List(values));
                 }
                 None => return Err(self.error("the list has no `]` at its end")),
+                Some('[') => {
+                    return Err(self.other_form("A list in a list", "Write one list of texts."));
+                }
                 Some(_) => values.push(self.value()?),
             }
             self.skip_blank_lines();
@@ -385,31 +421,27 @@ impl Reader {
         }
     }
 
+    /// Reads a whole number: a sign or none, then digits, with one `_`
+    /// between two digits where the file has it, and no `0` at the start.
     fn number(&mut self) -> Result<Value, Error> {
         let start = self.at;
-        if matches!(self.peek(), Some('+' | '-')) {
-            self.at += 1;
-        }
-        while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
-            self.at += 1;
-        }
-        if self
+        while self
             .peek()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '+'))
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '_' | '.' | ':'))
         {
-            return Err(self.other_form(
-                "A number that is not a whole number, and a date,",
-                "Write a whole number, or a text in quotes.",
-            ));
+            self.at += 1;
         }
-        let digits: String = self.chars[start..self.at]
-            .iter()
-            .filter(|c| **c != '_')
-            .collect();
-        digits
-            .parse()
-            .map(Value::Number)
-            .map_err(|_| self.error(&format!("`{digits}` is not a number that Lira can read")))
+        let word: String = self.chars[start..self.at].iter().collect();
+        let digits = word.strip_prefix(['+', '-']).unwrap_or(&word);
+        let groups = |group: &str| !group.is_empty() && group.bytes().all(|b| b.is_ascii_digit());
+        let whole = digits.split('_').all(groups) && (digits == "0" || !digits.starts_with('0'));
+        let number = whole.then(|| word.replace('_', "").parse().ok()).flatten();
+        number.map(Value::Number).ok_or_else(|| {
+            self.other_form(
+                &format!("`{word}` is not a whole number that Lira can read. A number with a point, a date and a time"),
+                "Write a whole number, or a text in quotes.",
+            )
+        })
     }
 }
 
@@ -501,6 +533,73 @@ mod tests {
         };
         assert_eq!(scores.len(), 2);
         assert_eq!(entries(&scores[1]), [("name", &text("b"))]);
+    }
+
+    #[test]
+    fn a_number_that_toml_does_not_have_is_an_error() {
+        for wrong in [
+            "01",
+            "1_",
+            "1__0",
+            "+_1",
+            "_1",
+            "-",
+            "0x10",
+            "99999999999999999999",
+        ] {
+            assert_eq!(error(&format!("a = 1\nb = {wrong}\n")).0, 2, "{wrong}");
+        }
+        assert_eq!(
+            read("a = 0\nb = -0\n").unwrap().entries[1].value,
+            Value::Number(0)
+        );
+    }
+
+    #[test]
+    fn an_escape_needs_its_count_of_hex_digits() {
+        for wrong in [r#""\u+041""#, r#""\U+0000041""#, r#""\u41""#, r#""\uD800""#] {
+            assert_eq!(error(&format!("a = 1\nb = {wrong}\n")).0, 2, "{wrong}");
+        }
+    }
+
+    #[test]
+    fn a_control_character_is_an_error_that_names_the_line() {
+        for wrong in [
+            "b = \"x\0y\"",
+            "b = 'x\u{1b}y'",
+            "b = 1 # x\0y",
+            "b = 1\rc = 2",
+            "b = \"x\ry\"",
+        ] {
+            let (line, message) = error(&format!("a = 1\n{wrong}\n"));
+            assert_eq!(line, 2, "{wrong:?}");
+            assert!(message.contains("control character"), "{message}");
+        }
+        let root = read("a = 1\r\nb = \"x\ty\"\r\n").unwrap();
+        assert_eq!(root.entries[1].value, text("x\ty"));
+        assert_eq!(root.entries[1].line, 2);
+    }
+
+    #[test]
+    fn a_list_in_a_list_is_an_error_however_deep() {
+        let (line, message) = error("a = 1\nb = [[\"x\"]]\n");
+        assert_eq!(line, 2);
+        assert!(message.contains("form of TOML"), "{message}");
+        let deep = format!("a = {}{}\n", "[".repeat(100_000), "]".repeat(100_000));
+        assert_eq!(error(&deep).0, 1);
+    }
+
+    #[test]
+    fn a_table_knows_the_line_of_its_header() {
+        let root = read("a = 1\n[[s]]\nb = 1\n\n[[s]]\n[t]\n").unwrap();
+        let Value::Tables(tables) = &root.entries[1].value else {
+            panic!("s is a list of tables");
+        };
+        assert_eq!([tables[0].line, tables[1].line], [2, 5]);
+        let Value::Table(table) = &root.entries[2].value else {
+            panic!("t is a table");
+        };
+        assert_eq!(table.line, 6);
     }
 
     #[test]
