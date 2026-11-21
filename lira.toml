@@ -1,0 +1,19 @@
+# The Lira file of the Lira repository.
+# SPEC.md, "Format of the Lira file", defines each key.
+
+check = "cargo xtask check"
+
+# Changes to these paths always need your review.
+# lira.toml and .github/ are always protected, and need no line here.
+protected = [
+  "SPEC.md",
+  "WORDS.md",
+  "xtask/",
+]
+
+[[score]]
+name = "spec"      # promises in SPEC.md that a passing test quotes
+better = "higher"
+
+[planner]
+on = false
