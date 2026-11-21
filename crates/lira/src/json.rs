@@ -50,6 +50,9 @@ impl fmt::Display for Error {
 
 /// The deepest that lists and objects can be inside each other. A deeper
 /// text is an error, so that no text can use up the stack.
+///
+/// The limit is on what Lira reads. A value that Lira builds in its own code
+/// has no test of its depth: the writer goes as deep as the value does.
 const DEEPEST: usize = 128;
 
 /// Reads one value from the whole text.
