@@ -1,6 +1,7 @@
 //! The Lira file: `lira.toml` at the root of a repository. SPEC.md, "Format
 //! of the Lira file", defines each key.
 
+use crate::scores;
 use crate::toml::{self, Entry, Table, Value};
 use std::fmt;
 
@@ -282,7 +283,14 @@ fn scores(entry: &Entry) -> Result<Vec<Score>, Error> {
         let mut better = None;
         for entry in &table.entries {
             match entry.key.as_str() {
-                "name" => name = Some((text_of(entry, "name")?, entry)),
+                "name" => {
+                    let text = text_of(entry, "name")?;
+                    if !scores::name_fits(&text) {
+                        let message = "the `name` of a score can't be empty, start or end with a space, or have a line end in it";
+                        return Err(error(entry, message.to_string()));
+                    }
+                    name = Some((text, entry));
+                }
                 "better" => better = Some(better_of(entry)?),
                 key => return Err(unknown(entry, &format!("score.{key}"), "name and better")),
             }
@@ -524,6 +532,23 @@ mod tests {
         );
         let error = error_of(&format!("{CHECK}[[score]]\nbetter = \"lower\"\n"));
         assert!(error.contains("this score has no `name`"), "{error}");
+    }
+
+    #[test]
+    fn the_name_of_a_score_is_one_that_a_score_line_can_have() {
+        let score =
+            |name: &str| format!("{CHECK}[[score]]\nname = \"{name}\"\nbetter = \"lower\"\n");
+        assert_eq!(
+            read(&score("test coverage")).scores[0].name,
+            "test coverage"
+        );
+        for wrong in ["", " spec", "spec ", "two\\nlines"] {
+            let error = error_of(&score(wrong));
+            assert!(
+                error.starts_with("lira.toml:3: the `name` of a score can't be empty"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
