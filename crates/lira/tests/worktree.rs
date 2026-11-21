@@ -313,6 +313,10 @@ fn a_name_that_git_does_not_allow_for_a_branch_is_an_error() {
         "../../outside",
         "a.lock",
         "HEAD",
+        // git can make these branches, and can't make a worktree of them:
+        // it reads the first as `HEAD`, and the second as a commit.
+        "@",
+        "1111111111111111111111111111111111111111",
     ] {
         let error = repository.make(branch).unwrap_err();
         assert!(
@@ -656,4 +660,55 @@ fn a_setup_command_that_moves_the_worktree_and_fails_leaves_no_branch() {
     assert!(!repository.has_branch("feat/moves"));
     let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
     assert!(!listed.contains("feat/moves"), "{listed}");
+}
+
+/// A `setup` command for the branch `feat/bad` only. It moves its own
+/// worktree away with git, runs `then`, and fails.
+fn setup_that_moves(repository: &Repository, then: &str) {
+    let script = format!(
+        "case \"$PWD\" in\n*/feat/bad)\n  git worktree move \"$PWD\" \"$PWD.moved\" || exit 1\n  {then}\n  exit 7 ;;\nesac\n"
+    );
+    repository.push("setup.sh", &script);
+    repository.push("lira.toml", &format!("{CHECK}setup = \"sh setup.sh\"\n"));
+}
+
+#[test]
+fn a_setup_command_that_moves_the_worktree_with_git_and_fails_leaves_nothing() {
+    let repository = Repository::new("setup-git-moves", CHECK);
+    setup_that_moves(&repository, "true");
+    repository.make("feat/bad").unwrap_err();
+    assert!(!repository.worktree("feat/bad").exists());
+    assert!(!repository.worktree("feat/bad.moved").exists());
+    assert!(!repository.has_branch("feat/bad"));
+    let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("feat/bad"), "{listed}");
+}
+
+#[test]
+fn lira_removes_no_worktree_that_it_did_not_make_just_now() {
+    // The command puts another worktree where the new one was. That
+    // worktree has a file that no commit has.
+    let repository = Repository::new("setup-swaps", CHECK);
+    setup_that_moves(
+        &repository,
+        "git -C \"$PWD.moved\" worktree move \"$(dirname \"$PWD\")/keep\" \"$PWD\" || exit 1",
+    );
+    let keep = repository.make("feat/keep").unwrap();
+    fs::write(keep.join("valuable.txt"), "valuable\n").unwrap();
+
+    let error = repository.make("feat/bad").unwrap_err();
+    assert!(error.contains("exit status: 7"), "{error}");
+    let moved_here = repository.worktree("feat/bad");
+    assert_eq!(
+        fs::read_to_string(moved_here.join("valuable.txt")).unwrap(),
+        "valuable\n"
+    );
+    assert_eq!(
+        git_ok(&moved_here, &["symbolic-ref", "HEAD"]),
+        "refs/heads/feat/keep"
+    );
+    assert!(repository.has_branch("feat/keep"));
+    // What Lira made just now is gone.
+    assert!(!repository.worktree("feat/bad.moved").exists());
+    assert!(!repository.has_branch("feat/bad"));
 }

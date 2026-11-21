@@ -67,6 +67,8 @@ impl Keeper {
             let mut part = [0; 4096];
             loop {
                 match pipe.read(&mut part) {
+                    // A signal stopped the read. The pipe is still open.
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Ok(0) | Err(_) => break,
                     Ok(count) => {
                         let Ok(mut kept) = writer.lock() else { break };

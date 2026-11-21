@@ -3,7 +3,9 @@
 use crate::lira_file::{self, LiraFile};
 use crate::process;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Runs git in `folder`. The inner result is what git printed, or what git
@@ -227,6 +229,14 @@ pub fn allows_branch(folder: &Path, branch: &str) -> Result<bool, String> {
     if branch.starts_with('-') || branch == "HEAD" {
         return Ok(false);
     }
+    // git can make these two kinds of branch, and can't make a worktree of
+    // them: it reads `@` as `HEAD`, and a name like that of a commit as a
+    // commit.
+    let like_a_commit =
+        matches!(branch.len(), 40 | 64) && branch.chars().all(|c| c.is_ascii_hexdigit());
+    if branch == "@" || like_a_commit {
+        return Ok(false);
+    }
     let full = format!("refs/heads/{branch}");
     Ok(git(folder, &["check-ref-format", &full])?.is_some())
 }
@@ -263,35 +273,36 @@ pub fn add_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), 
     })
 }
 
-/// Removes a worktree and its branch, with all that is in them. It is for
-/// a folder and a branch that Lira made just now, and no other. When a part
-/// can't be removed, the error says why.
+/// Removes the worktree of a branch and the branch, with all that is in
+/// them. It is for a branch and a folder that Lira made just now, and no
+/// other. When a part can't be removed, the error says why.
+///
+/// The branch says which worktree it is, and the folder does not: a
+/// command can move a worktree, and put another one in its place.
 pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), String> {
     let mut wrote = Vec::new();
-    // git removes its record of the worktree, also when the folder is gone.
-    let args = [
-        OsStr::new("worktree"),
-        OsStr::new("remove"),
-        OsStr::new("--force"),
-        worktree.as_os_str(),
-    ];
-    let removed = run(folder, &args);
-    let listed = run(folder, &["worktree", "list", "--porcelain"])?;
-    let line = format!("branch refs/heads/{branch}");
-    if let Err(error) = removed
-        && listed.lines().any(|listed| listed == line)
-    {
-        wrote.push(error);
+    if let Some(now) = worktree_of(folder, branch)? {
+        // git removes its record of the worktree, also when the folder is
+        // gone.
+        let args = [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+            now.as_os_str(),
+        ];
+        if let Err(error) = run(folder, &args) {
+            wrote.push(error);
+        }
     }
     // When git had no record of the worktree, the empty folder that Lira
-    // made is still there.
-    if worktree.symlink_metadata().is_ok()
-        && let Err(error) = std::fs::remove_dir(worktree)
-    {
-        wrote.push(format!(
-            "Lira can't remove the folder `{}`: {error}",
+    // made is still there. `remove_dir` removes an empty folder only.
+    match std::fs::remove_dir(worktree) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => wrote.push(format!(
+            "Lira left the folder `{}`: {error}",
             worktree.display()
-        ));
+        )),
     }
     if has_branch(folder, branch)?
         && let Err(error) = run(folder, &["branch", "--quiet", "-D", branch])
@@ -305,9 +316,57 @@ pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(
     }
 }
 
+/// The folder of the worktree that has this branch, as git has it now.
+fn worktree_of(folder: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+    let mut command = Command::new("git");
+    command
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .current_dir(folder);
+    let ended = process::run(command, false)
+        .map_err(|e| format!("couldn't run `git`: {e}. Install git, or add it to PATH"))?;
+    if !ended.status.success() {
+        return Err(String::from_utf8_lossy(&ended.errors).trim().to_string());
+    }
+    Ok(worktree_with(&ended.output, branch))
+}
+
+/// Finds the worktree of a branch in what `git worktree list --porcelain
+/// -z` prints: a `worktree <folder>` and then what is true for it, each
+/// with a zero byte after it. A folder can have a name that is not UTF-8.
+fn worktree_with(listed: &[u8], branch: &str) -> Option<PathBuf> {
+    let wanted = format!("branch refs/heads/{branch}");
+    let mut now = None;
+    for part in listed.split(|byte| *byte == 0) {
+        if let Some(path) = part.strip_prefix(b"worktree ") {
+            now = Some(PathBuf::from(OsStr::from_bytes(path)));
+        } else if part == wanted.as_bytes() {
+            return now;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_worktree_of_a_branch() {
+        let listed = b"worktree /w/main\0HEAD 1111\0branch refs/heads/main\0\0\
+            worktree /w/data-\xff/feat\0HEAD 2222\0branch refs/heads/feat/a\0\0\
+            worktree /w/loose\0HEAD 3333\0detached\0\0";
+        assert_eq!(
+            worktree_with(listed, "main"),
+            Some(PathBuf::from("/w/main"))
+        );
+        assert_eq!(
+            worktree_with(listed, "feat/a"),
+            Some(PathBuf::from(OsStr::from_bytes(b"/w/data-\xff/feat")))
+        );
+        assert_eq!(worktree_with(listed, "feat"), None);
+        assert_eq!(worktree_with(listed, "a"), None);
+        assert_eq!(worktree_with(b"", "main"), None);
+    }
 
     #[test]
     fn the_repository_is_the_last_two_parts_of_the_address() {
