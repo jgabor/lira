@@ -406,6 +406,10 @@ mod tests {
         assert!(error_of("").contains("there is no `check`"));
     }
 
+    // A row of the table of keys is a promise about what Lira does with the
+    // key. The tests below quote a row only when Lira does that already. The
+    // other rows have a test for the type of the key, and no quote yet.
+
     // spec(Format of the Lira file): | `check` | Text | The check command. It is required. |
     #[test]
     fn check_is_a_text() {
@@ -417,7 +421,6 @@ mod tests {
         );
     }
 
-    // spec(Format of the Lira file): | `setup` | Text | A command that Lira runs in each new worktree. |
     #[test]
     fn setup_is_a_text() {
         assert_eq!(read(CHECK).setup, None);
@@ -445,7 +448,6 @@ mod tests {
         }
     }
 
-    // spec(Format of the Lira file): | `agents` | Number | The agent limit for this repository. |
     #[test]
     fn agents_is_a_number() {
         assert_eq!(read(CHECK).agents, None);
@@ -456,9 +458,6 @@ mod tests {
         }
     }
 
-    // spec(Format of the Lira file): | `models.agent` | Text | The AI model for the agent. |
-    // spec(Format of the Lira file): | `models.planner` | Text | The AI model for the Planner. |
-    // spec(Format of the Lira file): | `models.reviewer` | Text | The AI model for the Reviewer. |
     #[test]
     fn each_model_is_a_text() {
         assert_eq!(read(CHECK).models, Models::default());
@@ -486,7 +485,6 @@ mod tests {
         assert!(error.contains("`models` must be a table"), "{error}");
     }
 
-    // spec(Format of the Lira file): | `reviewer.harnesses` | List of text | The harnesses for the Reviewer, in order of preference. |
     #[test]
     fn the_harnesses_of_the_reviewer_are_a_list_of_text_in_order() {
         assert_eq!(read(CHECK).reviewer.harnesses, texts(&[]));
@@ -528,7 +526,6 @@ mod tests {
         assert!(error.contains("this score has no `name`"), "{error}");
     }
 
-    // spec(Format of the Lira file): | `planner.on` | True or false | If the Planner runs. |
     #[test]
     fn planner_on_is_true_or_false() {
         assert_eq!(read(CHECK).planner.on, None);
@@ -547,7 +544,6 @@ mod tests {
         );
     }
 
-    // spec(Format of the Lira file): | `planner.instructions` | Text | The path of the Planner's instructions. |
     #[test]
     fn the_instructions_of_the_planner_are_a_text() {
         assert_eq!(read(CHECK).planner.instructions, None);

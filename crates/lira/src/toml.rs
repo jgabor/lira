@@ -44,6 +44,9 @@ pub struct Error {
     pub message: String,
 }
 
+/// The largest count of keys with dots between them, such as `a.b.c.d`.
+const MOST_KEYS: usize = 4;
+
 /// Reads a document into its root table.
 pub fn read(text: &str) -> Result<Table, Error> {
     let mut reader = Reader {
@@ -167,14 +170,15 @@ impl Reader {
         ))
     }
 
-    /// TOML has no control character but the tab and the end of a line, which
-    /// is `\n` or `\r\n`.
+    /// TOML has no character below U+0020, and no U+007F, but the tab and the
+    /// end of a line, which is `\n` or `\r\n`.
     fn refuse_control_characters(&self) -> Result<(), Error> {
         let mut line = 1;
         for (index, c) in self.chars.iter().enumerate() {
             let end_of_line =
                 *c == '\n' || (*c == '\r' && self.chars.get(index + 1) == Some(&'\n'));
-            if c.is_control() && *c != '\t' && !end_of_line {
+            let control = matches!(*c, '\0'..='\u{1f}' | '\u{7f}');
+            if control && *c != '\t' && !end_of_line {
                 let message = format!(
                     "there is a control character here (U+{:04X}), which TOML can't have. Remove it",
                     *c as u32
@@ -250,12 +254,19 @@ impl Reader {
         Ok(self.chars[start..self.at].iter().collect())
     }
 
+    /// Reads a key, or keys with dots between them. The format has two keys
+    /// at most, and a long row of them would make tables too deep to hold.
     fn key_path(&mut self) -> Result<Vec<String>, Error> {
         let mut path = vec![self.key()?];
         loop {
             self.skip_spaces();
             if self.peek() != Some('.') {
                 return Ok(path);
+            }
+            if path.len() == MOST_KEYS {
+                return Err(self.error(&format!(
+                    "a key has {MOST_KEYS} parts at most, with a dot between them"
+                )));
             }
             self.at += 1;
             self.skip_spaces();
@@ -438,8 +449,8 @@ impl Reader {
         let number = whole.then(|| word.replace('_', "").parse().ok()).flatten();
         number.map(Value::Number).ok_or_else(|| {
             self.other_form(
-                &format!("`{word}` is not a whole number that Lira can read. A number with a point, a date and a time"),
-                "Write a whole number, or a text in quotes.",
+                &format!("`{word}` is not a whole number in decimal. Each other number, a date and a time"),
+                "Write a whole number such as `12`, or a text in quotes.",
             )
         })
     }
@@ -578,6 +589,20 @@ mod tests {
         let root = read("a = 1\r\nb = \"x\ty\"\r\n").unwrap();
         assert_eq!(root.entries[1].value, text("x\ty"));
         assert_eq!(root.entries[1].line, 2);
+    }
+
+    #[test]
+    fn a_key_with_too_many_dots_is_an_error_however_long() {
+        assert!(read("a.b.c.d = 1\n").is_ok());
+        assert_eq!(error("a = 1\nb.c.d.e.f = 1\n").0, 2);
+        let long = format!("{}last = 1\n", "a.".repeat(100_000));
+        assert_eq!(error(&long).0, 1);
+    }
+
+    #[test]
+    fn a_character_above_the_ascii_controls_is_text() {
+        let root = read("a = \"x\u{85}y \u{9f} é\" # \u{80}\n").unwrap();
+        assert_eq!(root.entries[0].value, text("x\u{85}y \u{9f} é"));
     }
 
     #[test]
