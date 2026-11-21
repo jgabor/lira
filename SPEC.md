@@ -131,6 +131,7 @@ Lira does these steps for each issue, in this order.
 ## Check
 
 - Lira runs the check command in the worktree of the change.
+- Lira runs the check command with `sh -c`.
 - The check passes when its exit status is 0.
 - The check fails when its exit status is not 0.
 - Lira sets `LIRA_SCORES` to the path of an empty file before it runs the check.
@@ -142,6 +143,7 @@ Lira does these steps for each issue, in this order.
 - The check writes one line for each score to the file that `LIRA_SCORES` names.
 - A score line is `<name> = <number>`.
 - A score line with a name that the Lira file does not have is an error.
+- Two score lines with the same name are an error.
 - A score that the check did not write has no value, and it is not compared.
 - A score got worse when its value moved against its `better` from the value on the main branch.
 - At merge, Lira writes the scores in a comment on the pull request.
