@@ -5,7 +5,6 @@ use crate::lira_file::{self, LiraFile, Score};
 use crate::scores::Scores;
 use crate::{git, github};
 use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,25 +63,24 @@ fn empty_file() -> Result<PathBuf, String> {
 /// `lira check`: runs the check command of the Lira file in `folder`, and
 /// prints each score. Returns true when the check passes.
 pub fn command(folder: &Path) -> Result<bool, String> {
-    let text = match fs::read_to_string(folder.join(lira_file::NAME)) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Err(format!(
-                "there is no `{}` in this folder. Run `lira check` in the root of a repository that has one",
-                lira_file::NAME
-            ));
-        }
-        Err(e) => return Err(format!("couldn't read `{}`: {e}", lira_file::NAME)),
-    };
-    let file = LiraFile::read(&text).map_err(|e| e.to_string())?;
     let main = git::main_branch(folder)?;
+    // Lira reads the Lira file from the main branch, so that a change can't
+    // replace its own check.
+    let text = git::file_on(folder, &main, lira_file::NAME)?.ok_or_else(|| {
+        format!(
+            "the main branch, `{main}`, has no `{}`. Lira reads the Lira file from the main branch, so merge the pull request that adds it first",
+            lira_file::NAME
+        )
+    })?;
+    let file = LiraFile::read(&text).map_err(|e| e.to_string())?;
     let base = git::base(folder, &main)?;
     // A repository with no scores needs nothing from GitHub. Lira asks GitHub
     // before the check runs, so that a missing login stops it at once.
     let on_main = if file.scores.is_empty() {
         Scores::default()
     } else {
-        github::main_scores(folder, main.strip_prefix("origin/").unwrap_or(&main))?
+        let name = main.split_once('/').map_or(main.as_str(), |(_, name)| name);
+        github::main_scores(folder, name)?
     };
     let outcome = run(&file, folder, &base)?;
     for line in report(&file.scores, &outcome.scores, &on_main) {
