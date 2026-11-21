@@ -6,5 +6,7 @@ mod github;
 pub mod harness;
 pub mod json;
 pub mod lira_file;
+mod process;
 pub mod scores;
 mod toml;
+pub mod worktree;
