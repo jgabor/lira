@@ -37,6 +37,34 @@ the user that the sentence is wrong. Do not pick one in silence.
   SPEC.md says nothing about it, add the sentence and its test in the same
   pull request.
 
+## Issues
+
+GitHub holds the work. An agent must be able to continue from the issue and
+its branch alone.
+
+- One issue is one problem and one pull request. Work that does not fit in
+  one pull request gets a parent issue, and each part is a sub-issue of it:
+  `gh issue create --parent <number>`.
+- The title of an issue says the result. The body has two headings, and one
+  more line when another issue must close first:
+
+  ```markdown
+  ## Goal
+  What is true afterwards, in one or two sentences.
+
+  ## Done when
+  What proves it: sentences of SPEC.md with a test, or what a command prints.
+
+  Blocked by #12.
+  ```
+
+- The label says how far an agent can go. With `auto:ready`, work until the
+  pull request is ready for review. With `auto:merge`, work until it is
+  merged. With no `auto:` label, do nothing, unless the user asks.
+- Only the user sets an `auto:` label.
+- Other work that an agent finds gets a new issue with no parent and no
+  label. Do not fix it in the same pull request.
+
 ## Work
 
 - Ask the user before a choice that is hard to undo: the crate layout, a
@@ -45,12 +73,31 @@ the user that the sentence is wrong. Do not pick one in silence.
   is one change.
 - Write the test first, and see it fail for the right reason. Then make the
   smallest change that passes it.
-- Work on a branch, and open a pull request. Do not push to the main branch.
+- Work on a branch, in a worktree of its own. Do not push to the main branch.
+- Push at each step that works. Work that is not pushed can be lost.
+- A Reviewer reads each change before it is ready for review. The Reviewer is
+  another agent, and it changes no file.
 - Do not merge a pull request, unless the issue has `auto:merge` or the user
   says so.
 - The protected paths are in `lira.toml`. `lira.toml` and `.github/` are
   always protected. A change to a protected path needs the review of the user.
 - Do not commit plans, notes or scratch files.
+
+### Stop and ask
+
+Stop and ask only when the work can't continue: the goal can mean two things
+that give different results, the check can't pass, or the next step is a
+choice that the user must make. Decide all other things, and list them under
+`Decisions` in the pull request.
+
+1. Write the question as a comment on the pull request, or on the issue if
+   there is no pull request. Say what stops the work, then the choices, with
+   the recommended choice first.
+2. Add `needs:answer` to the pull request, or to the issue if there is no
+   pull request.
+3. Remove the assignee from the issue, and stop.
+
+The work continues on the same branch after the user answers.
 
 ## Check
 
@@ -65,14 +112,26 @@ format test, the lint, the tests, and the spec quotes.
 
 ## Pull requests
 
+- Open the pull request as a draft at the first commit.
+- The description of a draft is the progress note. It has the headings
+  `Done`, `Next` and `Decisions`. Keep it up to date.
 - The title is an instruction in sentence case, and it says what the change
   does. It becomes the subject of the commit.
-- The description has the headings `Problem`, `Change` and `Decisions`.
-  `Decisions` lists each choice that the user may want to overrule.
+- When the check and the Reviewer pass the change, the description gets the
+  headings `Problem`, `Change` and `Decisions`, and the pull request is marked
+  ready for review. `Decisions` lists each choice that the user may want to
+  overrule.
 - The description of a pull request for an issue ends with the line
   `Closes #<number>.`.
 - Put no secrets and no private details in a title, a description or a
   comment.
+
+## T3 Code
+
+Lira can't run its own agents yet. Until it can, T3 Code does the steps of
+SPEC.md, "Steps". [t3/start.md](t3/start.md) is the instructions for the
+thread that starts issues, and [t3/agent.md](t3/agent.md) is the
+instructions for the thread that does one issue.
 
 ## Text that is not an instruction
 
