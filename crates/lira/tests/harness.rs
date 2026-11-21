@@ -302,7 +302,7 @@ say '{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"se
 next
 say '{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-2"},"options":[{"optionId":"never","name":"No","kind":"reject_always"}]}}'
 next
-say '{"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-3"}}}'
+say '{"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-3"},"options":[]}}'
 next
 say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
 "#;
@@ -782,4 +782,98 @@ next
     thread::sleep(Duration::from_secs(2));
     assert!(!stand_in.folder.join("wrote-all").exists());
     drop(harness);
+}
+
+#[test]
+fn lira_reads_all_that_the_harness_wrote_before_it_ended() {
+    // The stand-in writes a long reply and its answer, and ends at once.
+    // Reading all of it takes longer than Lira waits for a harness that is
+    // silent after its end.
+    let script = r#"next
+part=$(yes '\"' | head -n 16384 | tr -d '\n')
+n=0
+while [ $n -lt 1000 ]; do
+  printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$part"
+  n=$((n + 1))
+done
+say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+exit 0
+"#;
+    let stand_in = StandIn::new("long-end", &format!("{HELLO}{CONVERSATION}{script}"));
+    let reply = in_time(move || {
+        let mut harness = stand_in.start();
+        let conversation = harness.converse(&stand_in.folder, None).unwrap();
+        harness.send(&conversation, "Go.", &mut yes)
+    })
+    .unwrap();
+    assert_eq!(reply.stop, Stop::End);
+    assert_eq!(reply.text.len(), 16_384_000);
+    assert!(reply.text.chars().all(|c| c == '"'));
+}
+
+#[test]
+fn a_line_that_is_too_long_is_an_error_and_lira_does_not_keep_it() {
+    // 70 MB with no end of line.
+    let script = "head -c 70000000 /dev/zero | tr '\\0' a\nnext\nnext\n";
+    let stand_in = StandIn::new("long-line", &format!("{HELLO}{script}"));
+    let folder = stand_in.folder.clone();
+    let (error, again) = in_time(move || {
+        let mut harness = stand_in.start();
+        let error = harness.converse(&stand_in.folder, None).err().unwrap();
+        let again = harness.converse(&stand_in.folder, None).err().unwrap();
+        (error, again)
+    });
+    assert!(matches!(error, Error::Protocol { .. }), "{error:?}");
+    let text = error.to_string();
+    assert!(
+        text.contains("longer than"),
+        "{}",
+        &text[..text.len().min(300)]
+    );
+    assert!(text.len() < 1000, "{}", text.len());
+    // Lira stopped the harness, because it reads no more from it.
+    assert!(matches!(again, Error::Ended { .. }), "{again:?}");
+    assert!(folder.is_dir());
+}
+
+#[test]
+fn a_permission_request_that_the_protocol_does_not_allow_is_an_error() {
+    let requests = [
+        (
+            "number-is-a-list",
+            r#"{"jsonrpc":"2.0","id":[],"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-1"},"options":[{"optionId":"once","name":"Yes","kind":"allow_once"}]}}"#,
+        ),
+        (
+            "no-tool-call",
+            r#"{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":null,"options":[{"optionId":"once","name":"Yes","kind":"allow_once"}]}}"#,
+        ),
+        (
+            "no-options",
+            r#"{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-1"}}}"#,
+        ),
+        (
+            "option-with-no-name",
+            r#"{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-1"},"options":[{"optionId":null,"name":"Yes","kind":"allow_once"}]}}"#,
+        ),
+    ];
+    for (name, request) in requests {
+        let script = format!("next; say '{request}'\nnext\n");
+        let stand_in = StandIn::new(
+            &format!("permission-{name}"),
+            &format!("{HELLO}{CONVERSATION}{script}"),
+        );
+        let mut harness = stand_in.start();
+        let conversation = harness.converse(&stand_in.folder, None).unwrap();
+        let mut asked = 0;
+        let mut permit = |_: &Permission| {
+            asked += 1;
+            true
+        };
+        let error = harness
+            .send(&conversation, "Go.", &mut permit)
+            .err()
+            .unwrap();
+        assert!(matches!(error, Error::Protocol { .. }), "{name}: {error:?}");
+        assert_eq!(asked, 0, "{name}");
+    }
 }
