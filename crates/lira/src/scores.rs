@@ -134,7 +134,7 @@ fn score_line(line: &str) -> Option<(&str, Number)> {
 /// True when a score line can have this name: it has no space at an end, and
 /// no line end in it.
 pub fn name_fits(name: &str) -> bool {
-    !name.is_empty() && name.trim() == name && !name.contains(char::is_control)
+    !name.is_empty() && name.trim() == name && !name.contains(['\n', '\r'])
 }
 
 #[cfg(test)]
@@ -179,6 +179,7 @@ mod tests {
         let scores = Scores::read("test coverage = 5\na=b = 2\n").unwrap();
         assert_eq!(scores.names().collect::<Vec<_>>(), ["test coverage", "a=b"]);
         assert!(name_fits("test coverage"));
+        assert!(name_fits("elapsed\tseconds"));
         for wrong in ["", " spec", "spec ", "two\nlines"] {
             assert!(!name_fits(wrong), "{wrong:?}");
         }
