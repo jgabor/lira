@@ -30,6 +30,8 @@ can't continue, stop and ask as AGENTS.md says.
 ## Work
 
 3. Work as AGENTS.md says: the test first, then the smallest change.
+   An issue that asks for a report, and changes no file, ends here: write
+   the report as a comment on the issue, close the issue, and stop.
 4. At the first commit, push the branch and open the pull request as a draft
    with `gh pr create --draft`. Its description is the progress note, and its
    last line is `Closes #<number>.`. Load `mcp__t3-code__link_pull_request`

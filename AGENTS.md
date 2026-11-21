@@ -64,6 +64,9 @@ its branch alone.
 - Only the user sets an `auto:` label.
 - Other work that an agent finds gets a new issue with no parent and no
   label. Do not fix it in the same pull request.
+- An issue that asks for a report, and changes no file, has no pull request.
+  Write the report as a comment on the issue, then close the issue. The user
+  reads the report afterwards.
 
 ## Work
 
