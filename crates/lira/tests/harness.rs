@@ -349,7 +349,30 @@ fn a_harness_that_is_not_on_the_host_is_an_error() {
     assert!(matches!(error, Error::Start { .. }), "{error:?}");
     assert_eq!(
         error.to_string(),
-        "Lira can't find the harness `lira-has-no-such-harness` on this host"
+        "Lira can't find the harness `lira-has-no-such-harness` on this host, or a program that it needs to start"
+    );
+
+    // A program that is there, and that names a program that is not there
+    // to run it. The system gives the same error for the two.
+    let stand_in = StandIn::new("no-interpreter", "");
+    let program = stand_in.folder.join("program");
+    let made = Command::new("sh")
+        .args([
+            "-c",
+            "printf '#!/lira-has-no-such-program\\n' > \"$1\" && chmod 755 \"$1\"",
+            "sh",
+        ])
+        .arg(&program)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let error = Harness::start(Command::new(&program)).err().unwrap();
+    assert!(matches!(error, Error::Start { .. }), "{error:?}");
+    assert!(
+        error
+            .to_string()
+            .ends_with("or a program that it needs to start"),
+        "{error}"
     );
 
     // A folder that is not there is not a harness that is not there.
@@ -442,6 +465,16 @@ fn a_line_that_is_not_a_message_of_the_protocol_is_an_error() {
             r#"{"jsonrpc":null,"id":3,"result":{"stopReason":"end_turn"}}"#,
         ),
         ("no-rpc", r#"{"id":3,"result":{"stopReason":"end_turn"}}"#),
+        ("null-error", r#"{"jsonrpc":"2.0","id":3,"error":null}"#),
+        (
+            "error-with-no-code",
+            r#"{"jsonrpc":"2.0","id":3,"error":{"message":"no"}}"#,
+        ),
+        (
+            "error-with-no-message",
+            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32603}}"#,
+        ),
+        ("error-as-text", r#"{"jsonrpc":"2.0","id":3,"error":"no"}"#),
     ];
     for (name, line) in lines {
         let script = format!("next; say '{line}'\nnext\n");
@@ -648,4 +681,105 @@ say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
     let conversation = harness.converse(&stand_in.folder, None).unwrap();
     let reply = harness.send(&conversation, "Go.", &mut yes).unwrap();
     assert_eq!(reply.text, "hello");
+}
+
+#[test]
+fn a_harness_that_ends_while_its_child_holds_the_input_is_an_error() {
+    // The child of the stand-in has the input, and reads nothing. So the
+    // long message of Lira finds no reader.
+    let script = r#"sleep 300 <&0 &
+echo $! > "$here/child"
+exit 7
+"#;
+    let stand_in = StandIn::new(
+        "child-holds-input",
+        &format!("{HELLO}{CONVERSATION}{script}"),
+    );
+    let folder = stand_in.folder.clone();
+    let error = in_time(move || {
+        let mut harness = stand_in.start();
+        let conversation = harness.converse(&stand_in.folder, None).unwrap();
+        written(&stand_in.folder.join("child"));
+        thread::sleep(Duration::from_millis(200));
+        let message = "b".repeat(400_000);
+        harness
+            .send(&conversation, &message, &mut yes)
+            .err()
+            .unwrap()
+    });
+    assert!(matches!(error, Error::Ended { .. }), "{error:?}");
+    assert!(error.to_string().contains("exit status: 7"), "{error}");
+    assert!(is_gone(&written(&folder.join("child"))));
+}
+
+#[test]
+fn a_harness_that_ends_while_its_child_still_writes_is_an_error() {
+    // The child writes an empty line again and again, so Lira always has a
+    // line to read.
+    let script = r#"next
+(while :; do echo; sleep 0.02; done) &
+echo $! > "$here/child"
+exit 7
+"#;
+    let stand_in = StandIn::new("child-writes", &format!("{HELLO}{CONVERSATION}{script}"));
+    let folder = stand_in.folder.clone();
+    let error = in_time(move || {
+        let mut harness = stand_in.start();
+        let conversation = harness.converse(&stand_in.folder, None).unwrap();
+        harness.send(&conversation, "Go.", &mut yes).err().unwrap()
+    });
+    assert!(matches!(error, Error::Ended { .. }), "{error:?}");
+    assert!(error.to_string().contains("exit status: 7"), "{error}");
+    assert!(is_gone(&written(&folder.join("child"))));
+}
+
+#[test]
+fn what_the_harness_says_about_another_conversation_is_not_for_this_one() {
+    // The harness has two conversations. While Lira waits for the reply in
+    // the second, the harness sends text and a permission request of the
+    // first.
+    let script = r#"next; say '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"c-2"}}'
+next
+say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"NOT THIS CONVERSATION"}}}}'
+say '{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-1"},"options":[{"optionId":"once","name":"Yes","kind":"allow_once"},{"optionId":"no","name":"No","kind":"reject_once"}]}}'
+next
+say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-2","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Correct"}}}}'
+say '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+"#;
+    let stand_in = StandIn::new(
+        "two-conversations",
+        &format!("{HELLO}{CONVERSATION}{script}"),
+    );
+    let mut harness = stand_in.start();
+    let first = harness.converse(&stand_in.folder, None).unwrap();
+    let second = harness.converse(&stand_in.folder, None).unwrap();
+    assert_eq!((first.as_str(), second.as_str()), ("c-1", "c-2"));
+    let mut asked = 0;
+    let mut permit = |_: &Permission| {
+        asked += 1;
+        true
+    };
+    let reply = harness.send(&second, "Go.", &mut permit).unwrap();
+    assert_eq!(reply.text, "Correct");
+    assert_eq!(asked, 0);
+    // Lira allows nothing for a conversation that it does not wait for.
+    assert_eq!(
+        stand_in.received(5),
+        read(r#"{"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"cancelled"}}}"#)
+    );
+}
+
+#[test]
+fn lira_does_not_keep_all_that_a_harness_writes_while_nothing_waits() {
+    // After its answer, the stand-in writes about 60 MB that no request
+    // waits for. Lira keeps a part, and the stand-in must wait.
+    let script = r#"yes '{"jsonrpc":"2.0","method":"a/note","params":{}}' | head -n 1500000
+echo yes > "$here/wrote-all"
+next
+"#;
+    let stand_in = StandIn::new("idle-output", &format!("{HELLO}{script}"));
+    let harness = stand_in.start();
+    thread::sleep(Duration::from_secs(2));
+    assert!(!stand_in.folder.join("wrote-all").exists());
+    drop(harness);
 }

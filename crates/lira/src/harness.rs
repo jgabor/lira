@@ -7,9 +7,11 @@
 //! Lira sends one request at a time, and reads until the answer comes. It
 //! has no time limit: an agent can work on one message for hours.
 //!
-//! A thread reads the output of the harness all the time, so that the
-//! harness never waits for Lira while Lira writes to it. The harness runs in
-//! a process group of its own, so that Lira can stop it with its children.
+//! One thread reads the output of the harness all the time, and another
+//! writes to its input. So the harness never waits for Lira while Lira
+//! writes to it, and Lira never waits in a write for a harness that ended.
+//! The harness runs in a process group of its own, so that Lira can stop it
+//! with its children.
 
 use crate::json::{self, Json};
 use std::fmt;
@@ -17,7 +19,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,14 +46,27 @@ const LOOK: Duration = Duration::from_millis(100);
 /// harness wrote before it ended is read in this time.
 const LAST: Duration = Duration::from_millis(300);
 
+/// How many lines of the output Lira keeps while no request reads them. A
+/// harness that writes more waits until Lira reads.
+const LINES: usize = 1000;
+
 /// A harness that runs.
 pub struct Harness {
     program: String,
     child: Child,
-    /// `None` after Lira closed it.
-    input: Option<ChildStdin>,
+    /// The lines that Lira writes to the input. `None` after Lira closed
+    /// the input.
+    input: Option<Sender<String>>,
+    /// It gets a value when a line could not be written to the input.
+    input_failed: Receiver<()>,
     /// The lines of the output. It ends when the output ends.
     lines: Receiver<Vec<u8>>,
+    /// When Lira saw that the harness ended, if it did.
+    ended_at: Option<Instant>,
+    /// When Lira last looked if the harness still runs.
+    looked: Instant,
+    /// If Lira sent the signal to the process group of the harness.
+    group_stopped: bool,
     /// The end of what the harness wrote to its error output.
     errors: Arc<Mutex<Vec<u8>>>,
     /// It gets a value when the error output ends.
@@ -190,6 +205,8 @@ impl std::error::Error for Error {}
 
 /// What Lira needs while an agent works on one message.
 struct Work<'a> {
+    /// The conversation of the message. A harness can have more than one.
+    conversation: &'a str,
     permit: &'a mut dyn FnMut(&Permission) -> bool,
     text: String,
     /// The `messageId` of the newest part of the text.
@@ -209,16 +226,19 @@ impl Harness {
             .process_group(0);
         let mut child = command.spawn().map_err(|error| {
             // The system gives the same error for a program that is not
-            // there and for a folder that is not there.
-            let folder = command.get_current_dir().filter(|folder| !folder.is_dir());
-            let reason = match (folder, error.kind()) {
+            // there, for a program that needs another one that is not
+            // there, and for a folder that is not there.
+            let no_folder = command
+                .get_current_dir()
+                .filter(|folder| matches!(folder.try_exists(), Ok(false)));
+            let reason = match (no_folder, error.kind()) {
                 (Some(folder), _) => format!(
                     "the harness `{program}` did not start: the folder `{}` is not there",
                     folder.display()
                 ),
-                (None, ErrorKind::NotFound) => {
-                    format!("Lira can't find the harness `{program}` on this host")
-                }
+                (None, ErrorKind::NotFound) => format!(
+                    "Lira can't find the harness `{program}` on this host, or a program that it needs to start"
+                ),
                 (None, _) => format!("the harness `{program}` did not start: {error}"),
             };
             Error::Start {
@@ -226,14 +246,18 @@ impl Harness {
                 reason,
             }
         })?;
-        let input = child.stdin.take();
+        let (input, input_failed) = write_lines(child.stdin.take().expect("the input is a pipe"));
         let lines = read_lines(child.stdout.take().expect("the output is a pipe"));
         let (errors, errors_ended) = keep(child.stderr.take().expect("the error output is a pipe"));
         let mut harness = Harness {
             program,
             child,
-            input,
+            input: Some(input),
+            input_failed,
             lines,
+            ended_at: None,
+            looked: Instant::now(),
+            group_stopped: false,
             errors,
             errors_ended,
             next: 1,
@@ -320,6 +344,7 @@ impl Harness {
             ),
         ]);
         let mut work = Work {
+            conversation,
             permit,
             text: String::new(),
             message: None,
@@ -363,7 +388,13 @@ impl Harness {
                 (Some(theirs), Some(id)) => {
                     let answer = match (theirs, work.as_deref_mut()) {
                         ("session/request_permission", Some(work)) => {
-                            let outcome = Harness::permission(&message, work);
+                            // Lira allows nothing for a conversation that
+                            // it does not wait for.
+                            let outcome = if work.is_about(&message) {
+                                Harness::permission(&message, work)
+                            } else {
+                                Json::object([("outcome", Json::text("cancelled"))])
+                            };
                             ("result", Json::object([("outcome", outcome)]))
                         }
                         _ => (
@@ -385,7 +416,9 @@ impl Harness {
                 // A note of the harness. Lira reads the text of the agent,
                 // and nothing else yet.
                 (Some(theirs), None) => {
-                    if let (Some(work), "session/update") = (work.as_deref_mut(), theirs) {
+                    if let (Some(work), "session/update") = (work.as_deref_mut(), theirs)
+                        && work.is_about(&message)
+                    {
                         work.update(&message);
                     }
                 }
@@ -396,16 +429,21 @@ impl Harness {
                             "it answered request {id}, and Lira waits for the answer to request {number}"
                         )));
                     }
-                    if let Some(error) = message.get("error") {
+                    // An answer has a result, or an error with a code and
+                    // a message.
+                    if let Some(error) = message.get("error").filter(|e| **e != Json::Null) {
+                        let code = error.get("code").and_then(Json::as_i64);
+                        let text = error.get("message").and_then(Json::as_text);
+                        let (Some(code), Some(text)) = (code, text) else {
+                            return Err(self.protocol(format!(
+                                "the error in its answer to `{method}` has no `code` or no `message`: {message}"
+                            )));
+                        };
                         return Err(Error::Refused {
                             program: self.program.clone(),
                             method: method.to_string(),
-                            code: error.get("code").and_then(Json::as_i64).unwrap_or(0),
-                            message: error
-                                .get("message")
-                                .and_then(Json::as_text)
-                                .unwrap_or("")
-                                .to_string(),
+                            code,
+                            message: text.to_string(),
                             data: error.get("data").cloned(),
                         });
                     }
@@ -469,17 +507,21 @@ impl Harness {
         }
     }
 
+    /// Gives a line to the thread that writes to the input. The thread
+    /// can wait for a harness that does not read, and Lira does not: it goes
+    /// on to read, and there it sees a harness that ended.
     fn write(&mut self, method: &str, message: &Json) -> Result<(), Error> {
         if self.gone.is_some() {
             return Err(self.ended(method, None));
         }
-        let written = match self.input.as_mut() {
-            Some(input) => writeln!(input, "{message}").and_then(|()| input.flush()),
-            None => Err(ErrorKind::BrokenPipe.into()),
+        let sent = match &self.input {
+            Some(input) => input.send(format!("{message}\n")).is_ok(),
+            None => false,
         };
-        match written {
-            Ok(()) => Ok(()),
-            Err(_) => Err(self.ended(method, Some("closed its input"))),
+        if sent {
+            Ok(())
+        } else {
+            Err(self.ended(method, Some("closed its input")))
         }
     }
 
@@ -513,26 +555,43 @@ impl Harness {
         }
     }
 
-    /// Waits for the next line of the output. The output can stay open
-    /// after the harness ended, when a child of the harness holds it, so
-    /// Lira also looks if the harness still runs.
+    /// Waits for the next line of the output.
+    ///
+    /// The output can stay open after the harness ended, when a child of
+    /// the harness holds it, and that child can write on. So Lira looks by
+    /// the clock if the harness still runs, also while lines come. After
+    /// the harness ended, Lira reads for a short time more, for what the
+    /// harness wrote before.
     fn line(&mut self, method: &str) -> Result<Vec<u8>, Error> {
         if self.gone.is_some() {
             return Err(self.ended(method, None));
         }
-        let mut ended = false;
         loop {
-            match self.lines.recv_timeout(if ended { LAST } else { LOOK }) {
+            if self.ended_at.is_none() && self.looked.elapsed() >= LOOK {
+                self.looked = Instant::now();
+                if !matches!(self.child.try_wait(), Ok(None)) {
+                    self.ended_at = Some(Instant::now());
+                    // The number of the group is still the harness's own
+                    // at this moment, so this is the time for the signal.
+                    self.stop_group();
+                }
+            }
+            if self.input_failed.try_recv().is_ok() {
+                return Err(self.ended(method, Some("closed its input")));
+            }
+            let wait = match self.ended_at {
+                Some(at) => match LAST.checked_sub(at.elapsed()) {
+                    Some(left) => left,
+                    None => return Err(self.ended(method, Some("ended"))),
+                },
+                None => LOOK,
+            };
+            match self.lines.recv_timeout(wait) {
                 Ok(line) => return Ok(line),
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(self.ended(method, Some("closed its output")));
                 }
-                Err(RecvTimeoutError::Timeout) if ended => {
-                    return Err(self.ended(method, Some("ended")));
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    ended = !matches!(self.child.try_wait(), Ok(None));
-                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -577,6 +636,9 @@ impl Harness {
     /// end. Then it stops what still runs: the harness, and each child that
     /// the harness left in its process group. It returns how the harness
     /// ended, when it ended without Lira.
+    ///
+    /// A child that left the process group stays. Lira has no way to find
+    /// it.
     fn stop(&mut self) -> Option<ExitStatus> {
         self.input = None;
         let started = Instant::now();
@@ -587,8 +649,26 @@ impl Harness {
                 _ => break None,
             }
         };
-        // The number of the group is the number of the harness. `kill` of
-        // the shell is the way to it with no code that Rust can't check.
+        self.stop_group();
+        if status.is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        status
+    }
+
+    /// Stops each process in the process group of the harness, one time.
+    ///
+    /// The number of the group is the number of the harness. `kill` of the
+    /// shell is the way to it with no code that Rust can't check. Lira sends
+    /// the signal while the harness runs, or at once when it sees that the
+    /// harness ended. Later, the system could give the number to a process
+    /// that is not of the harness.
+    fn stop_group(&mut self) {
+        if self.group_stopped {
+            return;
+        }
+        self.group_stopped = true;
         let group = format!("-{}", self.child.id());
         let _ = Command::new("sh")
             .args(["-c", "kill -s KILL -- \"$1\"", "sh", &group])
@@ -596,15 +676,19 @@ impl Harness {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        if status.is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-        status
     }
 }
 
 impl Work<'_> {
+    /// If a message of the harness is about the conversation of this work.
+    fn is_about(&self, message: &Json) -> bool {
+        message
+            .get("params")
+            .and_then(|params| params.get("sessionId"))
+            .and_then(Json::as_text)
+            == Some(self.conversation)
+    }
+
     /// Keeps the text of an update that is a part of what the agent says.
     fn update(&mut self, message: &Json) {
         let Some(update) = message
@@ -644,9 +728,31 @@ impl Drop for Harness {
     }
 }
 
-/// Reads the output of a harness until it ends, and gives each line.
+/// Writes each line that it gets to the input of a harness, on a thread of
+/// its own. The second value gets a value when a line could not be written.
+/// The input closes when the first value is dropped.
+fn write_lines(mut input: ChildStdin) -> (Sender<String>, Receiver<()>) {
+    let (lines, given) = mpsc::channel::<String>();
+    let (fail, failed) = mpsc::channel();
+    thread::spawn(move || {
+        for line in given {
+            if input
+                .write_all(line.as_bytes())
+                .and_then(|()| input.flush())
+                .is_err()
+            {
+                let _ = fail.send(());
+                break;
+            }
+        }
+    });
+    (lines, failed)
+}
+
+/// Reads the output of a harness until it ends, and gives each line. It
+/// keeps `LINES` lines at most, and then waits until Lira reads one.
 fn read_lines(output: ChildStdout) -> Receiver<Vec<u8>> {
-    let (found, lines) = mpsc::channel();
+    let (found, lines) = mpsc::sync_channel(LINES);
     thread::spawn(move || {
         let mut output = BufReader::new(output);
         loop {
