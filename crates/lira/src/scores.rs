@@ -87,15 +87,9 @@ impl Scores {
                 continue;
             }
             let number = index + 1;
-            let wrong = || {
+            let (name, value) = score_line(line).ok_or_else(|| {
                 format!("line {number}: a score line is `<name> = <number>`, and this is `{line}`")
-            };
-            let (name, value) = line.split_once('=').ok_or_else(wrong)?;
-            let name = name.trim();
-            let value = Number::read(value.trim()).ok_or_else(wrong)?;
-            if name.is_empty() || name.contains(char::is_whitespace) {
-                return Err(wrong());
-            }
+            })?;
             if scores.get(name).is_some() {
                 return Err(format!(
                     "line {number}: the score `{name}` is there two times. Write one line for each score"
@@ -104,6 +98,14 @@ impl Scores {
             scores.lines.push((name.to_string(), value));
         }
         Ok(scores)
+    }
+
+    /// True when the text has a score line, and each of its lines is a score
+    /// line or empty.
+    pub fn are_in(text: &str) -> bool {
+        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+        let mut lines = lines.by_ref().map(score_line).peekable();
+        lines.peek().is_some() && lines.all(|line| line.is_some())
     }
 
     pub fn get(&self, name: &str) -> Option<&Number> {
@@ -118,6 +120,21 @@ impl Scores {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
+}
+
+/// Reads `<name> = <number>`. The name is all that is before the last `=`,
+/// so it can have spaces.
+fn score_line(line: &str) -> Option<(&str, Number)> {
+    let (name, value) = line.rsplit_once('=')?;
+    let name = name.trim();
+    let value = Number::read(value.trim())?;
+    (!name.is_empty()).then_some((name, value))
+}
+
+/// True when a score line can have this name: it has no space at an end, and
+/// no line end in it.
+pub fn name_fits(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && !name.contains(char::is_control)
 }
 
 #[cfg(test)]
@@ -142,7 +159,7 @@ mod tests {
             "spec",
             "spec = many",
             "= 1",
-            "two words = 1",
+            "spec = 1 = x",
             "spec = 1e3",
             "spec = inf",
             "spec = NaN",
@@ -155,6 +172,25 @@ mod tests {
                 "{wrong}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_is_all_that_is_before_the_last_equals_sign() {
+        let scores = Scores::read("test coverage = 5\na=b = 2\n").unwrap();
+        assert_eq!(scores.names().collect::<Vec<_>>(), ["test coverage", "a=b"]);
+        assert!(name_fits("test coverage"));
+        for wrong in ["", " spec", "spec ", "two\nlines"] {
+            assert!(!name_fits(wrong), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn a_text_is_score_lines_when_each_line_is_one() {
+        assert!(Scores::are_in("spec = 1\n\n size = 2 \n"));
+        assert!(Scores::are_in("spec = 1\nspec = 2\n"));
+        assert!(!Scores::are_in(""));
+        assert!(!Scores::are_in("\n\n"));
+        assert!(!Scores::are_in("spec = 1\nThanks!\n"));
     }
 
     // spec(Scores): The number of a score is a decimal number, such as `12`, `-3` or `0.25`.

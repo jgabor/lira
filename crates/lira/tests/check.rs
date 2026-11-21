@@ -11,21 +11,21 @@ use std::process::{Command, Output, Stdio};
 const END: char = '\u{1e}';
 
 const STAND_IN_FOR_GH: &str = r#"#!/bin/sh
-# Stands in for `gh` in the tests of `lira check`. For `gh api <path>`, it
-# prints the answer whose first line is the end of the path.
+# Stands in for `gh` in the tests of `lira check`. For `gh api`, it prints
+# the first answer whose first line is a part of the arguments.
 here=$(dirname "$0")
-echo "$*" >> "$here/calls"
+echo "$1 $2 $(echo "$*" | grep -o 'after=[a-z0-9]*')" >> "$here/calls"
 if [ "$1 $2" = "auth status" ]; then
   [ -e "$here/no-login" ] && exit 1
   exit 0
 fi
 for answer in "$here"/answers/*; do
   [ -e "$answer" ] || continue
-  case "$2" in
-    *"$(head -n 1 "$answer")") tail -n +2 "$answer"; exit 0 ;;
+  case "$*" in
+    *"$(head -n 1 "$answer")"*) tail -n +2 "$answer"; exit 0 ;;
   esac
 done
-echo "the stand-in for gh has no answer for: $*" >&2
+echo "the stand-in for gh has no answer for: $1 $2" >&2
 exit 1
 "#;
 
@@ -93,13 +93,13 @@ impl Repository {
         self.git(&["rev-parse", "HEAD"])
     }
 
-    /// What the stand-in for `gh` prints for an API path that ends with
-    /// `path`.
-    fn answer(&self, path: &str, printed: &str) {
+    /// What the stand-in for `gh` prints when its arguments have `part`
+    /// in them. An answer that was given earlier comes first.
+    fn answer(&self, part: &str, printed: &str) {
         let answers = self.gh.join("answers");
         fs::create_dir_all(&answers).unwrap();
-        let name = fs::read_dir(&answers).unwrap().count().to_string();
-        fs::write(answers.join(name), format!("{path}\n{printed}")).unwrap();
+        let name = format!("{:03}", fs::read_dir(&answers).unwrap().count());
+        fs::write(answers.join(name), format!("{part}\n{printed}")).unwrap();
     }
 
     /// The comments of a pull request, as `gh` gives them with Lira's `jq`.
@@ -112,16 +112,14 @@ impl Repository {
     }
 
     /// The newest commit of the main branch came from the pull request
-    /// `pull`, which has these comments. With no `pull`, it came from none.
+    /// `pull`, which has these comments. With no `pull`, no pull request was
+    /// merged into the main branch.
     fn main_has(&self, pull: &str, comments: &[&str]) {
-        self.answer("/commits", "aaa\n");
         if pull.is_empty() {
-            self.answer("/commits/aaa/pulls", "");
+            self.answer("graphql", "count 0\nnext \n");
         } else {
-            self.answer(
-                "/commits/aaa/pulls",
-                &format!("{pull} 2026-11-20T10:00:00Z main\n"),
-            );
+            let merged = format!("count 1\nnext \npull 0 {pull} 2026-11-20T10:00:00Z main\n");
+            self.answer("graphql", &merged);
             self.comments(pull, comments);
         }
     }
@@ -227,6 +225,10 @@ fn the_lira_file_is_the_one_of_the_main_branch() {
     repository.write("lira.toml", "check = \"exit 0\"\n");
     repository.commit("an easy check");
     assert_eq!(repository.check().status.code(), Some(1));
+    // A tag with the name of the main branch is not the main branch.
+    repository.git(&["tag", "main"]);
+    assert_eq!(repository.check().status.code(), Some(1));
+    repository.git(&["tag", "--delete", "main"]);
     // The file in the folder does not count before it is committed either.
     repository.git(&["switch", "--quiet", "main"]);
     repository.write("lira.toml", "check = \"exit 0\"\n");
@@ -293,14 +295,10 @@ fn the_scores_of_the_main_branch_are_on_the_last_merged_pull_request() {
     );
     // The newest commit was pushed with no pull request. The one before it
     // is in an open pull request, in one that was merged into another
-    // branch, and in two that were merged into the main branch.
-    repository.answer("/commits", "ccc\nbbb\naaa\n");
-    repository.answer("/commits/ccc/pulls", "");
-    repository.answer(
-        "/commits/bbb/pulls",
-        "5 open main\n8 2026-11-21T10:00:00Z release\n6 2026-11-18T10:00:00Z main\n7 2026-11-20T10:00:00Z main\n",
-    );
-    repository.answer("/commits/aaa/pulls", "4 2026-11-17T10:00:00Z main\n");
+    // branch, and in two that were merged into the main branch. An older
+    // commit came from a pull request too.
+    let page = "count 3\nnext \npull 1 5 open main\npull 1 8 2026-11-21T10:00:00Z release\npull 1 6 2026-11-18T10:00:00Z main\npull 1 7 2026-11-20T10:00:00Z main\npull 2 4 2026-11-17T10:00:00Z main\n";
+    repository.answer("graphql", page);
     repository.comments(
         "7",
         &["spec = 1", "A remark, with spec = 99 in it.", "spec = 12"],
@@ -315,21 +313,66 @@ fn the_scores_of_the_main_branch_are_on_the_last_merged_pull_request() {
         "{}",
         stdout(&output)
     );
-    // Lira asked for the newest commits of the main branch, then for the
-    // pull requests of each until one was merged, then for its comments.
-    let calls = repository.calls();
-    let calls: Vec<&str> = calls.lines().collect();
-    assert_eq!(calls.len(), 5, "{calls:?}");
-    assert_eq!(calls[0], "auth status");
-    assert!(
-        calls[1].contains("/commits --method GET -f sha=main "),
-        "{calls:?}"
+    assert_eq!(
+        repository.calls(),
+        "auth status \napi graphql \napi repos/{owner}/{repo}/issues/7/comments \n"
     );
-    assert!(calls[2].contains("/commits/ccc/pulls "), "{calls:?}");
-    assert!(calls[3].contains("/commits/bbb/pulls "), "{calls:?}");
+}
+
+#[test]
+fn lira_goes_back_through_the_commits_until_one_came_from_a_pull_request() {
+    let repository = Repository::new("pages", TWO_SCORES, "echo 'spec = 14' > \"$LIRA_SCORES\"\n");
+    // Two pages of commits that were pushed with no pull request, then one
+    // that came from a pull request.
+    repository.answer(
+        "after=page3",
+        "count 1\nnext \npull 40 3 2026-11-17T10:00:00Z main\n",
+    );
+    repository.answer("after=page2", "count 1\nnext page3\n");
+    repository.answer("graphql", "count 1\nnext page2\n");
+    repository.comments("3", &["spec = 100"]);
+    let output = repository.check();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
-        calls[4].contains("/issues/7/comments --paginate "),
-        "{calls:?}"
+        stdout(&output).starts_with("spec = 14, and 100 on the main branch: worse\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        repository.calls(),
+        "auth status \napi graphql \napi graphql after=page2\napi graphql after=page3\napi repos/{owner}/{repo}/issues/3/comments \n"
+    );
+}
+
+#[test]
+fn a_scores_comment_with_one_score_two_times_is_an_error() {
+    let repository = Repository::new("wrong-comment", TWO_SCORES, "echo ran > ran.txt\n");
+    repository.main_has("7", &["spec = 40", "spec = 20\nspec = 30"]);
+    let output = repository.check();
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr(&output);
+    assert!(error.contains("pull request #7"), "{error}");
+    assert!(
+        error.contains("the score `spec` is there two times"),
+        "{error}"
+    );
+    assert_eq!(repository.read("ran.txt"), "");
+}
+
+#[test]
+fn a_score_can_have_a_name_with_a_space() {
+    let scores = "\n[[score]]\nname = \"test coverage\"\nbetter = \"higher\"\n";
+    let repository = Repository::new(
+        "space",
+        scores,
+        "echo 'test coverage = 5' > \"$LIRA_SCORES\"\n",
+    );
+    repository.main_has("7", &["test coverage = 6"]);
+    let output = repository.check();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "test coverage = 5, and 6 on the main branch: worse\n"
     );
 }
 
@@ -416,7 +459,7 @@ fn with_no_merged_pull_request_no_score_has_a_value_on_the_main_branch() {
         stdout(&output),
         "spec = 1, and no value on the main branch\nsize has no value, and no value on the main branch\n"
     );
-    assert_eq!(repository.calls().lines().count(), 3);
+    assert_eq!(repository.calls().lines().count(), 2);
 }
 
 #[test]
@@ -445,7 +488,7 @@ fn with_no_login_of_gh_it_stops_before_the_check_runs() {
         stderr(&output)
     );
     assert_eq!(repository.read("ran.txt"), "");
-    assert_eq!(repository.calls(), "auth status\n");
+    assert_eq!(repository.calls(), "auth status \n");
 }
 
 #[test]
@@ -483,7 +526,7 @@ fn a_main_branch_with_no_lira_file_is_a_failure() {
     let output = repository.check();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("the main branch, `main`, has no `lira.toml`"),
+        stderr(&output).contains("the main branch, `refs/heads/main`, has no `lira.toml`"),
         "{}",
         stderr(&output)
     );
