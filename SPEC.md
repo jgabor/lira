@@ -36,6 +36,8 @@ place where a repository sets something for Lira.
 | `planner.on` | True or false | If the Planner runs. |
 | `planner.instructions` | Text | The path of the Planner's instructions. |
 
+- Lira reads these forms of TOML in the Lira file: a key with a text, a number, `true` or `false`, or a list; a table; and a list of tables.
+- Another form of TOML in the Lira file is an error.
 - A Lira file with an unknown key is an error.
 - A Lira file with no `check` is an error.
 - The value of `better` is `higher` or `lower`.
