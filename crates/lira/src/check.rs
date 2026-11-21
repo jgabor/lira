@@ -66,14 +66,7 @@ pub fn command(folder: &Path) -> Result<bool, String> {
     let main = git::main_branch(folder)?;
     // Lira reads the Lira file from the main branch, so that a change can't
     // replace its own check.
-    let text = git::file_on(folder, &main.full, lira_file::NAME)?.ok_or_else(|| {
-        format!(
-            "the main branch, `{}`, has no `{}`. Lira reads the Lira file from the main branch, so merge the pull request that adds it first",
-            main.full,
-            lira_file::NAME
-        )
-    })?;
-    let file = LiraFile::read(&text).map_err(|e| e.to_string())?;
+    let file = git::lira_file(folder, &main)?;
     let base = git::base(folder, &main.full)?;
     // A repository with no scores needs nothing from GitHub. Lira asks GitHub
     // before the check runs, so that a missing login stops it at once.

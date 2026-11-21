@@ -7,3 +7,4 @@ pub mod json;
 pub mod lira_file;
 pub mod scores;
 mod toml;
+pub mod worktree;
