@@ -37,9 +37,6 @@ pub struct MainBranch {
     pub full: String,
     /// Its name on GitHub, such as `main`.
     pub name: String,
-    /// The remote that has it, such as `origin`. `None` for the local
-    /// `main` of a repository with no remote.
-    pub remote: Option<String>,
 }
 
 /// Finds the main branch: the default branch of a remote, `origin` first, or
@@ -63,22 +60,17 @@ pub fn main_branch(folder: &Path) -> Result<MainBranch, String> {
             return Ok(MainBranch {
                 full: format!("{start}{name}"),
                 name: name.to_string(),
-                remote: Some(remote.to_string()),
             });
         }
     }
-    let with_main = remotes.iter().map(|remote| {
-        (
-            format!("refs/remotes/{remote}/main"),
-            Some(remote.to_string()),
-        )
-    });
-    for (full, remote) in with_main.chain([("refs/heads/main".to_string(), None)]) {
+    let with_main = remotes
+        .iter()
+        .map(|remote| format!("refs/remotes/{remote}/main"));
+    for full in with_main.chain(["refs/heads/main".to_string()]) {
         if git(folder, &["rev-parse", "--verify", "--quiet", &full])?.is_some() {
             return Ok(MainBranch {
                 full,
                 name: "main".to_string(),
-                remote,
             });
         }
     }
@@ -112,17 +104,47 @@ pub fn file_on(folder: &Path, main: &str, path: &str) -> Result<Option<String>, 
     git(folder, &["show", &format!("{main}:{path}")])
 }
 
-/// Gets the newest commits of the main branch from its remote.
-pub fn fetch_main(folder: &Path, main: &MainBranch, remote: &str) -> Result<(), String> {
-    let branch = format!("+refs/heads/{}:{}", main.name, main.full);
-    run(folder, &["fetch", "--quiet", "--no-tags", remote, &branch])
-        .map(|_| ())
-        .map_err(|wrote| {
-            format!(
-                "Lira can't get the newest `{}` from the remote `{remote}`. git wrote:\n{wrote}",
-                main.name
-            )
+/// Asks the remote which branch is its main branch now, and gets the newest
+/// commits of that branch. It returns the main branch and the name of the
+/// remote: `origin`, or the first remote when there is no `origin`.
+///
+/// What the host knew about the remote before can be old: the main branch
+/// can have new commits, and the remote can have another main branch.
+pub fn newest_main(folder: &Path) -> Result<(MainBranch, String), String> {
+    let remotes = git(folder, &["remote"])?.unwrap_or_default();
+    let mut remotes: Vec<&str> = remotes.lines().collect();
+    remotes.sort_by_key(|remote| *remote != "origin");
+    let Some(remote) = remotes.first() else {
+        return Err(
+            "this repository has no remote. Lira needs the remote, to start from the newest main branch"
+                .to_string(),
+        );
+    };
+    let failed = |wrote: String| {
+        format!(
+            "Lira can't get the newest main branch from the remote `{remote}`. git wrote:\n{wrote}"
+        )
+    };
+    let head = run(folder, &["ls-remote", "--symref", remote, "HEAD"]).map_err(failed)?;
+    let name = head
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
         })
+        .ok_or_else(|| {
+            format!("the remote `{remote}` does not say which branch is its main branch")
+        })?;
+    let main = MainBranch {
+        full: format!("refs/remotes/{remote}/{name}"),
+        name: name.to_string(),
+    };
+    let branch = format!("+refs/heads/{name}:{}", main.full);
+    run(folder, &["fetch", "--quiet", "--no-tags", remote, &branch]).map_err(failed)?;
+    // The host keeps which branch is the main branch of the remote, and
+    // `main_branch` reads it there.
+    run(folder, &["remote", "set-head", remote, name]).map_err(failed)?;
+    Ok((main, remote.to_string()))
 }
 
 /// The repository of a remote, as `<owner>/<repository>`: the last two
@@ -203,12 +225,29 @@ pub fn add_worktree(
     .map_err(|wrote| format!("Lira can't make the worktree `{worktree}`. git wrote:\n{wrote}"))
 }
 
-/// Removes a worktree and its branch, with all that is in them.
+/// Removes a worktree and its branch, with all that is in them. It is for
+/// a worktree and a branch that Lira made just now. When a part can't be
+/// removed, the error is what git wrote.
 pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), String> {
-    let worktree = worktree.to_string_lossy();
-    run(folder, &["worktree", "remove", "--force", &worktree])?;
-    run(folder, &["branch", "--quiet", "-D", branch])?;
-    Ok(())
+    let mut wrote = Vec::new();
+    if worktree.exists()
+        && let Err(error) = run(
+            folder,
+            &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+        )
+    {
+        wrote.push(error);
+    }
+    if has_branch(folder, branch)?
+        && let Err(error) = run(folder, &["branch", "--quiet", "-D", branch])
+    {
+        wrote.push(error);
+    }
+    if wrote.is_empty() {
+        Ok(())
+    } else {
+        Err(wrote.join("\n"))
+    }
 }
 
 #[cfg(test)]
