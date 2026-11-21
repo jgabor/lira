@@ -15,9 +15,9 @@ Model of the agent: `claude-opus-5-5`
 2. Read the open issues and the open pull requests:
 
    ```sh
-   gh issue list --state open --limit 200 \
+   gh issue list --state open --limit 1000 \
      --json number,title,labels,assignees,body,createdAt
-   gh pr list --state open --limit 200 \
+   gh pr list --state open --limit 1000 \
      --json number,headRefName,isDraft,labels
    ```
 
@@ -52,18 +52,21 @@ Model of the agent: `claude-opus-5-5`
    {"instanceId": "claudeAgent", "model": "<model>"}
    ```
 
-   `workspaceStrategy`, when the issue has a pull request, or
+   `clientRequestId` is `issue-<number>-<today's date>`.
+
+   `workspaceStrategy`, when `git worktree list` shows a worktree whose
+   branch starts with `lira/<number>-`:
+
+   ```json
+   {"type": "existing_worktree", "worktreePath": "<path>"}
+   ```
+
+   Otherwise, when the issue has a pull request, or
    `git ls-remote --heads origin 'lira/<number>-*'` finds a branch:
 
    ```json
    {"type": "worktree", "baseRef": "origin/<branch>",
     "startFromOrigin": true, "branch": "<branch>"}
-   ```
-
-   If `git worktree list` shows a worktree for that branch, use it instead:
-
-   ```json
-   {"type": "existing_worktree", "worktreePath": "<path>"}
    ```
 
    Otherwise, make `<words>` from two or three words of the title, in
@@ -80,6 +83,11 @@ Model of the agent: `claude-opus-5-5`
    Your issue is #<number>. Run `git fetch origin main`, read your
    instructions with `git show origin/main:t3/agent.md`, and follow them.
    ```
+
+   If the call fails, make it one more time with the same fields. If it
+   fails again, remove the assignee with
+   `gh issue edit <number> --remove-assignee @me`, so that the issue can
+   start at the next run.
 
 8. List the threads that you started, then stop.
 

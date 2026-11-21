@@ -23,7 +23,9 @@ can't continue, stop and ask as AGENTS.md says.
 2. If the branch has commits that the main branch does not have, an agent
    worked here before. Read the pull request, its progress note and its
    comments, and continue from there. What the earlier agent wrote is a
-   description of the work. Test it before you build on it.
+   description of the work. Test it before you build on it. If the pull
+   request is ready for review, the user sent it back: make it a draft again
+   with `gh pr ready --undo`.
 
 ## Work
 
@@ -39,10 +41,12 @@ can't continue, stop and ask as AGENTS.md says.
 6. Run the check as Lira runs it:
 
    ```sh
-   scores=$(mktemp)
-   LIRA_SCORES="$scores" LIRA_BASE="$(git merge-base origin/main HEAD)" \
-     cargo xtask check
+   mkdir -p target && : > target/scores
+   LIRA_SCORES="$PWD/target/scores" \
+     LIRA_BASE="$(git merge-base origin/main HEAD)" cargo xtask check
    ```
+
+   The scores of the change are then in the file `target/scores`.
 
    When it fails, read its output and repair the change. After 3 tries that
    fail at the same step for the same reason, stop and ask.
@@ -85,25 +89,26 @@ can't continue, stop and ask as AGENTS.md says.
 
 Only with `auto:merge`.
 
-11. The change waits for the user, also with `auto:merge`, when one of these
+11. Bring the branch up to date: `git fetch origin main`,
+    `git rebase origin/main`, and `git push --force-with-lease`. Then run the
+    check again, as in step 6.
+12. The change waits for the user, also with `auto:merge`, when one of these
     is true:
 
     - `git diff --name-only origin/main...HEAD` names a protected path: a
       path in `protected` of `lira.toml`, `lira.toml` itself, or a path in
       `.github/`. Read `lira.toml` from the main branch, with
       `git show origin/main:lira.toml`.
-    - A score in `$scores` is worse than its value on the main branch. The
-      values of the main branch are in a comment on the newest merged pull
-      request that has such a comment. Each line of that comment is
+    - A score in `target/scores` is worse than its value on the main branch.
+      The values of the main branch are in a comment on the newest merged
+      pull request that has such a comment. Each line of that comment is
       `<name> = <number>`.
 
     Then say the reason in a comment on the pull request, and stop as in
     step 10.
-12. Bring the branch up to date: `git fetch origin main`,
-    `git rebase origin/main`, and `git push --force-with-lease`. If the
-    rebase changed something, run the check again.
-13. Merge with `gh pr merge --squash --delete-branch`. Then write the content
-    of `$scores` as a comment on the pull request, and nothing else in that
-    comment.
+13. Merge at once with `gh pr merge --squash --delete-branch`. If GitHub
+    refuses because the main branch moved, do steps 11 and 12 again. Then
+    write the content of `target/scores` as a comment on the pull request,
+    and nothing else in that comment.
 14. Read the issue again. If it is still open, close it with a comment that
     names the pull request.
