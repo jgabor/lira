@@ -46,6 +46,21 @@ const LOOK: Duration = Duration::from_millis(100);
 /// harness wrote before it ended is read in this time.
 const LAST: Duration = Duration::from_millis(300);
 
+/// How long Lira reads at most after the harness ended. A child of the
+/// harness that Lira could not stop can write for as long as it runs.
+const AFTER: Duration = Duration::from_secs(10);
+
+/// The longest line of the output that Lira reads, in bytes. A longer line
+/// is an error, so that no harness can make Lira keep a line with no end.
+const LONGEST: u64 = 64 * 1024 * 1024;
+
+/// A line of the output, or the sign that a line was longer than `LONGEST`.
+/// After that sign, Lira reads no more from the harness.
+enum Line {
+    Text(Vec<u8>),
+    TooLong,
+}
+
 /// How many lines of the output Lira keeps while no request reads them. A
 /// harness that writes more waits until Lira reads.
 const LINES: usize = 1000;
@@ -60,7 +75,7 @@ pub struct Harness {
     /// It gets a value when a line could not be written to the input.
     input_failed: Receiver<()>,
     /// The lines of the output. It ends when the output ends.
-    lines: Receiver<Vec<u8>>,
+    lines: Receiver<Line>,
     /// When Lira saw that the harness ended, if it did.
     ended_at: Option<Instant>,
     /// When Lira last looked if the harness still runs.
@@ -386,12 +401,20 @@ impl Harness {
             match (theirs, message.get("id")) {
                 // A request of the harness.
                 (Some(theirs), Some(id)) => {
+                    if !matches!(id, Json::Null | Json::Number(_) | Json::Text(_)) {
+                        return Err(self.protocol(format!(
+                            "the `id` of a request is not a number and not a text: {message}"
+                        )));
+                    }
                     let answer = match (theirs, work.as_deref_mut()) {
                         ("session/request_permission", Some(work)) => {
                             // Lira allows nothing for a conversation that
                             // it does not wait for.
                             let outcome = if work.is_about(&message) {
-                                Harness::permission(&message, work)
+                                match Harness::permission(&message, work) {
+                                    Ok(outcome) => outcome,
+                                    Err(problem) => return Err(self.protocol(problem)),
+                                }
                             } else {
                                 Json::object([("outcome", Json::text("cancelled"))])
                             };
@@ -463,12 +486,35 @@ impl Harness {
         }
     }
 
-    /// Asks `permit`, and gives the outcome for the answer.
-    fn permission(message: &Json, work: &mut Work) -> Json {
+    /// Asks `permit`, and gives the outcome for the answer. A request that
+    /// the protocol does not allow is an error, and `permit` is not asked.
+    fn permission(message: &Json, work: &mut Work) -> Result<Json, String> {
         let params = message.get("params");
         let call = params.and_then(|params| params.get("toolCall"));
+        let options = params
+            .and_then(|params| params.get("options"))
+            .and_then(Json::as_list);
+        let (Some(call @ Json::Object(_)), Some(options)) = (call, options) else {
+            return Err(format!(
+                "a permission request has no `toolCall` or no `options`: {message}"
+            ));
+        };
+        // Each option has a name that Lira can give back, and a kind.
+        let mut offered = Vec::new();
+        for option in options {
+            let name = option
+                .get("optionId")
+                .filter(|name| name.as_text().is_some());
+            let kind = option.get("kind").and_then(Json::as_text);
+            let (Some(name), Some(kind)) = (name, kind) else {
+                return Err(format!(
+                    "an option of a permission request has no `optionId` or no `kind`: {message}"
+                ));
+            };
+            offered.push((kind, name));
+        }
         let text = |key: &str| {
-            call.and_then(|call| call.get(key))
+            call.get(key)
                 .and_then(Json::as_text)
                 .unwrap_or("")
                 .to_string()
@@ -476,7 +522,7 @@ impl Harness {
         let permission = Permission {
             title: text("title"),
             kind: text("kind"),
-            call: call.cloned().unwrap_or(Json::Null),
+            call: call.clone(),
         };
         // An option for one time is better than an option for always: with
         // "always", the agent does not ask the next time.
@@ -485,26 +531,22 @@ impl Harness {
         } else {
             ["reject_once", "reject_always"]
         };
-        let options = params
-            .and_then(|params| params.get("options"))
-            .and_then(Json::as_list)
-            .unwrap_or(&[]);
-        let option = kinds.iter().find_map(|kind| {
-            options
+        let option = kinds.iter().find_map(|wanted| {
+            offered
                 .iter()
-                .find(|option| option.get("kind").and_then(Json::as_text) == Some(kind))
-                .and_then(|option| option.get("optionId"))
+                .find(|(kind, _)| kind == wanted)
+                .map(|(_, name)| *name)
         });
         // The protocol does not say that a request has an option of each
         // kind. With no option for the answer, Lira chooses none, and the
         // agent does not do what it asked for.
-        match option {
+        Ok(match option {
             Some(option) => Json::object([
                 ("outcome", Json::text("selected")),
                 ("optionId", option.clone()),
             ]),
             None => Json::object([("outcome", Json::text("cancelled"))]),
-        }
+        })
     }
 
     /// Gives a line to the thread that writes to the input. The thread
@@ -559,9 +601,12 @@ impl Harness {
     ///
     /// The output can stay open after the harness ended, when a child of
     /// the harness holds it, and that child can write on. So Lira looks by
-    /// the clock if the harness still runs, also while lines come. After
-    /// the harness ended, Lira reads for a short time more, for what the
-    /// harness wrote before.
+    /// the clock if the harness still runs, also while lines come.
+    ///
+    /// After the harness ended, Lira still reads what the harness wrote
+    /// before. It stops when no line comes for a short time, or after
+    /// `AFTER` at the latest. The time that Lira needs for a line that it
+    /// got does not count as a time with no line.
     fn line(&mut self, method: &str) -> Result<Vec<u8>, Error> {
         if self.gone.is_some() {
             return Err(self.ended(method, None));
@@ -580,16 +625,25 @@ impl Harness {
                 return Err(self.ended(method, Some("closed its input")));
             }
             let wait = match self.ended_at {
-                Some(at) => match LAST.checked_sub(at.elapsed()) {
-                    Some(left) => left,
-                    None => return Err(self.ended(method, Some("ended"))),
-                },
+                Some(at) if at.elapsed() >= AFTER => {
+                    return Err(self.ended(method, Some("ended")));
+                }
+                Some(_) => LAST,
                 None => LOOK,
             };
             match self.lines.recv_timeout(wait) {
-                Ok(line) => return Ok(line),
+                Ok(Line::Text(line)) => return Ok(line),
+                Ok(Line::TooLong) => {
+                    // Lira reads no more, so the harness can't go on.
+                    self.stop();
+                    self.gone = Some("wrote a line that is too long, and Lira stopped it".into());
+                    return Err(self.protocol(format!("a line is longer than {LONGEST} bytes")));
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(self.ended(method, Some("closed its output")));
+                }
+                Err(RecvTimeoutError::Timeout) if self.ended_at.is_some() => {
+                    return Err(self.ended(method, Some("ended")));
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -750,20 +804,25 @@ fn write_lines(mut input: ChildStdin) -> (Sender<String>, Receiver<()>) {
 }
 
 /// Reads the output of a harness until it ends, and gives each line. It
-/// keeps `LINES` lines at most, and then waits until Lira reads one.
-fn read_lines(output: ChildStdout) -> Receiver<Vec<u8>> {
+/// keeps `LINES` lines at most, and then waits until Lira reads one. It
+/// stops at a line that is longer than `LONGEST`.
+fn read_lines(output: ChildStdout) -> Receiver<Line> {
     let (found, lines) = mpsc::sync_channel(LINES);
     thread::spawn(move || {
         let mut output = BufReader::new(output);
         loop {
             let mut line = Vec::new();
-            match output.read_until(b'\n', &mut line) {
+            // One byte more than the longest line shows a line that is
+            // longer.
+            let read = (&mut output).take(LONGEST + 1).read_until(b'\n', &mut line);
+            let line = match read {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if found.send(line).is_err() {
-                        break;
-                    }
-                }
+                Ok(_) if line.len() as u64 > LONGEST => Line::TooLong,
+                Ok(_) => Line::Text(line),
+            };
+            let stop = matches!(line, Line::TooLong);
+            if found.send(line).is_err() || stop {
+                break;
             }
         }
     });
