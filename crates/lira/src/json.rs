@@ -14,6 +14,65 @@ pub enum Json {
     Object(Vec<(String, Json)>),
 }
 
+impl Json {
+    /// A text value.
+    pub fn text(text: &str) -> Json {
+        Json::Text(text.to_string())
+    }
+
+    /// A whole number.
+    pub fn number(number: i64) -> Json {
+        Json::Number(Number::from(number))
+    }
+
+    /// An object with these keys, in this order.
+    pub fn object<const N: usize>(entries: [(&str, Json); N]) -> Json {
+        Json::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    }
+
+    /// The value of a key of an object. When the key is there two times, it
+    /// is the last one. A value that is not an object has no keys.
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(entries) => entries
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// The text, when the value is a text.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Json::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The number, when the value is a whole number that fits in an `i64`.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Number(number) => number.as_i64(),
+            _ => None,
+        }
+    }
+
+    /// The members, when the value is a list.
+    pub fn as_list(&self) -> Option<&[Json]> {
+        match self {
+            Json::List(values) => Some(values),
+            _ => None,
+        }
+    }
+}
+
 /// A number, kept as it was written, so that no digit is lost.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Number(String);
@@ -498,5 +557,36 @@ mod tests {
             "{\"text\":\"a \\\"b\\\" \\\\ \\n\\r\\t \\u0000 \\u001f é \u{2028} \u{1d11e}\",\"list\":[0,null,false],\"key \\n\":{}}"
         );
         assert_eq!(read(&line).unwrap(), value);
+    }
+
+    #[test]
+    fn builds_a_value_and_gets_its_parts() {
+        let value = Json::object([
+            ("name", Json::text("lira")),
+            ("count", Json::number(-3)),
+            ("list", Json::List(vec![Json::Null])),
+        ]);
+        assert_eq!(
+            value.to_string(),
+            "{\"name\":\"lira\",\"count\":-3,\"list\":[null]}"
+        );
+        assert_eq!(value.get("name").and_then(Json::as_text), Some("lira"));
+        assert_eq!(value.get("count").and_then(Json::as_i64), Some(-3));
+        assert_eq!(
+            value.get("list").and_then(Json::as_list),
+            Some(&[Json::Null][..])
+        );
+        assert_eq!(value.get("other"), None);
+
+        // A value of another kind gives nothing.
+        assert_eq!(Json::text("x").get("name"), None);
+        assert_eq!(Json::number(1).as_text(), None);
+        assert_eq!(Json::text("1").as_i64(), None);
+        assert_eq!(number("1.5").as_i64(), None);
+        assert_eq!(Json::Null.as_list(), None);
+
+        // The last of two keys with the same name counts.
+        let twice = read("{\"a\":1,\"a\":2}").unwrap();
+        assert_eq!(twice.get("a"), Some(&Json::number(2)));
     }
 }
