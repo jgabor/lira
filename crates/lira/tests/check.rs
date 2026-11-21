@@ -177,7 +177,9 @@ fn stderr(output: &Output) -> String {
 
 const TWO_SCORES: &str = "\n[[score]]\nname = \"spec\"\nbetter = \"higher\"\n\n[[score]]\nname = \"size\"\nbetter = \"lower\"\n";
 
-// spec(lira check): It runs the check command of the Lira file in the current folder, as the server runs it.
+// The sentence "It runs the check command of the Lira file in the current
+// folder, as the server runs it." has no quote yet: there is no server to
+// compare with.
 // spec(Check): Lira runs the check command in the worktree of the change.
 #[test]
 fn it_runs_the_check_command_in_the_current_folder() {
@@ -547,26 +549,39 @@ fn a_folder_that_is_not_a_repository_is_a_failure() {
 
 #[test]
 fn the_main_branch_is_the_default_branch_of_a_remote() {
-    let first = Repository::new("remote-first", "", "exit 0\n");
+    let first = Repository::new("remote-first", TWO_SCORES, "exit 0\n");
     first.git(&["branch", "--quiet", "--move", "trunk"]);
-    let second = Repository::new("remote-second", "", "");
-    fs::remove_dir_all(&second.root).unwrap();
-    let from = first.root.to_string_lossy().into_owned();
-    let to = second.root.to_string_lossy().into_owned();
-    let output = Command::new("git")
-        .args(["clone", "--quiet", "--origin", "upstream", &from, &to])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
-    second.git(&["switch", "--quiet", "--create", "change"]);
-    second.git(&["branch", "--quiet", "--delete", "trunk"]);
-    second.write("check.sh", "echo \"$LIRA_BASE\" > base.txt\n");
-    let output = second.check();
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(
-        second.read("base.txt").trim(),
-        first.git(&["rev-parse", "HEAD"])
-    );
+    // The name of a remote can have `/` in it.
+    for (name, remote) in [
+        ("remote-second", "upstream"),
+        ("remote-third", "team/origin"),
+    ] {
+        let second = Repository::new(name, "", "");
+        fs::remove_dir_all(&second.root).unwrap();
+        let from = first.root.to_string_lossy().into_owned();
+        let to = second.root.to_string_lossy().into_owned();
+        let output = Command::new("git")
+            .args(["clone", "--quiet", "--origin", remote, &from, &to])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        second.git(&["switch", "--quiet", "--create", "change"]);
+        second.git(&["branch", "--quiet", "--delete", "trunk"]);
+        second.write("check.sh", "echo \"$LIRA_BASE\" > base.txt\n");
+        // The stand-in answers only when Lira asks for the branch `trunk`.
+        second.answer("branch=trunk -f ref=refs/heads/trunk", "count 0\nnext \n");
+        let output = second.check();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{remote}: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            second.read("base.txt").trim(),
+            first.git(&["rev-parse", "HEAD"])
+        );
+    }
 }
 
 #[test]
