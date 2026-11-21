@@ -10,6 +10,10 @@ use std::process::{Command, Stdio};
 /// comment from the next.
 const END_OF_COMMENT: char = '\u{1e}';
 
+/// How many of the newest commits of the main branch Lira asks about, to
+/// find the last merged pull request.
+const NEWEST_COMMITS: usize = 20;
+
 /// Stops with an error that names `gh auth login` when `gh` has no login.
 fn require_login(folder: &Path) -> Result<(), String> {
     let status = Command::new("gh")
@@ -32,10 +36,13 @@ fn require_login(folder: &Path) -> Result<(), String> {
 }
 
 /// Asks the GitHub API of the repository in `folder`, and returns what the
-/// `jq` expression prints.
-fn api(folder: &Path, path: &str, jq: &str) -> Result<String, String> {
+/// `jq` expression prints. `more` is the other arguments of `gh api`.
+fn api(folder: &Path, path: &str, more: &[&str], jq: &str) -> Result<String, String> {
+    let path = format!("repos/{{owner}}/{{repo}}/{path}");
     let output = Command::new("gh")
-        .args(["api", path, "--jq", jq])
+        .args(["api", &path])
+        .args(more)
+        .args(["--jq", jq])
         .current_dir(folder)
         .output()
         .map_err(|e| format!("couldn't run `gh`: {e}"))?;
@@ -50,26 +57,51 @@ fn api(folder: &Path, path: &str, jq: &str) -> Result<String, String> {
 
 /// The scores of the main branch: those in the comment on the last merged
 /// pull request. `branch` is the name of the main branch on GitHub. With no
-/// merged pull request, or no such comment on it, no score has a value.
+/// such pull request, or no such comment on it, no score has a value.
 pub fn main_scores(folder: &Path, branch: &str) -> Result<Scores, String> {
     require_login(folder)?;
-    let pulls = format!(
-        "repos/{{owner}}/{{repo}}/pulls?state=closed&base={branch}&sort=updated&direction=desc&per_page=100"
-    );
-    let newest =
-        "[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number // empty";
-    let number = api(folder, &pulls, newest)?;
-    let number = number.trim();
-    if number.is_empty() {
+    let Some(number) = last_merged(folder, branch)? else {
         return Ok(Scores::default());
-    }
-    let comments = format!("repos/{{owner}}/{{repo}}/issues/{number}/comments?per_page=100");
-    let bodies = api(
-        folder,
-        &comments,
-        &format!(".[] | .body + \"{END_OF_COMMENT}\""),
-    )?;
+    };
+    let comments = format!("issues/{number}/comments");
+    let each = format!(".[] | .body + \"{END_OF_COMMENT}\"");
+    let bodies = api(folder, &comments, &["--paginate"], &each)?;
     Ok(scores_comment(&bodies))
+}
+
+/// The number of the last pull request that was merged into `branch`: the
+/// one that the newest commit of the branch came from. A commit that was
+/// pushed with no pull request has none, so Lira looks at the commit before
+/// it, for the newest commits.
+fn last_merged(folder: &Path, branch: &str) -> Result<Option<String>, String> {
+    let newest = [
+        "--method",
+        "GET",
+        "-f",
+        &format!("sha={branch}"),
+        "-f",
+        &format!("per_page={NEWEST_COMMITS}"),
+    ];
+    let commits = api(folder, "commits", &newest, ".[].sha")?;
+    for commit in commits.lines() {
+        let each = r#".[] | "\(.number) \(.merged_at // "open") \(.base.ref)""#;
+        let pulls = api(folder, &format!("commits/{commit}/pulls"), &[], each)?;
+        if let Some(number) = merged_into(&pulls, branch) {
+            return Ok(Some(number));
+        }
+    }
+    Ok(None)
+}
+
+/// Picks from lines of `<number> <time of the merge, or open> <branch>` the
+/// pull request that was merged into `branch` last.
+fn merged_into(pulls: &str, branch: &str) -> Option<String> {
+    let merged = pulls.lines().filter_map(|line| {
+        let mut parts = line.splitn(3, ' ');
+        let (number, time, into) = (parts.next()?, parts.next()?, parts.next()?);
+        (time != "open" && into == branch).then_some((time, number))
+    });
+    merged.max().map(|(_, number)| number.to_string())
 }
 
 /// The newest comment that is only score lines.
@@ -95,5 +127,14 @@ mod tests {
     fn with_no_such_comment_no_score_has_a_value() {
         assert!(scores_comment("").is_empty());
         assert!(scores_comment("Thanks!\n\u{1e}\n").is_empty());
+    }
+
+    #[test]
+    fn the_last_merged_pull_request_is_merged_and_into_the_main_branch() {
+        let pulls = "5 open main\n8 2026-11-21T10:00:00Z release/1\n6 2026-11-18T10:00:00Z main\n7 2026-11-20T10:00:00Z main\n";
+        assert_eq!(merged_into(pulls, "main"), Some("7".to_string()));
+        assert_eq!(merged_into(pulls, "release/1"), Some("8".to_string()));
+        assert_eq!(merged_into("5 open main\n", "main"), None);
+        assert_eq!(merged_into("", "main"), None);
     }
 }

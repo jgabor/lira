@@ -11,18 +11,22 @@ use std::process::{Command, Output, Stdio};
 const END: char = '\u{1e}';
 
 const STAND_IN_FOR_GH: &str = r#"#!/bin/sh
-# Stands in for `gh` in the tests of `lira check`.
+# Stands in for `gh` in the tests of `lira check`. For `gh api <path>`, it
+# prints the answer whose first line is the end of the path.
 here=$(dirname "$0")
 echo "$*" >> "$here/calls"
 if [ "$1 $2" = "auth status" ]; then
   [ -e "$here/no-login" ] && exit 1
   exit 0
 fi
-case "$2" in
-  *pulls*) cat "$here/pulls" ;;
-  *comments*) cat "$here/comments" ;;
-  *) echo "the stand-in for gh does not know: $*" >&2; exit 1 ;;
-esac
+for answer in "$here"/answers/*; do
+  [ -e "$answer" ] || continue
+  case "$2" in
+    *"$(head -n 1 "$answer")") tail -n +2 "$answer"; exit 0 ;;
+  esac
+done
+echo "the stand-in for gh has no answer for: $*" >&2
+exit 1
 "#;
 
 struct Repository {
@@ -89,14 +93,37 @@ impl Repository {
         self.git(&["rev-parse", "HEAD"])
     }
 
-    /// The scores comment on the last merged pull request, as `gh` gives it.
-    fn main_has(&self, pull: &str, comments: &[&str]) {
+    /// What the stand-in for `gh` prints for an API path that ends with
+    /// `path`.
+    fn answer(&self, path: &str, printed: &str) {
+        let answers = self.gh.join("answers");
+        fs::create_dir_all(&answers).unwrap();
+        let name = fs::read_dir(&answers).unwrap().count().to_string();
+        fs::write(answers.join(name), format!("{path}\n{printed}")).unwrap();
+    }
+
+    /// The comments of a pull request, as `gh` gives them with Lira's `jq`.
+    fn comments(&self, pull: &str, comments: &[&str]) {
         let bodies: String = comments
             .iter()
             .map(|body| format!("{body}{END}\n"))
             .collect();
-        fs::write(self.gh.join("pulls"), format!("{pull}\n")).unwrap();
-        fs::write(self.gh.join("comments"), bodies).unwrap();
+        self.answer(&format!("/issues/{pull}/comments"), &bodies);
+    }
+
+    /// The newest commit of the main branch came from the pull request
+    /// `pull`, which has these comments. With no `pull`, it came from none.
+    fn main_has(&self, pull: &str, comments: &[&str]) {
+        self.answer("/commits", "aaa\n");
+        if pull.is_empty() {
+            self.answer("/commits/aaa/pulls", "");
+        } else {
+            self.answer(
+                "/commits/aaa/pulls",
+                &format!("{pull} 2026-11-20T10:00:00Z main\n"),
+            );
+            self.comments(pull, comments);
+        }
     }
 
     /// What Lira asked `gh`, one line for each call.
@@ -112,6 +139,9 @@ impl Repository {
             .args(args)
             .current_dir(&self.root)
             .env("PATH", std::env::join_paths(folders).unwrap())
+            // The folders of the tests are inside the repository of Lira.
+            // Git must not look there when a test has no repository.
+            .env("GIT_CEILING_DIRECTORIES", self.root.parent().unwrap())
             .env("LIRA_SCORES", self.root.join("not-this-file"))
             .env("LIRA_BASE", "not-this-commit")
             .output()
@@ -180,8 +210,29 @@ fn the_check_command_is_a_line_for_the_shell() {
     let repository = Repository::new("shell", "", "");
     let line = "check = 'test -n \"$LIRA_BASE\" && echo \"a|b\" | tr a c > shell.txt; exit 0'\n";
     repository.write("lira.toml", line);
+    repository.commit("a check on one line");
     assert_eq!(repository.check().status.code(), Some(0));
     assert_eq!(repository.read("shell.txt"), "c|b\n");
+}
+
+// spec(Format of the Lira file): Lira reads the Lira file from the main branch.
+// spec(Format of the Lira file): It does not read it from the branch of a change.
+#[test]
+fn the_lira_file_is_the_one_of_the_main_branch() {
+    let repository = Repository::new("from-main", "", "");
+    repository.write("lira.toml", "check = \"exit 9\"\n");
+    repository.commit("a check that fails");
+    // The change gives itself a check that passes.
+    repository.git(&["switch", "--quiet", "--create", "change"]);
+    repository.write("lira.toml", "check = \"exit 0\"\n");
+    repository.commit("an easy check");
+    assert_eq!(repository.check().status.code(), Some(1));
+    // The file in the folder does not count before it is committed either.
+    repository.git(&["switch", "--quiet", "main"]);
+    repository.write("lira.toml", "check = \"exit 0\"\n");
+    assert_eq!(repository.check().status.code(), Some(1));
+    repository.commit("the main branch gets the easy check");
+    assert_eq!(repository.check().status.code(), Some(0));
 }
 
 // spec(Check): Lira sets `LIRA_SCORES` to the path of an empty file before it runs the check.
@@ -219,7 +270,6 @@ fn lira_base_is_the_commit_of_the_main_branch_that_the_change_starts_from() {
 // spec(lira check): It prints each score with its value, and its value on the main branch.
 // spec(Scores): The check writes one line for each score to the file that `LIRA_SCORES` names.
 // spec(Scores): A score line is `<name> = <number>`.
-// spec(Scores): Lira reads the scores of the main branch from the comment on the last merged pull request.
 #[test]
 fn it_prints_each_score_with_its_value_and_its_value_on_the_main_branch() {
     let script = "echo 'size = 2.5' >> \"$LIRA_SCORES\"\necho 'spec = 14' >> \"$LIRA_SCORES\"\n";
@@ -231,18 +281,56 @@ fn it_prints_each_score_with_its_value_and_its_value_on_the_main_branch() {
         stdout(&output),
         "spec = 14, and 13 on the main branch\nsize = 2.5, and 2 on the main branch: worse\n"
     );
-    // Lira asked for the merged pull requests of the main branch, then for
-    // the comments of the last one.
+}
+
+// spec(Scores): Lira reads the scores of the main branch from the comment on the last merged pull request.
+#[test]
+fn the_scores_of_the_main_branch_are_on_the_last_merged_pull_request() {
+    let repository = Repository::new(
+        "last-merged",
+        TWO_SCORES,
+        "echo 'spec = 14' > \"$LIRA_SCORES\"\n",
+    );
+    // The newest commit was pushed with no pull request. The one before it
+    // is in an open pull request, in one that was merged into another
+    // branch, and in two that were merged into the main branch.
+    repository.answer("/commits", "ccc\nbbb\naaa\n");
+    repository.answer("/commits/ccc/pulls", "");
+    repository.answer(
+        "/commits/bbb/pulls",
+        "5 open main\n8 2026-11-21T10:00:00Z release\n6 2026-11-18T10:00:00Z main\n7 2026-11-20T10:00:00Z main\n",
+    );
+    repository.answer("/commits/aaa/pulls", "4 2026-11-17T10:00:00Z main\n");
+    repository.comments(
+        "7",
+        &["spec = 1", "A remark, with spec = 99 in it.", "spec = 12"],
+    );
+    for other in ["4", "5", "6", "8"] {
+        repository.comments(other, &["spec = 77"]);
+    }
+    let output = repository.check();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("spec = 14, and 12 on the main branch\n"),
+        "{}",
+        stdout(&output)
+    );
+    // Lira asked for the newest commits of the main branch, then for the
+    // pull requests of each until one was merged, then for its comments.
     let calls = repository.calls();
     let calls: Vec<&str> = calls.lines().collect();
-    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls.len(), 5, "{calls:?}");
     assert_eq!(calls[0], "auth status");
     assert!(
-        calls[1].contains("/pulls?state=closed&base=main&"),
+        calls[1].contains("/commits --method GET -f sha=main "),
         "{calls:?}"
     );
-    assert!(calls[1].contains("merged_at"), "{calls:?}");
-    assert!(calls[2].contains("/issues/7/comments"), "{calls:?}");
+    assert!(calls[2].contains("/commits/ccc/pulls "), "{calls:?}");
+    assert!(calls[3].contains("/commits/bbb/pulls "), "{calls:?}");
+    assert!(
+        calls[4].contains("/issues/7/comments --paginate "),
+        "{calls:?}"
+    );
 }
 
 // spec(Scores): A score line with a name that the Lira file does not have is an error.
@@ -328,7 +416,7 @@ fn with_no_merged_pull_request_no_score_has_a_value_on_the_main_branch() {
         stdout(&output),
         "spec = 1, and no value on the main branch\nsize has no value, and no value on the main branch\n"
     );
-    assert_eq!(repository.calls().lines().count(), 2);
+    assert_eq!(repository.calls().lines().count(), 3);
 }
 
 #[test]
@@ -374,6 +462,7 @@ fn a_repository_with_no_scores_asks_github_nothing() {
 fn a_wrong_lira_file_is_a_failure_that_names_the_line() {
     let repository = Repository::new("wrong-file", "", "echo ran > ran.txt\n");
     repository.write("lira.toml", "check = \"sh check.sh\"\nchek = 1\n");
+    repository.commit("a wrong key");
     let output = repository.check();
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -385,15 +474,55 @@ fn a_wrong_lira_file_is_a_failure_that_names_the_line() {
 }
 
 #[test]
-fn a_folder_with_no_lira_file_is_a_failure() {
+fn a_main_branch_with_no_lira_file_is_a_failure() {
     let repository = Repository::new("no-file", "", "exit 0\n");
-    fs::remove_file(repository.root.join("lira.toml")).unwrap();
+    repository.git(&["rm", "--quiet", "lira.toml"]);
+    repository.commit("no Lira file");
+    // A Lira file that is only in the folder does not count.
+    repository.write("lira.toml", "check = \"exit 0\"\n");
     let output = repository.check();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("there is no `lira.toml` in this folder"),
+        stderr(&output).contains("the main branch, `main`, has no `lira.toml`"),
         "{}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn a_folder_that_is_not_a_repository_is_a_failure() {
+    let repository = Repository::new("no-repository", "", "exit 0\n");
+    fs::remove_dir_all(repository.root.join(".git")).unwrap();
+    let output = repository.check();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("Lira can't find the main branch here"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn the_main_branch_is_the_default_branch_of_a_remote() {
+    let first = Repository::new("remote-first", "", "exit 0\n");
+    first.git(&["branch", "--quiet", "--move", "trunk"]);
+    let second = Repository::new("remote-second", "", "");
+    fs::remove_dir_all(&second.root).unwrap();
+    let from = first.root.to_string_lossy().into_owned();
+    let to = second.root.to_string_lossy().into_owned();
+    let output = Command::new("git")
+        .args(["clone", "--quiet", "--origin", "upstream", &from, &to])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    second.git(&["switch", "--quiet", "--create", "change"]);
+    second.git(&["branch", "--quiet", "--delete", "trunk"]);
+    second.write("check.sh", "echo \"$LIRA_BASE\" > base.txt\n");
+    let output = second.check();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        second.read("base.txt").trim(),
+        first.git(&["rev-parse", "HEAD"])
     );
 }
 

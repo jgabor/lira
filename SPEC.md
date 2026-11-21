@@ -142,6 +142,7 @@ Lira does these steps for each issue, in this order.
 
 - The check writes one line for each score to the file that `LIRA_SCORES` names.
 - A score line is `<name> = <number>`.
+- The number of a score is a decimal number, such as `12`, `-3` or `0.25`.
 - A score line with a name that the Lira file does not have is an error.
 - Two score lines with the same name are an error.
 - A score that the check did not write has no value, and it is not compared.
