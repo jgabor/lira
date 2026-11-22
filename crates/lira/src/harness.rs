@@ -294,11 +294,14 @@ impl Harness {
         let guard = match guard(child.id()) {
             Ok(guard) => Some(guard),
             Err(error) => {
+                // This stops the harness, and not what the harness started
+                // in these first moments: Lira stops a process group with
+                // `sh`, and `sh` is what did not start here.
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(Error::Start {
                     reason: format!(
-                        "Lira can't start `sh`, which it needs to stop the harness `{program}`: {error}"
+                        "Lira can't start the process that guards the harness `{program}`. It is a `sh`, and it did not start: {error}"
                     ),
                     program,
                 });
