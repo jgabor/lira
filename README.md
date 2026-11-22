@@ -42,6 +42,15 @@ An issue with no `auto:` label does not start.
 | `lira answer <number> "<text>"` | Writes your answer to the question of an agent. |
 | `lira later <number>` | Moves an issue or chat to Later. |
 
+## Build
+
+Lira is written in Rust. `rust-toolchain.toml` names the version of Rust.
+
+- `cargo build` builds Lira.
+- `cargo xtask check` runs the check of this repository: the format test, the
+  lint, the tests and the spec quotes. It must pass before a pull request is
+  ready for review.
+
 ## Documents
 
 - [SPEC.md](SPEC.md) is the contract for Lira.
