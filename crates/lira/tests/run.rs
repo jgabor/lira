@@ -179,6 +179,10 @@ if [ "$1 $2" = "pr view" ]; then
 fi
 if [ "$1 $2" = "pr ready" ] && printf '%s\n' "$@" | grep -qx -- '--undo'; then
   [ -n "$ORDER" ] && echo undo >> "$ORDER"
+  if [ -e "$here/no-draft" ]; then
+    echo "the stand-in for gh makes no draft" >&2
+    exit 1
+  fi
   exit 0
 fi
 if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/labels$'; then
@@ -3992,6 +3996,48 @@ fn a_folder_of_a_worktree_that_is_gone_gets_a_new_worktree() {
     passed(&repository.continue_work());
     assert_eq!(PathBuf::from(repository.kept("folder")), old);
     assert_eq!(repository.kept("branch"), branch);
+}
+
+#[test]
+fn a_pull_request_that_can_not_become_a_draft_keeps_needs_answer() {
+    let repository = Repository::stopped("no-draft");
+    repository.view(false, &["needs:answer"]);
+    fs::write(repository.shared.join("bin").join("no-draft"), "").unwrap();
+    let error = failed(&repository.continue_work());
+    assert!(error.contains("makes no draft"), "{error}");
+    assert!(error.contains("stays"), "{error}");
+    // It stays in the Inbox, since no agent works on it.
+    assert_eq!(
+        repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
+    // The folder of the old worktree went away without git, and so did
+    // the folder of a worktree of yours, such as one on a drive that is not
+    // there now.
+    let repository = Repository::stopped("yours-gone");
+    let old = PathBuf::from(repository.kept("folder"));
+    fs::remove_dir_all(&old).unwrap();
+    let mine = repository.top.join("drive").join("mine");
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "mine",
+            mine.to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(&mine).unwrap();
+    passed(&repository.continue_work());
+    assert_eq!(PathBuf::from(repository.kept("folder")), old);
+    let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains(mine.to_str().unwrap()), "{listed}");
 }
 
 #[test]
