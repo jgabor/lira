@@ -123,7 +123,7 @@ impl Run<'_> {
                 tries += 1;
                 if tries == TRIES {
                     return Err(format!(
-                        "the check failed {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
+                        "the change did not pass the check {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
                         failure.for_you
                     ));
                 }
@@ -132,21 +132,25 @@ impl Run<'_> {
                 continue;
             }
             tries = 0;
-            // Review.
+            // Review. The check passed one commit. Each time that Lira
+            // brings the pull request up to date, it can push a newer
+            // commit of the agent. Then the check reads the change again.
+            let checked = self.pull_request.commit().map(str::to_string);
             self.note("A Reviewer reads the change.")?;
+            if self.pull_request.commit() != checked.as_deref() {
+                continue;
+            }
             let review = self.review()?;
             if review.passed {
-                // Ready.
-                let passed = self.pull_request.commit().map(str::to_string);
-                // Lira asks the agent for the description one time. An
-                // agent that changes the change when it is asked is not
+                // Ready. Lira asks the agent for the description one time.
+                // An agent that changes the change when it is asked is not
                 // asked again, so this loop ends.
                 let description = self.describe(!asked);
                 asked = true;
                 // The agent can change the worktree while it writes the
                 // description. Then the change is not what the check and
                 // the Reviewer passed, and both read it again.
-                let same = Some(git::head(&self.made.folder)?) == passed
+                let same = Some(git::head(&self.made.folder)?) == checked
                     && git::changes(&self.made.folder)?.trim().is_empty();
                 if !same {
                     self.note("Lira runs the check.")?;
@@ -491,12 +495,17 @@ fn own_description(request: &str, subjects: &[String], said: &str) -> String {
         .iter()
         .map(|subject| format!("- {subject}\n"))
         .collect();
+    // What the agent said is a quote, as the request is. So a heading in
+    // it is no heading of the description.
     let decisions = match said.trim() {
-        "" => "The agent named none.",
-        said => said,
+        "" => "The agent named none.\n".to_string(),
+        said => {
+            let said: String = said.lines().map(|line| format!("> {line}\n")).collect();
+            format!("The agent wrote this at the end of its work:\n\n{said}")
+        }
     };
     format!(
-        "## Problem\n\nThe request was:\n\n{request}\n## Change\n\n{change}\n## Decisions\n\nThe agent wrote this at the end of its work:\n\n{decisions}\n"
+        "## Problem\n\nThe request was:\n\n{request}\n## Change\n\n{change}\n## Decisions\n\n{decisions}"
     )
 }
 
@@ -619,8 +628,17 @@ mod tests {
         let subjects = ["Add a file".to_string()];
         assert_eq!(
             own_description("Add a file.\nMake it short.", &subjects, " Done. \n"),
-            "## Problem\n\nThe request was:\n\n> Add a file.\n> Make it short.\n\n## Change\n\n- Add a file\n\n## Decisions\n\nThe agent wrote this at the end of its work:\n\nDone.\n"
+            "## Problem\n\nThe request was:\n\n> Add a file.\n> Make it short.\n\n## Change\n\n- Add a file\n\n## Decisions\n\nThe agent wrote this at the end of its work:\n\n> Done.\n"
         );
+        // A heading in what the agent said is no heading of the description.
+        let with_heading = own_description("Do it.", &subjects, "Done.\n\n## Summary\n\nA file.");
+        let headings: Vec<&str> = with_heading
+            .lines()
+            .filter(|line| line.starts_with('#'))
+            .collect();
+        assert_eq!(headings, ["## Problem", "## Change", "## Decisions"]);
+        assert!(with_heading.contains("> ## Summary\n"));
+        assert!(own_description("Do it.", &subjects, "").ends_with("\n\nThe agent named none.\n"));
     }
 
     #[test]
