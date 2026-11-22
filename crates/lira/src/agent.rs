@@ -1,30 +1,46 @@
 //! An agent: a harness that runs, and one conversation with it. The agent
 //! that does the work and each Reviewer start in the same way.
 
+use crate::data;
 use crate::harness::{Harness, Stop};
 use crate::lira_file::LiraFile;
 use crate::sandbox::Sandbox;
+use std::fs::{self, DirBuilder};
+use std::io::ErrorKind;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The program of the harness when `LIRA_HARNESS` names none, and the Lira
 /// file names none. It is the program that lets Claude Code speak the Agent
 /// Client Protocol.
 const HARNESS: &str = "claude-agent-acp";
 
+/// An agent that runs: its harness, and its conversation with it.
+pub struct Agent {
+    pub harness: Harness,
+    /// The name of the conversation.
+    pub conversation: String,
+    /// The data folder of the harness. It comes after the harness, so that
+    /// it goes away after the harness ended.
+    _data: Data,
+}
+
 /// Starts the harness in `folder`, and a conversation with an agent that
-/// works there. It returns the harness and the name of the conversation.
-/// `from` is the folder that Lira started in. `file` is the Lira file, and
-/// `model` is the AI model for the agent, when the Lira file names one.
+/// works there. `from` is the folder that Lira started in. `file` is the
+/// Lira file, and `model` is the AI model for the agent, when the Lira file
+/// names one.
 ///
-/// The harness runs in `sandbox`. It can change its own data there too, and
-/// `sandbox` has that data afterwards: it is then the sandbox of the agent.
+/// The harness runs in `sandbox`, with a data folder of its own, as `Data`
+/// says. `sandbox` has that data afterwards: it is then the sandbox of the
+/// agent.
 pub fn start(
     from: &Path,
     folder: &Path,
     sandbox: &mut Sandbox,
     file: &LiraFile,
     model: Option<&str>,
-) -> Result<(Harness, String), String> {
+) -> Result<Agent, String> {
     let named = std::env::var_os("LIRA_HARNESS").filter(|program| !program.is_empty());
     let program = match named {
         Some(named) => {
@@ -49,37 +65,20 @@ pub fn start(
             "Lira can't find the harness `{shown}` on this host, or a program that it needs to start"
         ))
     })?;
-    for data in harness_data() {
-        sandbox.writable(&data);
-        // What tells the harness how to work, and what it runs, stays as it
-        // is. The harness reads it in each later conversation, also outside
-        // a sandbox.
-        for (name, empty) in OWN_SETTINGS {
-            let path = data.join(name);
-            // The agent could make what is not there. So Lira makes it
-            // empty first, and that changes nothing for the harness.
-            if path.symlink_metadata().is_err() {
-                let made = match empty {
-                    Some(text) => std::fs::write(&path, text),
-                    None => std::fs::create_dir(&path),
-                };
-                made.map_err(|error| format!("Lira can't make `{}`: {error}", path.display()))?;
-            }
-            // A link can't be read-only in its folder. The file that it
-            // names can.
-            if let Ok(path) = path.canonicalize() {
-                sandbox.read_only(&path);
-            }
-        }
-    }
+    let data = Data::new()?;
+    data.prepare(sandbox)?;
     let mut command = sandbox.command(found.as_os_str());
-    command.current_dir(folder);
+    command.current_dir(folder).env(DATA_FOLDER, &data.folder);
     let mut harness =
         Harness::start_as(command, &shown).map_err(|error| named(error.to_string()))?;
     let conversation = harness
         .converse(folder, model)
         .map_err(|error| error.to_string())?;
-    Ok((harness, conversation))
+    Ok(Agent {
+        harness,
+        conversation,
+        _data: data,
+    })
 }
 
 /// The file of a program: the path itself, or for a name with no folder,
@@ -94,35 +93,150 @@ fn find(program: &Path) -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
+/// The variable that names the data folder of Claude Code. With no value,
+/// it is `~/.claude`.
+const DATA_FOLDER: &str = "CLAUDE_CONFIG_DIR";
+
 /// What the harness keeps in its data folder that says how it works, and
 /// what it runs: its instructions, its settings with their hooks, and its
 /// plugins.
-/// Each is a file with its text when it is empty, or a folder.
-const OWN_SETTINGS: [(&str, Option<&str>); 9] = [
-    ("CLAUDE.md", Some("")),
-    ("settings.json", Some("{}\n")),
-    ("settings.local.json", Some("{}\n")),
-    ("hooks", None),
-    ("agents", None),
-    ("commands", None),
-    ("skills", None),
-    ("plugins", None),
-    ("output-styles", None),
+const OWN_SETTINGS: [&str; 11] = [
+    "CLAUDE.md",
+    "rules",
+    "settings.json",
+    "settings.local.json",
+    "hooks",
+    "agents",
+    "commands",
+    "skills",
+    "workflows",
+    "plugins",
+    "output-styles",
 ];
 
-/// The folders where the harness keeps its own data, such as its login and
-/// its conversations. The harness can change them in its sandbox. Claude
-/// Code keeps its data in `CLAUDE_CONFIG_DIR`, or in `~/.claude` when that
-/// is not set. A folder that is not there is left out.
-fn harness_data() -> Vec<PathBuf> {
-    let absolute = |name: &str| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|folder| folder.is_absolute())
-    };
-    let data =
-        absolute("CLAUDE_CONFIG_DIR").or_else(|| absolute("HOME").map(|home| home.join(".claude")));
-    data.into_iter().filter(|folder| folder.is_dir()).collect()
+/// The file of the login of the harness, in its data folder.
+const LOGIN: &str = ".credentials.json";
+
+/// The configuration of Claude Code. It is in the folder that
+/// `CLAUDE_CONFIG_DIR` names, or in the home folder.
+const CONFIGURATION: &str = ".claude.json";
+
+/// The number of the next data folder that this process makes.
+static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// The data folder of the harness of one agent, such as for its
+/// conversations. Each agent has a new one, in the folder `harness` of the
+/// data folder of Lira, and Lira removes it when the agent ends.
+///
+/// The harness reads its data folder in each later conversation, also
+/// outside a sandbox. So in the sandbox, the data folder of the host is
+/// read-only, with all that is in it, and the harness has this one. Lira
+/// puts these in it, from the data folder of the host:
+///
+/// - What says how the harness works, read-only.
+/// - The login, which the harness can change. It renews the login, and a
+///   login that it can't save could log you out.
+/// - A copy of the configuration of Claude Code, which the harness can
+///   change, and the copy goes away with the folder.
+struct Data {
+    folder: PathBuf,
+}
+
+impl Data {
+    /// Makes a new data folder, which only you can read.
+    fn new() -> Result<Data, String> {
+        let above = data::folder()?.join("harness");
+        let failed = |folder: &Path, error| {
+            format!("Lira can't make the folder `{}`: {error}", folder.display())
+        };
+        fs::create_dir_all(&above).map_err(|error| failed(&above, error))?;
+        loop {
+            let name = format!(
+                "{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let folder = above.join(name);
+            // The folder must be new: Lira removes it with all that is in it.
+            match DirBuilder::new().mode(0o700).create(&folder) {
+                Ok(()) => return Ok(Data { folder }),
+                // A folder of an earlier process with the same number.
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(failed(&folder, error)),
+            }
+        }
+    }
+
+    /// Puts in the data folder what the harness needs from the data folder
+    /// of the host, and makes it writable in `sandbox`.
+    fn prepare(&self, sandbox: &mut Sandbox) -> Result<(), String> {
+        sandbox.writable(&self.folder);
+        if let Some(host) = host_data().filter(|folder| folder.is_dir()) {
+            for name in OWN_SETTINGS {
+                // The harness sees the file that a link names, and not the
+                // link. A link that names nothing is left out.
+                if let Ok(found) = host.join(name).canonicalize() {
+                    sandbox.read_only_at(&found, &self.folder.join(name));
+                }
+            }
+            if let Ok(login) = host.join(LOGIN).canonicalize()
+                && login.is_file()
+            {
+                sandbox.writable_at(&login, &self.folder.join(LOGIN));
+            }
+        }
+        let configuration = absolute(DATA_FOLDER)
+            .or_else(|| absolute("HOME"))
+            .map(|folder| folder.join(CONFIGURATION));
+        if let Some(configuration) = configuration.filter(|file| file.is_file()) {
+            let copy = self.folder.join(CONFIGURATION);
+            fs::copy(&configuration, &copy)
+                .and_then(|_| fs::set_permissions(&copy, fs::Permissions::from_mode(0o600)))
+                .map_err(|error| {
+                    format!(
+                        "Lira can't copy `{}` for the harness: {error}",
+                        configuration.display()
+                    )
+                })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        if fs::remove_dir_all(&self.folder).is_err() {
+            // The harness can take the right to write away from a folder in
+            // it, and then nothing in that folder can go.
+            open(&self.folder);
+            let _ = fs::remove_dir_all(&self.folder);
+        }
+    }
+}
+
+/// Gives you the right to change `folder`, and each folder in it. It does
+/// not follow links.
+fn open(folder: &Path) {
+    let _ = fs::set_permissions(folder, fs::Permissions::from_mode(0o700));
+    for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            open(&entry.path());
+        }
+    }
+}
+
+/// The data folder of the harness on the host, such as for its login and
+/// its conversations. Claude Code keeps its data in `CLAUDE_CONFIG_DIR`, or
+/// in `~/.claude` when that is not set.
+fn host_data() -> Option<PathBuf> {
+    absolute(DATA_FOLDER).or_else(|| absolute("HOME").map(|home| home.join(".claude")))
+}
+
+/// The value of the variable `name`, when it is an absolute path.
+fn absolute(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|folder| folder.is_absolute())
 }
 
 /// Why an agent did not end its reply, or `None` when it did.

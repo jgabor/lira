@@ -119,6 +119,8 @@ Lira does these steps for each issue, in this order.
 
 - No AI model decides which issue starts.
 - An agent works only in its own worktree.
+- An agent can change no file of its harness on the host, other than the login of the harness.
+- The harness of each agent keeps its conversations in a folder of its own, and Lira removes the folder when the agent ends.
 - When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
 - When `bwrap` makes no sandbox, Lira runs no agent, and the error shows what `bwrap` wrote.
 - Lira runs the `setup` command in a new worktree before the agent starts.

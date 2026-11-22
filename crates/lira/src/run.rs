@@ -2,8 +2,9 @@
 //! the pull request for its work, and runs the check and a Reviewer on the
 //! change.
 
+use crate::agent::Agent;
 use crate::check::{self, Output};
-use crate::harness::{Harness, Reply};
+use crate::harness::Reply;
 use crate::pull_request::PullRequest;
 use crate::sandbox::{self, Sandbox};
 use crate::worktree::{self, Worktree};
@@ -59,9 +60,9 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     let model = made.file.models.agent.as_deref();
     let started = sandbox_of(&made.folder).and_then(|mut sandbox| {
         agent::start(folder, &made.folder, &mut sandbox, &made.file, model)
-            .map(|(harness, conversation)| (harness, conversation, sandbox))
+            .map(|agent| (agent, sandbox))
     });
-    let (harness, conversation, sandbox) = match started {
+    let (agent, sandbox) = match started {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -79,8 +80,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         started: folder,
         made: &made,
         request,
-        harness,
-        conversation,
+        agent,
         sandbox,
         pull_request: PullRequest::new(&made)?,
         said: String::new(),
@@ -193,11 +193,10 @@ struct Run<'a> {
     started: &'a Path,
     made: &'a Worktree,
     request: &'a str,
-    /// The harness of the agent. It runs until the run ends, so that the
-    /// agent knows what it did when Lira gives it the output of the check or
-    /// the findings of a Reviewer.
-    harness: Harness,
-    conversation: String,
+    /// The agent. Its harness runs until the run ends, so that the agent
+    /// knows what it did when Lira gives it the output of the check or the
+    /// findings of a Reviewer.
+    agent: Agent,
     /// The sandbox of the agent. The check runs in it too: the check runs
     /// the code of the change, and that is code of the agent.
     sandbox: Sandbox,
@@ -344,9 +343,13 @@ impl Run<'_> {
     /// agent works, Lira looks for a new commit each time a tool call ends.
     fn give(&mut self, message: &str) -> Result<Reply, String> {
         let Run {
-            harness,
+            agent:
+                Agent {
+                    harness,
+                    conversation,
+                    ..
+                },
             pull_request,
-            conversation,
             ..
         } = self;
         // Lira looks for a new commit on a thread of its own. So the agent
@@ -400,8 +403,9 @@ impl Run<'_> {
         let written = ask.then(|| {
             // The agent has no reason to change a file here, so the answer
             // to each permission request is no.
-            self.harness
-                .send(&self.conversation, DESCRIBE, &mut |_| false)
+            self.agent
+                .harness
+                .send(&self.agent.conversation, DESCRIBE, &mut |_| false)
         });
         let written = match &written {
             Some(Ok(reply)) if agent::stopped(&reply.stop).is_none() => description_in(&reply.text),
