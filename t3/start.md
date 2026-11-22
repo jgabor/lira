@@ -9,7 +9,7 @@ The rules are those of SPEC.md, "Issues".
 
 Agent limit: 3
 
-Model of the agent: `claude-opus-5-5`
+Model of the agent: `claude-opus-5-5`, at high effort
 
 1. Run `df --output=avail -BG .`. If it shows less than 20G, say so and stop.
 2. Read the open issues and the open pull requests:
@@ -46,10 +46,12 @@ Model of the agent: `claude-opus-5-5`
 
    `title` is `Issue <number>`.
 
-   `modelSelection`, with the model of the agent from above:
+   `modelSelection`, with the model of the agent from above, at high
+   effort:
 
    ```json
-   {"instanceId": "claudeAgent", "model": "<model>"}
+   {"instanceId": "claudeAgent", "model": "<model>",
+    "options": [{"id": "effort", "value": "high"}]}
    ```
 
    `clientRequestId` is `issue-<number>-<today's date>`.
