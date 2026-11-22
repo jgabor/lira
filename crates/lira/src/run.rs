@@ -117,7 +117,7 @@ impl Run<'_> {
                 tries += 1;
                 if tries == TRIES {
                     return Err(format!(
-                        "the check failed {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
+                        "the change did not pass the check {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
                         failure.for_you
                     ));
                 }
@@ -126,11 +126,20 @@ impl Run<'_> {
                 continue;
             }
             tries = 0;
-            // Review.
+            // Review. The check passed one commit. Each time that Lira
+            // brings the pull request up to date, it can push a newer
+            // commit of the agent. Then the check reads the change again.
+            let checked = self.pull_request.commit().map(str::to_string);
             self.note("A Reviewer reads the change.")?;
+            if self.pull_request.commit() != checked.as_deref() {
+                continue;
+            }
             let review = self.review()?;
             if review.passed {
                 self.note("Nothing. The check and a Reviewer passed the change.")?;
+                if self.pull_request.commit() != checked.as_deref() {
+                    continue;
+                }
                 return self.address();
             }
             rounds += 1;

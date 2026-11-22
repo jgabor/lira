@@ -1323,7 +1323,7 @@ done
     let repository = Repository::checked("check-fails-always", NEEDS_FIXED, work);
     let output = repository.run_in_order();
     let error = failed(&output);
-    assert!(error.contains("failed 3 times"), "{error}");
+    assert!(error.contains("did not pass the check 3 times"), "{error}");
     assert!(error.contains("and fixed.txt is not there"), "{error}");
     // Lira asked the agent to repair the change after the first and after
     // the second failure.
@@ -1334,7 +1334,7 @@ done
     let next = note.split("## Next").nth(1).unwrap();
     let next = next.split("## Decisions").next().unwrap();
     assert!(next.contains("Lira stopped"), "{note}");
-    assert!(next.contains("the check failed 3 times"), "{note}");
+    assert!(next.contains("did not pass the check 3 times"), "{note}");
     // No Reviewer read the change, and the pull request stays a draft.
     assert_eq!(repository.starts(), 1);
     assert!(error.contains(ADDRESS), "{error}");
@@ -1598,6 +1598,14 @@ fn the_reviewer_gets_the_ai_model_of_the_lira_file() {
     // the agent at start 1, and for the Reviewer at start 2.
     assert_eq!(repository.kept("model"), "model-a");
     assert_eq!(repository.kept("model-2"), "model-r");
+
+    // The AI model of the Reviewer is a text. Another kind of value is an
+    // error, and no agent starts.
+    let lira_file = format!("{CHECK}[models]\nreviewer = 5\n");
+    let repository = Repository::new("review-model-number", &lira_file, WORK);
+    let error = failed(&repository.run());
+    assert!(error.contains("`models.reviewer`"), "{error}");
+    assert!(!repository.harness.join("folder").exists());
 }
 
 #[test]
@@ -2134,4 +2142,59 @@ reply 'I try again.'
     // The file that the first message names still has the first output.
     assert!(file_in("second-message").contains("line 0 of the output of check 1"));
     assert!(file_in("third-message").contains("line 0 of the output of check 2"));
+}
+
+#[test]
+fn an_agent_that_never_goes_back_to_its_branch_ends_the_run_and_lira_says_that_no_check_ran() {
+    // The worktree is on another branch each time that the agent replies.
+    let work = r#"git branch -m fix/left
+commit greeting 'Add a greeting'
+ended
+called 'pr create'
+git checkout --quiet -b elsewhere HEAD~1
+reply 'I made the file.'
+while :; do next; reply 'I stay here.'; done
+"#;
+    let repository = Repository::checked("never-back", "echo check >> \"$ORDER\"\n", work);
+    let error = failed(&repository.run_in_order());
+    assert!(error.contains("did not pass the check 3 times"), "{error}");
+    assert!(error.contains("the check did not run"), "{error}");
+    assert_eq!(repository.order(), "");
+    assert_eq!(repository.starts(), 1);
+}
+
+#[test]
+fn a_commit_that_comes_after_the_check_is_checked_before_a_reviewer_reads_it() {
+    // A commit lands on the branch of the agent in the moment after Lira
+    // looked at the worktree, and before it brings the pull request up to
+    // date. This `git` makes that commit, one time: when Lira asks for the
+    // changes of the worktree after the first check.
+    let repository = Repository::checked(
+        "late-after-check",
+        "echo check >> \"$ORDER\"\ntouch \"$ORDER-checked\"\n",
+        WORK,
+    );
+    let real = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = status ] && [ -e "$ORDER-checked" ] && [ ! -e "$ORDER-late" ]; then
+  touch "$ORDER-late"
+  echo late > late.txt
+  "{real}" add late.txt
+  "{real}" commit --quiet --message 'A late commit'
+fi
+exec "{real}" "$@"
+"#
+    );
+    program(&repository.top.join("bin").join("git"), &script);
+    repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
+    passed(&repository.run_in_order());
+    // The check ran again for the late commit, before a Reviewer read the
+    // change, and the Reviewer read the change with it.
+    assert_eq!(repository.order(), "check check review");
+    assert!(repository.first_message(2).contains("+++ b/late.txt"));
 }
