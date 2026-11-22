@@ -3574,6 +3574,7 @@ fn lira_run_writes_the_request_as_the_first_comment_of_the_draft() {
 // spec(lira continue): The command removes `needs:answer` when the pull request has it.
 // spec(lira continue): It prints the address of the pull request.
 // spec(Steps): When you answer, Lira removes `needs:answer` and the work continues.
+// spec(lira continue): The Reviewer gets the request and your answer.
 #[test]
 fn lira_continue_starts_a_new_agent_with_the_request_the_stop_and_your_answer() {
     let repository = Repository::stopped("continue");
@@ -3613,6 +3614,8 @@ fn lira_continue_starts_a_new_agent_with_the_request_the_stop_and_your_answer() 
     );
     let ready = repository.gh("description-when-ready");
     assert!(ready.contains("## Problem"), "{ready}");
+    // The description is for you, so it does not call you "the user".
+    assert!(!ready.contains("user"), "{ready}");
     assert_eq!(
         repository.on_remote(&branch),
         Some(git_ok(
@@ -3676,6 +3679,120 @@ fn your_answer_is_each_comment_of_your_login_after_the_last_comment_of_lira() {
     assert!(more < other, "{message}");
     assert!(message[more..other].contains("`someone`"), "{message}");
     assert!(message[more..other].contains("data"), "{message}");
+}
+
+#[test]
+fn comments_of_others_with_no_question_come_after_the_last_comment_of_lira() {
+    // The pull request has the request, and no question.
+    let repository = Repository::stopped("others-no-question");
+    let listed = repository.shared.join("bin").join("listed");
+    let text = fs::read_to_string(&listed).unwrap();
+    let request = text.lines().next().unwrap().to_string();
+    fs::write(&listed, format!("{request}\n")).unwrap();
+    repository.comment("someone", "Please hurry.");
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(
+        message.contains("Lira did not write what stopped the work"),
+        "{message}"
+    );
+    assert!(!message.contains("after the question"), "{message}");
+    assert!(
+        message.contains("after the last comment of Lira"),
+        "{message}"
+    );
+}
+
+// spec(lira continue): It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
+#[test]
+fn it_is_an_error_when_the_branch_is_in_another_repository_or_checked_out_elsewhere() {
+    let repository = Repository::stopped("branch-elsewhere");
+    let branch = repository.pull_request_branch();
+    let starts = repository.starts();
+    let view = repository.shared.join("bin").join("pr-view");
+    let ours = fs::read_to_string(&view).unwrap();
+    fs::write(&view, ours.replace("cross false", "cross true")).unwrap();
+    let error = failed(&repository.continue_work());
+    assert!(error.contains("in another repository"), "{error}");
+    assert_eq!(repository.starts(), starts);
+
+    fs::write(&view, &ours).unwrap();
+    let old = PathBuf::from(repository.kept("folder"));
+    let old = old.to_str().unwrap();
+    git_ok(&repository.root, &["worktree", "remove", "--force", old]);
+    git_ok(&repository.root, &["checkout", "--quiet", &branch]);
+    let error = failed(&repository.continue_work());
+    assert!(error.contains("no worktree of Lira"), "{error}");
+    assert_eq!(repository.starts(), starts);
+    assert_eq!(
+        git_ok(&repository.root, &["branch", "--show-current"]),
+        branch
+    );
+    assert_eq!(
+        repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
+        Vec::<String>::new()
+    );
+}
+
+// spec(lira continue): It is an error when the worktree and the remote both have commits on the branch that the other does not have.
+#[test]
+fn it_is_an_error_when_the_worktree_and_the_remote_both_have_their_own_commits() {
+    // The old worktree stays, or it is gone and its branch stays.
+    for (test, gone) in [("diverged-worktree", false), ("diverged-branch", true)] {
+        let repository = Repository::stopped(test);
+        let branch = repository.pull_request_branch();
+        let starts = repository.starts();
+        let old = PathBuf::from(repository.kept("folder"));
+        fs::write(old.join("mine.txt"), "mine\n").unwrap();
+        git_ok(&old, &["add", "--all"]);
+        git_ok(
+            &old,
+            &["commit", "--quiet", "--message", "A commit of the worktree"],
+        );
+        if gone {
+            let old = old.to_str().unwrap();
+            git_ok(&repository.root, &["worktree", "remove", "--force", old]);
+        }
+        let yours = repository.push_to(&branch, "yours.txt");
+        let error = failed(&repository.continue_work());
+        assert!(error.contains("does not have"), "{error}");
+        assert!(error.contains(&format!("`{branch}`")), "{error}");
+        // The error names no folder that is gone.
+        if gone {
+            assert!(!old.exists());
+            assert!(!error.contains(old.to_str().unwrap()), "{error}");
+        }
+        assert_eq!(repository.starts(), starts);
+        assert_eq!(repository.on_remote(&branch), Some(yours));
+    }
+}
+
+#[test]
+fn a_link_to_another_worktree_of_lira_in_the_place_of_the_old_worktree_is_not_used() {
+    let repository = Repository::stopped("continue-link-inside");
+    let old = PathBuf::from(repository.kept("folder"));
+    git_ok(
+        &repository.root,
+        &["worktree", "remove", "--force", old.to_str().unwrap()],
+    );
+    // Another worktree of Lira is in the data folder too.
+    let data = repository.top.join("xdg").join("lira");
+    let other = Repository::worktrees(&data).join("other");
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "other",
+            other.to_str().unwrap(),
+        ],
+    );
+    std::os::unix::fs::symlink(&other, &old).unwrap();
+    let error = failed(&repository.continue_work());
+    assert!(error.contains("already there"), "{error}");
+    assert_eq!(git_ok(&other, &["branch", "--show-current"]), "other");
 }
 
 // spec(lira continue): It does not need the label: you can remove it yourself on GitHub.
