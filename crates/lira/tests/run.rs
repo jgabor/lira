@@ -3947,7 +3947,6 @@ reply 'I repaired it.'
     );
 }
 
-// spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
 #[test]
 fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
     let repository = Repository::stopped("continue-no-harness");
@@ -3970,19 +3969,59 @@ fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
 
 #[test]
 fn an_old_worktree_on_no_branch_goes_back_to_the_branch() {
-    let repository = Repository::stopped("continue-detached");
+    // The worktree is on no branch, and its branch can be gone too.
+    for (test, branch_too) in [("continue-detached", false), ("continue-no-branch", true)] {
+        let repository = Repository::stopped(test);
+        let branch = repository.pull_request_branch();
+        let old = PathBuf::from(repository.kept("folder"));
+        git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+        if branch_too {
+            git_ok(&repository.root, &["branch", "--quiet", "-D", &branch]);
+        }
+        passed(&repository.continue_work());
+        assert_eq!(PathBuf::from(repository.kept("folder")), old);
+        assert_eq!(repository.kept("branch"), branch);
+        assert_eq!(
+            repository.kept("log-at-start").lines().next(),
+            Some("Add a greeting")
+        );
+    }
+}
+
+#[test]
+fn a_folder_of_a_worktree_that_is_gone_gets_a_new_worktree() {
+    // The worktree was on no branch, and its folder went away without git.
+    let repository = Repository::stopped("continue-folder-gone");
     let branch = repository.pull_request_branch();
     let old = PathBuf::from(repository.kept("folder"));
     git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+    fs::remove_dir_all(&old).unwrap();
     passed(&repository.continue_work());
     assert_eq!(PathBuf::from(repository.kept("folder")), old);
     assert_eq!(repository.kept("branch"), branch);
+}
+
+#[test]
+fn a_link_in_the_place_of_the_old_worktree_is_not_used() {
+    // A link in the folder of the worktree names the repository of the
+    // host.
+    let repository = Repository::stopped("continue-link");
+    let old = PathBuf::from(repository.kept("folder"));
+    git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+    git_ok(
+        &repository.root,
+        &["worktree", "remove", "--force", old.to_str().unwrap()],
+    );
+    std::os::unix::fs::symlink(&repository.root, &old).unwrap();
+    let error = failed(&repository.continue_work());
+    assert!(error.contains("already there"), "{error}");
     assert_eq!(
-        repository.kept("log-at-start").lines().next(),
-        Some("Add a greeting")
+        git_ok(&repository.root, &["branch", "--show-current"]),
+        "main"
     );
 }
 
+// spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
 // spec(lira continue): The work can stop and ask again.
 #[test]
 fn the_work_can_stop_and_ask_again() {

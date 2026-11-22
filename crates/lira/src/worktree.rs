@@ -109,14 +109,10 @@ pub fn continued(
     let file = git::lira_file_at(repository, &newest.main, &newest.commit)?;
     let on_remote = git::fetch_branch(repository, &newest.remote, branch)?;
     let remote = &newest.remote;
+    let ours = data.join("worktrees").join(&owner).join(&name);
     let folder = match git::worktree_of(repository, branch)? {
         Some(folder) if folder.exists() => {
-            let ours = data.join("worktrees").join(&owner).join(&name);
-            let inside = match (folder.canonicalize(), ours.canonicalize()) {
-                (Ok(folder), Ok(ours)) => folder.starts_with(ours),
-                _ => false,
-            };
-            if !inside {
+            if !is_inside(&folder, &ours) {
                 return Err(format!(
                     "the branch `{branch}` is checked out in `{}`, which is no worktree of Lira. Check out another branch there, and run `lira continue` again",
                     folder.display()
@@ -125,17 +121,20 @@ pub fn continued(
             take(&folder, branch, &on_remote, remote)?;
             folder
         }
-        found => {
+        _ => {
             // git keeps a record of a worktree whose folder is gone, and
-            // makes no other worktree of its branch while it has it.
-            if found.is_some() {
-                git::prune_worktrees(repository)?;
-            }
+            // makes no other worktree in that folder, or of its branch,
+            // while it has it.
+            git::prune_worktrees(repository)?;
             // The old worktree can be in the folder of the branch, and on
             // another branch or on no branch. Then it goes back to the
-            // branch.
-            let folder = data.join("worktrees").join(&owner).join(&name).join(branch);
-            if is_a_worktree_of(&folder, repository)? {
+            // branch. The repository can have no such branch any more,
+            // when the agent gave it another name.
+            let folder = ours.join(branch);
+            if is_inside(&folder, &ours) && is_a_worktree_of(&folder, repository)? {
+                if !git::has_branch(repository, branch)? {
+                    git::add_branch(repository, branch, &on_remote)?;
+                }
                 git::check_out(&folder, branch)?;
                 take(&folder, branch, &on_remote, remote)?;
                 folder
@@ -156,6 +155,15 @@ pub fn continued(
         commit,
     };
     Ok((worktree, on_remote))
+}
+
+/// If `folder` is in the folder `ours`, with each link in both paths
+/// followed.
+fn is_inside(folder: &Path, ours: &Path) -> bool {
+    match (folder.canonicalize(), ours.canonicalize()) {
+        (Ok(folder), Ok(ours)) => folder.starts_with(ours),
+        _ => false,
+    }
 }
 
 /// If `folder` is the top folder of a worktree of the repository in
