@@ -649,6 +649,14 @@ fn the_agent_gets_the_ai_model_of_the_lira_file() {
     // chose this one before the agent got the message.
     assert_eq!(repository.kept("model"), "small-model");
     assert!(repository.message().contains(REQUEST));
+
+    // The AI model is a text. Another kind of value is an error, and no
+    // agent starts.
+    let lira_file = format!("{CHECK}[models]\nagent = 5\n");
+    let repository = Repository::new("model-number", &lira_file, WORK);
+    let error = failed(&repository.run());
+    assert!(error.contains("`models.agent`"), "{error}");
+    assert!(!repository.harness.join("folder").exists());
 }
 
 #[test]
@@ -1131,14 +1139,15 @@ fn a_harness_that_ends_after_the_first_commit_leaves_the_draft_and_lira_names_it
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
-/// If a process with this number runs.
+/// If a process with this number runs. A process that ended, and that its
+/// parent did not ask about yet, does not run.
 fn runs(process: &str) -> bool {
-    Command::new("kill")
-        .args(["-0", process])
-        .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .success()
+    let state = Command::new("ps")
+        .args(["-o", "stat=", "-p", process.trim()])
+        .output()
+        .unwrap();
+    let state = String::from_utf8_lossy(&state.stdout);
+    !state.trim().is_empty() && !state.trim().starts_with('Z')
 }
 
 /// Waits until `done` is true, for 10 seconds at most.
@@ -1163,8 +1172,13 @@ while :; do sleep 1; done
 "#;
     let repository = Repository::new("interrupted", CHECK, work);
     let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
-    let kept = |file: &str| fs::read_to_string(repository.harness.join(file));
-    wait_for("the start of the agent", || kept("harness").is_ok());
+    // The file is there before the number is in it.
+    let written = |file: &str| {
+        fs::read_to_string(repository.harness.join(file)).is_ok_and(|text| text.ends_with('\n'))
+    };
+    wait_for("the start of the agent", || {
+        written("harness") && written("child")
+    });
     let (harness, child) = (repository.kept("harness"), repository.kept("child"));
     assert!(runs(&harness) && runs(&child));
 
@@ -1389,4 +1403,43 @@ next
     passed(&output);
     assert!(repository.harness.join("answered-first").exists());
     assert_eq!(repository.calls("pr create").len(), 1);
+}
+
+#[test]
+fn a_harness_that_lira_can_not_guard_does_not_start() {
+    let repository = Repository::new("no-guard", CHECK, REPLY);
+    // This harness needs no other program, and it answers nothing.
+    program(
+        &repository.harness.join("agent"),
+        "#!/bin/sh\necho \"$$\" > \"${0%/*}/process\"\nexec /bin/sleep 20\n",
+    );
+    // A `PATH` with git and `gh`, and with no `sh` for the guard.
+    let only = repository.top.join("only");
+    fs::create_dir_all(&only).unwrap();
+    let git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let git = String::from_utf8_lossy(&git.stdout).trim().to_string();
+    std::os::unix::fs::symlink(git, only.join("git")).unwrap();
+    let path = format!(
+        "{}:{}",
+        only.display(),
+        repository.top.join("bin").display()
+    );
+    let output = repository
+        .lira()
+        .env("PATH", path)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    let error = failed(&output);
+    assert!(error.contains("`sh`"), "{error}");
+    // The harness does not stay, and the worktree is gone.
+    if let Ok(process) = fs::read_to_string(repository.harness.join("process")) {
+        wait_for("the end of the harness", || !runs(&process));
+    }
+    assert!(Repository::has_no_worktree(
+        &repository.top.join("xdg").join("lira")
+    ));
 }
