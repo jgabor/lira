@@ -14,6 +14,12 @@ pub struct Worktree {
     pub branch: String,
     /// The Lira file of the main branch that the worktree started from.
     pub file: LiraFile,
+    /// The name of the remote that the main branch came from.
+    pub remote: String,
+    /// The name of the main branch on the remote, such as `main`.
+    pub main: String,
+    /// The commit of the main branch that the worktree started from.
+    pub commit: String,
 }
 
 impl Worktree {
@@ -65,6 +71,9 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
             folder: place.folder,
             branch: branch.to_string(),
             file,
+            remote: newest.remote,
+            main: newest.main.name,
+            commit: newest.commit,
         }),
         Err(error) => Err(
             match git::remove_worktree(repository, &place.folder, branch) {

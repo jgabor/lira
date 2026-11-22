@@ -1,9 +1,11 @@
-//! `lira run`: an agent works on one request, in a new worktree.
+//! `lira run`: an agent works on one request, in a new worktree, and Lira
+//! opens the pull request for its work.
 
 use crate::harness::{Harness, Stop};
 use crate::json::Json;
+use crate::pull_request::PullRequest;
 use crate::worktree::{self, Worktree};
-use crate::{data, git};
+use crate::{data, git, github};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
@@ -19,9 +21,12 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 const HARNESS: &str = "claude-agent-acp";
 
 /// `lira run "<request>"`: makes a new worktree of the repository in
-/// `folder`, and runs an agent on the request in it. It returns when the
-/// reply of the agent ends.
+/// `folder`, and runs an agent on the request in it. It opens a draft pull
+/// request at the first commit of the agent, and prints the address of the
+/// pull request when the reply of the agent ends.
 pub fn command(folder: &Path, request: &str) -> Result<(), String> {
+    // A missing login stops the run here, before an agent works.
+    github::require_login(folder)?;
     let data = data::folder()?;
     let made = worktree::make(folder, &data, &new_branch())?;
     let place = format!("`{}`", made.folder.display());
@@ -42,30 +47,62 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         }
     };
 
-    // Nobody is there to answer, and the agent works in a worktree of its
-    // own. So the answer to each permission request is yes.
-    let reply = harness.send(&conversation, &message(&made.branch, request), &mut |_| {
-        true
-    });
+    let mut pull_request = PullRequest::new(&made);
+    let reply = harness.send_and_watch(
+        &conversation,
+        &message(&made.branch, request),
+        // Nobody is there to answer, and the agent works in a worktree of
+        // its own. So the answer to each permission request is yes.
+        &mut |_| true,
+        // A tool call can be the first commit, or a later one.
+        &mut || pull_request.look(),
+    );
     // The harness stops here, so that the agent changes nothing after this.
     drop(harness);
-    let reply = reply.map_err(|error| format!("{error}\nWhat the agent did is in {place}"))?;
+    // Where the work is, for an error.
+    let left = |pull_request: &PullRequest| {
+        let mut left = format!("What the agent did is in {place}");
+        if let Some(branch) = pull_request.branch() {
+            left.push_str(&format!(
+                ", and on the branch `{branch}` of the remote `{}`",
+                made.remote
+            ));
+        }
+        if let Some(address) = pull_request.address() {
+            left.push_str(&format!("\nThe pull request is a draft: {address}"));
+        }
+        left
+    };
+    let reply = reply.map_err(|error| {
+        let pushed = pull_request
+            .problem()
+            .map_or(String::new(), |problem| format!("\n{problem}"));
+        format!("{error}{pushed}\n{}", left(&pull_request))
+    })?;
     let said = match reply.text.trim() {
         "" => "The agent wrote nothing".to_string(),
         text => format!("The agent wrote:\n\n{text}\n"),
     };
     if let Some(why) = stopped(&reply.stop) {
         return Err(format!(
-            "the agent stopped before the end of its work: {why}. What it did is in {place}\n{said}"
+            "the agent stopped before the end of its work: {why}\n{}\n{said}",
+            left(&pull_request)
         ));
     }
-    match git::current_branch(&made.folder)? {
-        Some(branch) => {
-            eprintln!("lira: the work of the agent is on the branch `{branch}`, in {place}")
-        }
-        None => eprintln!("lira: the work of the agent is in {place}, on no branch"),
+    let address = pull_request
+        .complete(&reply.text)
+        .map_err(|error| format!("{error}\n{}\n{said}", left(&pull_request)))?;
+    if git::has_changes(&made.folder)? {
+        eprintln!(
+            "lira: the worktree {place} has changes that are in no commit. They are not in the pull request"
+        );
     }
+    let branch = pull_request.branch().unwrap_or(&made.branch);
+    eprintln!(
+        "lira: the work of the agent is complete. It is on the branch `{branch}`, and its worktree is {place}"
+    );
     eprintln!("{said}");
+    println!("{address}");
     Ok(())
 }
 

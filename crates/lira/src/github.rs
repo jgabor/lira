@@ -2,6 +2,7 @@
 //! token of its own: `gh` uses its login.
 
 use crate::scores::Scores;
+use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -37,7 +38,7 @@ const HISTORY_LINES: &str = r#".data.repository as $r
     | "pull \($place) \(.number) \(.mergedAt // "open") \(.baseRefName)")"#;
 
 /// Stops with an error that names `gh auth login` when `gh` has no login.
-fn require_login(folder: &Path) -> Result<(), String> {
+pub fn require_login(folder: &Path) -> Result<(), String> {
     let status = Command::new("gh")
         .args(["auth", "status"])
         .current_dir(folder)
@@ -74,6 +75,69 @@ fn api(folder: &Path, args: &[&str]) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs `gh pr` in `folder` with these arguments, and returns what it
+/// prints.
+fn pull_request(folder: &Path, args: &[&OsStr]) -> Result<String, String> {
+    let output = Command::new("gh")
+        .arg("pr")
+        .args(args)
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run `gh`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`gh pr {}` failed: {}",
+            args[0].to_string_lossy(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Opens a draft pull request for the branch `head` of the repository in
+/// `folder`, into the branch `base`. The description is the text of the
+/// file `description`. It returns the address of the pull request.
+pub fn open_draft(
+    folder: &Path,
+    base: &str,
+    head: &str,
+    title: &str,
+    description: &Path,
+) -> Result<String, String> {
+    let args = ["create", "--draft", "--base", base, "--head", head];
+    let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+    args.extend([OsStr::new("--title"), OsStr::new(title)]);
+    args.extend([OsStr::new("--body-file"), description.as_os_str()]);
+    let printed = pull_request(folder, &args)?;
+    // `gh` prints the address of the new pull request on the last line.
+    let address = printed
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty());
+    match address {
+        Some(address) if address.starts_with("https://") || address.starts_with("http://") => {
+            Ok(address.to_string())
+        }
+        _ => Err(format!(
+            "`gh pr create` did not print the address of the pull request. It printed:\n{}",
+            printed.trim()
+        )),
+    }
+}
+
+/// Gives the pull request at `address` the text of the file `description`
+/// as its description.
+pub fn describe(folder: &Path, address: &str, description: &Path) -> Result<(), String> {
+    let args = [
+        OsStr::new("edit"),
+        OsStr::new(address),
+        OsStr::new("--body-file"),
+        description.as_os_str(),
+    ];
+    pull_request(folder, &args).map(|_| ())
 }
 
 /// The scores of the main branch: those in the comment on the last merged

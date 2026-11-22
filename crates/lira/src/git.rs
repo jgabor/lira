@@ -254,6 +254,99 @@ pub fn current_branch(folder: &Path) -> Result<Option<String>, String> {
     Ok((!branch.is_empty()).then(|| branch.to_string()))
 }
 
+/// The commit that the worktree in a folder is at.
+pub fn head(folder: &Path) -> Result<String, String> {
+    run(folder, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map(|commit| commit.trim().to_string())
+        .map_err(|wrote| {
+            format!(
+                "Lira can't read the newest commit of `{}`. git wrote:\n{wrote}",
+                folder.display()
+            )
+        })
+}
+
+/// The subject of each commit that `to` has and `from` does not have, the
+/// oldest first.
+pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let range = format!("{from}..{to}");
+    let log = run(folder, &["log", "--reverse", "--format=%s", &range, "--"]).map_err(|wrote| {
+        format!(
+            "Lira can't read the commits of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(log.lines().map(str::to_string).collect())
+}
+
+/// If the worktree in a folder has a change that is in no commit.
+pub fn has_changes(folder: &Path) -> Result<bool, String> {
+    let status = run(folder, &["status", "--porcelain"]).map_err(|wrote| {
+        format!(
+            "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(!status.trim().is_empty())
+}
+
+/// If a remote has this branch now.
+pub fn remote_has_branch(folder: &Path, remote: &str, branch: &str) -> Result<bool, String> {
+    let full = format!("refs/heads/{branch}");
+    let mut command = Command::new("git");
+    command
+        .args(["ls-remote", "--exit-code", "--heads", "--", remote, &full])
+        .current_dir(folder);
+    let ended = process::run(command, false)
+        .map_err(|e| format!("couldn't run `git`: {e}. Install git, or add it to PATH"))?;
+    match ended.status.code() {
+        Some(0) => Ok(true),
+        // With `--exit-code`, this status says that the remote has no such
+        // branch.
+        Some(2) => Ok(false),
+        _ => Err(format!(
+            "Lira can't ask the remote `{remote}` for the branch `{branch}`. git wrote:\n{}",
+            String::from_utf8_lossy(&ended.errors).trim()
+        )),
+    }
+}
+
+/// Pushes a commit to a branch of a remote. `before` is the commit that
+/// the remote must have on that branch now, or `None` for a branch that
+/// the remote must not have. So Lira replaces only what it pushed itself.
+pub fn push(
+    folder: &Path,
+    remote: &str,
+    commit: &str,
+    branch: &str,
+    before: Option<&str>,
+) -> Result<(), String> {
+    let full = format!("refs/heads/{branch}");
+    let lease = format!("--force-with-lease={full}:{}", before.unwrap_or(""));
+    let what = format!("{commit}:{full}");
+    run(folder, &["push", "--quiet", &lease, "--", remote, &what])
+        .map(|_| ())
+        .map_err(|wrote| {
+            format!("Lira can't push the branch `{branch}` to the remote `{remote}`. git wrote:\n{wrote}")
+        })
+}
+
+/// The path of a file that git keeps for the worktree in a folder, outside
+/// the files of the repository. git removes it with the worktree.
+pub fn own_file(folder: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = run(
+        folder,
+        &["rev-parse", "--path-format=absolute", "--git-path", name],
+    )
+    .map_err(|wrote| {
+        format!(
+            "Lira can't find the folder that git keeps for `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(PathBuf::from(path.trim_end_matches('\n')))
+}
+
 /// If the repository has this branch.
 pub fn has_branch(folder: &Path, branch: &str) -> Result<bool, String> {
     let full = format!("refs/heads/{branch}");
