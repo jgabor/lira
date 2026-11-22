@@ -414,9 +414,10 @@ impl Harness {
     }
 
     /// The same as `send`. Lira also calls `after_tool` each time the agent
-    /// finished a tool call, with success or with a failure. The agent
-    /// waits for nothing while `after_tool` runs, and what it writes in
-    /// that time is read afterwards.
+    /// finished a tool call, with success or with a failure. Lira reads
+    /// nothing from the harness while `after_tool` runs, so a permission
+    /// request waits for it. Work that takes long belongs on another
+    /// thread.
     pub fn send_and_watch(
         &mut self,
         conversation: &str,

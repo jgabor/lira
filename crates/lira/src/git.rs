@@ -254,18 +254,6 @@ pub fn current_branch(folder: &Path) -> Result<Option<String>, String> {
     Ok((!branch.is_empty()).then(|| branch.to_string()))
 }
 
-/// The commit that the worktree in a folder is at.
-pub fn head(folder: &Path) -> Result<String, String> {
-    run(folder, &["rev-parse", "--verify", "HEAD^{commit}"])
-        .map(|commit| commit.trim().to_string())
-        .map_err(|wrote| {
-            format!(
-                "Lira can't read the newest commit of `{}`. git wrote:\n{wrote}",
-                folder.display()
-            )
-        })
-}
-
 /// The subject of each commit that `to` has and `from` does not have, the
 /// oldest first.
 pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
@@ -279,19 +267,9 @@ pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, Stri
     Ok(log.lines().map(str::to_string).collect())
 }
 
-/// If the worktree in a folder has a change that is in no commit.
-pub fn has_changes(folder: &Path) -> Result<bool, String> {
-    let status = run(folder, &["status", "--porcelain"]).map_err(|wrote| {
-        format!(
-            "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
-            folder.display()
-        )
-    })?;
-    Ok(!status.trim().is_empty())
-}
-
-/// If a remote has this branch now.
-pub fn remote_has_branch(folder: &Path, remote: &str, branch: &str) -> Result<bool, String> {
+/// The commit that a remote has on this branch now, or `None` when the
+/// remote has no such branch.
+pub fn remote_commit(folder: &Path, remote: &str, branch: &str) -> Result<Option<String>, String> {
     let full = format!("refs/heads/{branch}");
     let mut command = Command::new("git");
     command
@@ -299,16 +277,50 @@ pub fn remote_has_branch(folder: &Path, remote: &str, branch: &str) -> Result<bo
         .current_dir(folder);
     let ended = process::run(command, false)
         .map_err(|e| format!("couldn't run `git`: {e}. Install git, or add it to PATH"))?;
-    match ended.status.code() {
-        Some(0) => Ok(true),
-        // With `--exit-code`, this status says that the remote has no such
-        // branch.
-        Some(2) => Ok(false),
-        _ => Err(format!(
+    let failed = || {
+        format!(
             "Lira can't ask the remote `{remote}` for the branch `{branch}`. git wrote:\n{}",
             String::from_utf8_lossy(&ended.errors).trim()
-        )),
+        )
+    };
+    match ended.status.code() {
+        // A line is the commit, a tab, and the full name of the branch.
+        Some(0) => {
+            let printed = String::from_utf8_lossy(&ended.output);
+            let commit = printed.lines().find_map(|line| {
+                let (commit, name) = line.split_once('\t')?;
+                (name == full).then(|| commit.to_string())
+            });
+            commit.map(Some).ok_or_else(failed)
+        }
+        // With `--exit-code`, this status says that the remote has no such
+        // branch.
+        Some(2) => Ok(None),
+        _ => Err(failed()),
     }
+}
+
+/// The commit of a branch of the repository, or `None` when the repository
+/// has no such branch.
+pub fn commit_of(folder: &Path, branch: &str) -> Result<Option<String>, String> {
+    let full = format!("refs/heads/{branch}^{{commit}}");
+    let commit = git(folder, &["rev-parse", "--verify", "--quiet", &full])?;
+    Ok(commit.map(|commit| commit.trim().to_string()))
+}
+
+/// The name of each branch of the repository.
+pub fn branches(folder: &Path) -> Result<Vec<String>, String> {
+    let names = run(
+        folder,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )
+    .map_err(|wrote| {
+        format!(
+            "Lira can't read the branches of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(names.lines().map(str::to_string).collect())
 }
 
 /// Pushes a commit to a branch of a remote. `before` is the commit that

@@ -4,12 +4,14 @@
 use crate::harness::{Harness, Stop};
 use crate::pull_request::PullRequest;
 use crate::worktree::{self, Worktree};
-use crate::{data, git, github};
+use crate::{data, github};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The instructions for the agent. The request follows them.
@@ -46,16 +48,35 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         }
     };
 
-    let mut pull_request = PullRequest::new(&made);
-    let reply = harness.send_and_watch(
-        &conversation,
-        &message(&made.branch, request),
-        // Nobody is there to answer, and the agent works in a worktree of
-        // its own. So the answer to each permission request is yes.
-        &mut |_| true,
-        // A tool call can be the first commit, or a later one.
-        &mut || pull_request.look(),
-    );
+    let mut pull_request = PullRequest::new(&made)?;
+    let message = message(&made.branch, request);
+    // Lira looks for a new commit on a thread of its own. So the agent does
+    // not wait for a permission while Lira talks to the remote or to
+    // GitHub.
+    let reply = thread::scope(|scope| {
+        let (look, looks) = mpsc::channel();
+        let pull_request = &mut pull_request;
+        scope.spawn(move || {
+            while looks.recv().is_ok() {
+                // One look is enough for all tool calls that ended since
+                // the look before.
+                while looks.try_recv().is_ok() {}
+                pull_request.look();
+            }
+        });
+        harness.send_and_watch(
+            &conversation,
+            &message,
+            // Nobody is there to answer, and the agent works in a worktree
+            // of its own. So the answer to each permission request is yes.
+            &mut |_| true,
+            // A tool call can be the first commit, or a later one.
+            &mut || {
+                let _ = look.send(());
+            },
+        )
+        // The thread ends here: nothing can ask for a look any more.
+    });
     // The harness stops here, so that the agent changes nothing after this.
     drop(harness);
     // Where the work is, for an error.
@@ -91,13 +112,6 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     let address = pull_request
         .complete(&reply.text)
         .map_err(|error| format!("{error}\n{}\n{said}", left(&pull_request)))?;
-    // The pull request is there, so a failure to look is no failure of the
-    // run.
-    if let Ok(true) = git::has_changes(&made.folder) {
-        eprintln!(
-            "lira: the worktree {place} has changes that are in no commit. They are not in the pull request"
-        );
-    }
     let branch = pull_request.branch().unwrap_or(&made.branch);
     eprintln!(
         "lira: the work of the agent is complete. It is on the branch `{branch}`, and its worktree is {place}"
