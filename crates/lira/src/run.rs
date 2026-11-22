@@ -92,7 +92,9 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     let address = pull_request
         .complete(&reply.text)
         .map_err(|error| format!("{error}\n{}\n{said}", left(&pull_request)))?;
-    if git::has_changes(&made.folder)? {
+    // The pull request is there, so a failure to look is no failure of the
+    // run.
+    if let Ok(true) = git::has_changes(&made.folder) {
         eprintln!(
             "lira: the worktree {place} has changes that are in no commit. They are not in the pull request"
         );
