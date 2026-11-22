@@ -1171,6 +1171,27 @@ fn the_agent_renames_a_branch_that_the_remote_has_already() {
 }
 
 #[test]
+fn a_new_branch_is_another_name_for_a_taken_one() {
+    // The agent does not give its branch another name. It makes a new
+    // branch for its work, and leaves the one with the taken name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}next\necho asked >> \"$here/asked\"\ngit checkout --quiet -b feat/free\n{REPLY}"
+    );
+    let (repository, theirs) = with_a_taken_branch("taken-new-branch", &work);
+    passed(&repository.run());
+    assert_eq!(repository.kept("asked").lines().count(), 1);
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("feat/free"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head feat/free "), "{created:?}");
+}
+
+#[test]
 fn an_agent_that_keeps_a_taken_name_is_a_failure_after_3_messages() {
     // The agent answers each message, and never changes the name.
     let work = format!(

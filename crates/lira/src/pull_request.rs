@@ -173,10 +173,10 @@ impl<'a> PullRequest<'a> {
     /// note.
     fn bring_up_to_date(&mut self, next: &str, decisions: &str) -> Result<(), String> {
         let folder = &self.worktree.folder;
-        self.taken = None;
+        let was_taken = self.taken.take().is_some();
         // The agent can make a commit while Lira looks. So Lira reads the
         // newest commit one time, and pushes and describes that commit.
-        let commit = self.work()?;
+        let commit = self.work(was_taken)?;
         // The agent can put its work on a newer main branch. The commits
         // that it took from the main branch are not its work, so its work
         // starts at the newest commit that it has in common with the main
@@ -230,8 +230,9 @@ impl<'a> PullRequest<'a> {
 
     /// The newest commit of the work of the agent: the commit of its
     /// branch. The worktree can be on another branch or on no branch, and
-    /// that changes nothing here.
-    fn work(&mut self) -> Result<String, String> {
+    /// that changes nothing here. `was_taken` says that Lira could not push
+    /// the branch the last time, because the remote has its name already.
+    fn work(&mut self, was_taken: bool) -> Result<String, String> {
         let folder = &self.worktree.folder;
         let commit = git::commit_of(folder, &self.local)?;
         let current = git::current_branch(folder)?;
@@ -241,10 +242,13 @@ impl<'a> PullRequest<'a> {
         let moved = match (&commit, &new) {
             // The agent gave its branch a new name.
             (None, Some(_)) => true,
-            // The agent made a new branch for its work, and left the first
-            // one where it started. After the first push, the branch of
-            // the pull request stays.
-            (Some(commit), Some(_)) => *commit == self.worktree.commit && self.pushed.is_none(),
+            // The agent made a new branch for its work. It left the first
+            // one where it started, or it left one with a name that the
+            // remote has already. After the first push, the branch of the
+            // pull request stays.
+            (Some(commit), Some(_)) => {
+                self.pushed.is_none() && (*commit == self.worktree.commit || was_taken)
+            }
             _ => false,
         };
         if let (true, Some(new)) = (moved, new) {
