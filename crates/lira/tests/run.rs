@@ -1945,7 +1945,7 @@ exit 1
     let work = format!(
         r#"own="$(git rev-parse --absolute-git-dir)"
 top="$(cd "$here/../../.." && pwd)"
-for name in {}; do ln -s "$top/$name" "$own/$name"; done
+for name in {}; do [ -f "$top/$name" ] && ln -s "$top/$name" "$own/$name" || exit 1; done
 commit greeting 'Add a greeting'
 reply 'Done.'
 next
