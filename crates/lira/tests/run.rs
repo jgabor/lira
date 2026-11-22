@@ -1182,6 +1182,9 @@ fn when_the_check_fails_lira_gives_its_output_to_the_agent() {
     let second = kept_message(&repository, "second-message");
     assert!(second.contains("the check looks for fixed.txt"), "{second}");
     assert!(second.contains("and fixed.txt is not there"), "{second}");
+    // It is all that the check wrote, and the message says so.
+    assert!(second.contains("This is what the check wrote:"), "{second}");
+    assert!(!second.contains("left out"), "{second}");
     // The check ran in the worktree of the change, before and after the
     // repair.
     assert_eq!(repository.order(), "check check");
@@ -1224,6 +1227,12 @@ done
     // the second failure.
     assert_eq!(repository.order(), "check check check");
     assert_eq!(repository.kept("more-messages"), "message\nmessage");
+    // The progress note says that Lira stopped, and why.
+    let note = repository.gh("edited");
+    let next = note.split("## Next").nth(1).unwrap();
+    let next = next.split("## Decisions").next().unwrap();
+    assert!(next.contains("Lira stopped"), "{note}");
+    assert!(next.contains("the check failed 3 times"), "{note}");
     // No Reviewer read the change, and the pull request stays a draft.
     assert_eq!(repository.starts(), 1);
     assert!(error.contains(ADDRESS), "{error}");
@@ -1246,6 +1255,7 @@ echo "the last line says what is wrong"
         "{second}"
     );
     assert!(second.contains("line 2999 of the output"), "{second}");
+    assert!(second.contains("The start is left out."), "{second}");
     assert!(!second.contains("line 0 of the output"), "{second}");
     assert!(second.len() < 30_000, "{}", second.len());
 }
@@ -1419,6 +1429,11 @@ done
     // the first two.
     assert_eq!(repository.starts(), 4);
     assert_eq!(repository.kept("more-messages"), "message\nmessage");
+    let note = repository.gh("edited");
+    let next = note.split("## Next").nth(1).unwrap();
+    let next = next.split("## Decisions").next().unwrap();
+    assert!(next.contains("Lira stopped"), "{note}");
+    assert!(next.contains("3 rounds of review"), "{note}");
     assert!(error.contains(ADDRESS), "{error}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }

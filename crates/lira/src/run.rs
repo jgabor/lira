@@ -64,9 +64,13 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         pull_request: PullRequest::new(&made),
         said: String::new(),
     };
-    let address = run
-        .steps()
-        .map_err(|error| format!("{error}\n{}", run.left()))?;
+    let address = match run.steps() {
+        Ok(address) => address,
+        Err(error) => {
+            run.stop(&error);
+            return Err(format!("{error}\n{}", run.left()));
+        }
+    };
     let branch = run.pull_request.branch().unwrap_or(&made.branch);
     eprintln!(
         "lira: the check and a Reviewer passed the change. It is on the branch `{branch}`, and its worktree is {place}"
@@ -106,7 +110,7 @@ impl Run<'_> {
                 tries += 1;
                 if tries == TRIES {
                     return Err(format!(
-                        "the check failed {TRIES} times, one after the other, so Lira stops here. The last time, {}",
+                        "the check failed {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
                         failure.for_you
                     ));
                 }
@@ -125,7 +129,7 @@ impl Run<'_> {
             rounds += 1;
             if rounds == ROUNDS {
                 return Err(format!(
-                    "{ROUNDS} rounds of review ended with findings, so Lira stops here. The last Reviewer wrote:\n\n{}\n",
+                    "{ROUNDS} rounds of review ended with findings, so Lira stops here\nThe last Reviewer wrote:\n\n{}\n",
                     review.text.trim()
                 ));
             }
@@ -183,6 +187,18 @@ impl Run<'_> {
         self.pull_request.update(next, decisions)
     }
 
+    /// Says in the progress note that Lira stopped, and why. GitHub is
+    /// where the person reads how far the work is. The run failed already,
+    /// so a failure here changes nothing.
+    fn stop(&mut self, error: &str) {
+        if self.pull_request.address().is_some() {
+            let why = error.lines().next().unwrap_or_default();
+            let _ = self.note(&format!(
+                "Nothing. Lira stopped, and the pull request waits for you: {why}."
+            ));
+        }
+    }
+
     /// The address of the pull request. It is an error when the agent made
     /// no commit, so that there is none.
     fn address(&self) -> Result<String, String> {
@@ -220,7 +236,7 @@ impl Run<'_> {
         let status = &outcome.status;
         let wrote = match end_of(&outcome.wrote, KEPT) {
             "" => "The check wrote nothing.\n".to_string(),
-            end if end.len() < outcome.wrote.len() => format!(
+            end if end.len() < outcome.wrote.trim_end().len() => format!(
                 "This is the end of what the check wrote. The start is left out.\n\n{end}\n"
             ),
             end => format!("This is what the check wrote:\n\n{end}\n"),
