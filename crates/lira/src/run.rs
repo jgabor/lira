@@ -29,10 +29,6 @@ const TRIES: usize = 3;
 /// After this many rounds of review that end with findings, Lira stops.
 const ROUNDS: usize = 3;
 
-/// The file with all that a failed check wrote, when the output is too
-/// long for the message to the agent.
-const OUTPUT: &str = "lira-check-output.txt";
-
 /// How much of the output of a failed check the agent gets, in bytes. It
 /// is the end of the output, where a check says what is wrong.
 const KEPT: usize = 20_000;
@@ -74,6 +70,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         conversation,
         pull_request: PullRequest::new(&made)?,
         said: String::new(),
+        outputs: 0,
     };
     let address = match run.steps() {
         Ok(address) => address,
@@ -105,6 +102,10 @@ struct Run<'a> {
     pull_request: PullRequest<'a>,
     /// The newest reply of the agent.
     said: String,
+    /// How many files Lira wrote with the whole output of a failed check.
+    /// Each file has a name of its own, so a message of before still names
+    /// the output that it is about.
+    outputs: usize,
 }
 
 impl Run<'_> {
@@ -136,7 +137,7 @@ impl Run<'_> {
             let review = self.review()?;
             if review.passed {
                 // Ready.
-                let passed = git::head(&self.made.folder)?;
+                let passed = self.pull_request.commit().map(str::to_string);
                 // Lira asks the agent for the description one time. An
                 // agent that changes the change when it is asked is not
                 // asked again, so this loop ends.
@@ -145,7 +146,7 @@ impl Run<'_> {
                 // The agent can change the worktree while it writes the
                 // description. Then the change is not what the check and
                 // the Reviewer passed, and both read it again.
-                let same = git::head(&self.made.folder)? == passed
+                let same = Some(git::head(&self.made.folder)?) == passed
                     && git::changes(&self.made.folder)?.trim().is_empty();
                 if !same {
                     self.note("Lira runs the check.")?;
@@ -287,16 +288,8 @@ impl Run<'_> {
         // has the commits of the branch of the agent. So the two must be
         // the same: the worktree is at the newest commit of the pull
         // request, and all in it is in a commit.
-        if self.pull_request.commit() != Some(git::head(folder)?.as_str()) {
-            let branch = self.pull_request.local();
-            return Ok(Some(Failure {
-                for_the_agent: format!(
-                    "Your worktree is not at the newest commit of your branch, `{branch}`, so the check waits. Lira takes the commits of that branch for the pull request. Check out `{branch}`, and put on it what belongs to the change.\n"
-                ),
-                for_you: format!(
-                    "the worktree was not at the newest commit of the branch `{branch}` of the agent, so the check did not run\n"
-                ),
-            }));
+        if let Some(failure) = self.moved("so the check waits", "so the check did not run")? {
+            return Ok(Some(failure));
         }
         let changes = git::changes(folder)?;
         if !changes.trim().is_empty() {
@@ -315,6 +308,15 @@ impl Run<'_> {
         let outcome = check::run(&self.made.file, folder, &base, Output::Kept)?;
         let command = &self.made.file.check;
         if outcome.passed {
+            // A check can also go to another commit. Then it passed that
+            // commit.
+            let moved = self.moved(
+                "after the check ran, so the check did not pass your commits",
+                "after the check, so the check did not pass the commits of the pull request",
+            )?;
+            if moved.is_some() {
+                return Ok(moved);
+            }
             // A check can change files, as a command that formats them
             // does. Then it passed its own files, and not the commits.
             let changes = git::changes(folder)?;
@@ -338,7 +340,9 @@ impl Run<'_> {
                 // The start of a long output can say what is wrong. The
                 // agent reads all of it in a file that git keeps for the
                 // worktree, outside the files of the repository.
-                let whole = git::own_file(folder, OUTPUT).and_then(|file| {
+                self.outputs += 1;
+                let name = format!("lira-check-output-{}.txt", self.outputs);
+                let whole = git::own_file(folder, &name).and_then(|file| {
                     fs::write(&file, &outcome.wrote)
                         .map(|()| file)
                         .map_err(|error| error.to_string())
@@ -362,14 +366,37 @@ impl Run<'_> {
         }))
     }
 
+    /// Looks if the worktree is at the commit that Lira pushed for the pull
+    /// request. The check reads the files of the worktree, and the pull
+    /// request has the commits of the branch of the agent, so the two must
+    /// be the same. When they are not, it returns what to say: `agent` and
+    /// `you` end the sentences for the agent and for the person.
+    fn moved(&self, agent: &str, you: &str) -> Result<Option<Failure>, String> {
+        if self.pull_request.commit() == Some(git::head(&self.made.folder)?.as_str()) {
+            return Ok(None);
+        }
+        let branch = self.pull_request.local();
+        Ok(Some(Failure {
+            for_the_agent: format!(
+                "Your worktree is not at the newest commit of your branch, `{branch}`, {agent}. Lira takes the commits of that branch for the pull request. Check out `{branch}`, and put on it what belongs to the change.\n"
+            ),
+            for_you: format!(
+                "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}\n"
+            ),
+        }))
+    }
+
     /// A new Reviewer reads the change as the pull request has it now.
     fn review(&mut self) -> Result<review::Review, String> {
         let folder = &self.made.folder;
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
         let from = git::base(folder, &main)?;
-        // The check passed this commit just now.
-        let to = git::head(folder)?;
-        review::run(self.started, self.made, self.request, &from, &to)
+        // The check passed this commit just now: the one that Lira pushed
+        // for the pull request.
+        let Some(to) = self.pull_request.commit() else {
+            return Err("the agent made no commit, so there is no change to review".to_string());
+        };
+        review::run(self.started, self.made, self.request, &from, to)
     }
 
     /// Where the work is, for an error.
@@ -397,25 +424,25 @@ fn description_in(text: &str) -> Option<&str> {
         .peekable();
     let mut start = None;
     let mut at = 0;
-    // A line in a block of code is no heading. A block starts and ends with
-    // a line of three backticks or three tildes.
-    let mut code: Option<&str> = None;
+    // A line in a block of code is no heading. `code` is the row of
+    // backticks or tildes that opened the block that the line is in.
+    let mut code: Option<(u8, usize)> = None;
     for line in text.split_inclusive('\n') {
-        let fence = ["```", "~~~"]
-            .into_iter()
-            .find(|fence| line.trim_start().starts_with(fence));
-        match (code, fence) {
-            (None, Some(fence)) => code = Some(fence),
-            (Some(open), Some(fence)) if open == fence => code = None,
-            (None, None)
-                if wanted
-                    .peek()
-                    .is_some_and(|heading| line.trim_end() == *heading) =>
-            {
-                wanted.next();
-                start = start.or(Some(at));
-            }
-            _ => {}
+        match code {
+            Some(open) if closes_code(line, open) => code = None,
+            Some(_) => {}
+            None => match opens_code(line) {
+                Some(open) => code = Some(open),
+                None => {
+                    if wanted
+                        .peek()
+                        .is_some_and(|heading| line.trim_end() == *heading)
+                    {
+                        wanted.next();
+                        start = start.or(Some(at));
+                    }
+                }
+            },
         }
         at += line.len();
     }
@@ -423,6 +450,36 @@ fn description_in(text: &str) -> Option<&str> {
         (Some(start), None) => Some(text[start..].trim_end()),
         _ => None,
     }
+}
+
+/// If a line opens a block of code: it starts with three or more backticks,
+/// or three or more tildes, after at most three spaces. It returns the
+/// character and how many there are.
+fn opens_code(line: &str) -> Option<(u8, usize)> {
+    let line = row_of_code(line)?;
+    let byte = *line.as_bytes().first()?;
+    if byte != b'`' && byte != b'~' {
+        return None;
+    }
+    let length = line.bytes().take_while(|b| *b == byte).count();
+    (length >= 3).then_some((byte, length))
+}
+
+/// If a line closes the block of code that `open` opened: it has the same
+/// character, at least as many times, and nothing after it.
+fn closes_code(line: &str, (byte, length): (u8, usize)) -> bool {
+    let Some(line) = row_of_code(line) else {
+        return false;
+    };
+    let run = line.bytes().take_while(|b| *b == byte).count();
+    run >= length && line[run..].trim().is_empty()
+}
+
+/// A line with no spaces at its start, when it has at most three there. A
+/// line with more is text of a block, and no start or end of one.
+fn row_of_code(line: &str) -> Option<&str> {
+    let spaces = line.bytes().take_while(|b| *b == b' ').count();
+    (spaces <= 3).then(|| &line[spaces..])
 }
 
 /// The description that Lira writes when the agent wrote none: the request,
@@ -544,6 +601,14 @@ mod tests {
         // A line in a block of code is no heading.
         let quoted = "## Problem\n\nThe old form was:\n\n```\n## Change\n## Decisions\n```\n";
         assert_eq!(description_in(quoted), None);
+        // A shorter row of backticks does not end a block, and a row with
+        // text after it does not end one.
+        let longer = "## Problem\n````\n```\n## Change\n## Decisions\n````\n";
+        assert_eq!(description_in(longer), None);
+        let not_an_end = "## Problem\n```\n``` sh\n## Change\n## Decisions\n```\n";
+        assert_eq!(description_in(not_an_end), None);
+        let never_ends = "## Problem\n```\n## Change\n## Decisions\n";
+        assert_eq!(description_in(never_ends), None);
         let with_code =
             "## Problem\n\n~~~sh\n## a comment\n~~~\n\n## Change\n\nC.\n\n## Decisions\n\nNone.";
         assert_eq!(description_in(with_code), Some(with_code));

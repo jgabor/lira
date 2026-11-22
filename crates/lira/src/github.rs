@@ -97,16 +97,25 @@ fn pull_request(folder: &Path, args: &[&OsStr]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// A draft pull request that `open_draft` opened or found.
+pub struct Draft {
+    pub address: String,
+    /// If this call opened it. When it is not new, GitHub opened it in a
+    /// call before whose answer got lost, and its description can be an
+    /// older one.
+    pub new: bool,
+}
+
 /// Opens a draft pull request for the branch `head` of the repository in
 /// `folder`, into the branch `base`. The description is the text of the
-/// file `description`. It returns the address of the pull request.
+/// file `description`.
 pub fn open_draft(
     folder: &Path,
     base: &str,
     head: &str,
     title: &str,
     description: &Path,
-) -> Result<String, String> {
+) -> Result<Draft, String> {
     let args = ["create", "--draft", "--base", base, "--head", head];
     let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     args.extend([OsStr::new("--title"), OsStr::new(title)]);
@@ -116,15 +125,22 @@ pub fn open_draft(
         // GitHub can open the pull request, and its answer can get lost.
         // The branch is new and Lira's own, so an open pull request for it
         // is this one.
-        Err(error) => return open_for(folder, head).ok().flatten().ok_or(error),
+        Err(error) => {
+            let found = open_for(folder, head).ok().flatten().ok_or(error)?;
+            return Ok(Draft {
+                address: found,
+                new: false,
+            });
+        }
     };
     // `gh` prints the address of the new pull request on the last line.
-    address_in(&printed).ok_or_else(|| {
-        format!(
+    match address_in(&printed) {
+        Some(address) => Ok(Draft { address, new: true }),
+        None => Err(format!(
             "`gh pr create` did not print the address of the pull request. It printed:\n{}",
             printed.trim()
-        )
-    })
+        )),
+    }
 }
 
 /// The last line of what `gh` printed, when it is an address.
