@@ -147,6 +147,11 @@ if [ "$1 $2" = "pr edit" ]; then
   [ -e "$here/slow-edit" ] && sleep 1
   exit 0
 fi
+if [ "$1 $2" = "pr ready" ]; then
+  [ -n "$ORDER" ] && echo ready >> "$ORDER"
+  cp "$here/edited" "$here/description-when-ready" 2>/dev/null || cp "$here/created" "$here/description-when-ready"
+  exit 0
+fi
 echo "the stand-in for gh has no answer for: $1 $2" >&2
 exit 1
 "#;
@@ -1397,7 +1402,7 @@ fn when_the_check_fails_lira_gives_its_output_to_the_agent() {
     assert!(!second.contains("left out"), "{second}");
     // The check ran in the worktree of the change, before and after the
     // repair.
-    assert_eq!(repository.order(), "check check");
+    assert_eq!(repository.order(), "check check ready");
     assert_eq!(
         fs::read_to_string(repository.top.join("order-folder"))
             .unwrap()
@@ -1501,7 +1506,7 @@ reply 'I committed it.'
     assert!(second.contains("in no commit"), "{second}");
     assert!(second.contains("fixed.txt"), "{second}");
     // The check ran one time, on what is in the commits.
-    assert_eq!(repository.order(), "check");
+    assert_eq!(repository.order(), "check ready");
 }
 
 // spec(Steps): A Reviewer reads the change after the check passes.
@@ -1511,7 +1516,7 @@ fn a_reviewer_reads_the_change_after_the_check_passes() {
     repository.reviewer("echo review >> \"$here/../order\"\nreply 'Good.\\n\\nReview: pass'\n");
     passed(&repository.run_in_order());
     // The check failed, then it passed, and only then a Reviewer started.
-    assert_eq!(repository.order(), "check check review");
+    assert_eq!(repository.order(), "check check review ready");
     assert_eq!(repository.starts(), 2);
     // The Reviewer got the request, the commits and the change.
     let message = repository.first_message(2);
@@ -1628,7 +1633,7 @@ fi
     );
     // After the repair, the check runs again, and a new Reviewer reads the
     // change with the repair.
-    assert_eq!(repository.order(), "check review check review");
+    assert_eq!(repository.order(), "check review check review ready");
     assert_eq!(repository.starts(), 3);
     let first = repository.first_message(2);
     let again = repository.first_message(3);
@@ -1729,17 +1734,275 @@ fn a_reviewer_whose_harness_ends_is_a_failure_and_leaves_no_folder() {
     assert_eq!(worktrees.matches("worktree ").count(), 2, "{worktrees}");
 }
 
+/// The description that an agent writes for a pull request.
+const DESCRIPTION: &str = r"## Problem\n\nThe repository has no greeting.\n\n## Change\n\nIt adds greeting.txt.\n\n## Decisions\n\n- The greeting is one word.";
+
+/// An agent that makes one commit, and writes the description of the pull
+/// request when Lira asks for it. It keeps the message that asks.
+fn work_and_describe(description: &str) -> String {
+    format!(
+        r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+printf '%s\n' "$line" > "$here/asks-for-the-description"
+reply '{description}'
+"#
+    )
+}
+
+/// If a text has the three headings of a pull request that is ready, in
+/// their order, and no other heading.
+fn is_a_description(text: &str) -> bool {
+    let headings: Vec<&str> = text.lines().filter(|line| line.starts_with('#')).collect();
+    headings == ["## Problem", "## Change", "## Decisions"]
+}
+
+// spec(lira run): Lira runs the check and a Reviewer on the change, and marks the pull request ready for review.
 #[test]
-fn the_progress_note_says_when_the_check_and_the_reviewer_passed_the_change() {
-    let repository = Repository::new("note-passed", CHECK, WORK);
-    passed(&repository.run());
-    let note = repository.gh("edited");
-    let next = note.split("## Next").nth(1).unwrap();
-    let next = next.split("## Decisions").next().unwrap();
+fn lira_marks_the_pull_request_ready_for_review() {
+    let work = work_and_describe(DESCRIPTION);
+    // The check keeps the folder and the commit that it ran on.
+    let check = "echo check >> \"$ORDER\"\npwd > \"$ORDER-folder\"\ngit rev-parse HEAD > \"$ORDER-commit\"\n";
+    let repository = Repository::checked("ready", check, &work);
+    repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
+    let output = repository.run_in_order();
+    passed(&output);
+    assert_eq!(repository.order(), "check review ready");
+    // The check ran on the change: in its worktree, at the commit that the
+    // pull request has. The Reviewer read the same change.
+    let kept = |end: &str| {
+        fs::read_to_string(repository.top.join(format!("order-{end}")))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let branch = repository.kept("branch");
+    assert_eq!(kept("folder"), repository.kept("folder"));
+    assert_eq!(repository.on_remote(&branch), Some(kept("commit")));
+    let review = repository.first_message(2);
     assert!(
-        next.contains("The check and a Reviewer passed the change."),
-        "{note}"
+        review.contains(&format!("`{}`", kept("commit"))),
+        "{review}"
     );
+    assert!(review.contains("+++ b/greeting.txt"), "{review}");
+    assert_eq!(
+        repository.calls("pr ready"),
+        [format!("pr ready {ADDRESS}")]
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+    assert!(
+        errors(&output).contains("ready for review"),
+        "{}",
+        errors(&output)
+    );
+}
+
+// spec(Pull requests): Lira marks a pull request ready for review only after the check and the Reviewer pass it.
+#[test]
+fn a_pull_request_is_ready_only_after_the_check_and_the_reviewer_pass_it() {
+    let stubborn =
+        "commit greeting 'Add a greeting'\nreply 'Done.'\nwhile :; do next; reply 'No.'; done\n";
+    // The check never passes.
+    let repository = Repository::checked("ready-no-check", NEEDS_FIXED, stubborn);
+    failed(&repository.run_in_order());
+    assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+    assert_eq!(repository.calls("pr create").len(), 1);
+
+    // The check passes, and the Reviewer never does.
+    let repository = Repository::new("ready-no-review", CHECK, stubborn);
+    repository.reviewer("reply 'Review: findings'\n");
+    failed(&repository.run_in_order());
+    assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+    assert_eq!(repository.calls("pr create").len(), 1);
+
+    // The check fails one time, and the Reviewer has findings one time.
+    // The pull request is ready after the check and a Reviewer passed the
+    // change as it is at the end.
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+commit fixed 'Add the fixed file'
+reply 'I repaired it.'
+next
+commit better 'Make it better'
+reply 'I repaired it.'
+"#;
+    let repository = Repository::checked("ready-after", NEEDS_FIXED, work);
+    repository.reviewer(
+        r#"echo review >> "$here/../order"
+if [ "$start" -eq 2 ]; then reply 'Review: findings'; else reply 'Review: pass'; fi
+"#,
+    );
+    passed(&repository.run_in_order());
+    assert_eq!(repository.order(), "check check review check review ready");
+}
+
+// spec(Pull requests): When a pull request is ready for review, its description has the headings `Problem`, `Change` and `Decisions`.
+#[test]
+fn the_description_of_a_ready_pull_request_has_its_three_headings() {
+    let repository = Repository::new("described", CHECK, &work_and_describe(DESCRIPTION));
+    passed(&repository.run());
+    // The stand-in for `gh` kept the description that the pull request had
+    // when Lira marked it ready.
+    let description = repository.gh("description-when-ready");
+    assert!(is_a_description(&description), "{description}");
+    // It is what the agent wrote.
+    assert!(
+        description.contains("The repository has no greeting."),
+        "{description}"
+    );
+    assert!(
+        description.contains("- The greeting is one word."),
+        "{description}"
+    );
+    // Lira asked the agent for these three headings.
+    let asked = kept_message(&repository, "asks-for-the-description");
+    for heading in ["`## Problem`", "`## Change`", "`## Decisions`"] {
+        assert!(asked.contains(heading), "{asked}");
+    }
+}
+
+#[test]
+fn lira_writes_the_description_when_the_agent_does_not() {
+    // One agent writes other headings, one writes no heading, and one
+    // ends before it answers.
+    let others = work_and_describe(r"## Summary\n\nIt adds a file.\n\n## Decisions\n\nNone.");
+    let none = work_and_describe("It adds a file.");
+    let gone = "commit greeting 'Add a greeting'\nreply 'I made the file.'\nnext\nexit 0\n";
+    for (test, work) in [
+        ("described-others", others.as_str()),
+        ("described-none", none.as_str()),
+        ("described-gone", gone),
+    ] {
+        let repository = Repository::new(test, CHECK, work);
+        let output = repository.run();
+        passed(&output);
+        let description = repository.gh("description-when-ready");
+        assert!(is_a_description(&description), "{test}: {description}");
+        // The request, the commits, and what the agent said about its work.
+        assert!(description.contains(REQUEST), "{test}: {description}");
+        assert!(
+            description.contains("- Add a greeting"),
+            "{test}: {description}"
+        );
+        assert!(
+            description.contains("I made the file."),
+            "{test}: {description}"
+        );
+        assert_eq!(repository.calls("pr ready").len(), 1, "{test}");
+    }
+}
+
+#[test]
+fn text_around_the_description_of_the_agent_is_left_out() {
+    let description = format!(r"Here is the description:\n\n{DESCRIPTION}");
+    let repository = Repository::new("described-around", CHECK, &work_and_describe(&description));
+    passed(&repository.run());
+    let description = repository.gh("description-when-ready");
+    assert!(description.starts_with("## Problem\n"), "{description}");
+    assert!(is_a_description(&description), "{description}");
+}
+
+#[test]
+fn a_commit_that_comes_with_the_description_is_checked_and_reviewed() {
+    // The agent makes one more commit when Lira asks for the description.
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+commit late 'Add a late file'
+reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting.\n\n## Decisions\n\nNone.'
+while :; do
+  next
+  echo message >> "$here/more-messages"
+  reply 'More.'
+done
+"#;
+    let repository = Repository::checked("described-late", "echo check >> \"$ORDER\"\n", work);
+    repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
+    passed(&repository.run_in_order());
+    // The check and a Reviewer passed the change with the late commit,
+    // before the pull request was ready.
+    assert_eq!(repository.order(), "check review check review ready");
+    assert!(repository.first_message(3).contains("+++ b/late.txt"));
+    let folder = PathBuf::from(repository.kept("folder"));
+    let branch = repository.kept("branch");
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    // Lira did not ask the agent a second time, so the agent could not
+    // change the change again. Lira wrote the description.
+    assert!(!repository.harness.join("more-messages").exists());
+    let description = repository.gh("description-when-ready");
+    assert!(is_a_description(&description), "{description}");
+    assert!(description.contains("- Add a late file"), "{description}");
+}
+
+#[test]
+fn a_branch_that_changed_on_the_remote_is_not_marked_ready() {
+    // While the agent writes the description, the branch on the remote
+    // gets another commit than the one that the check and the Reviewer
+    // passed.
+    let work = r#"git branch -m feat/moved
+commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+git push --quiet --force "$(git remote get-url origin)" HEAD~1:refs/heads/feat/moved
+reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting.\n\n## Decisions\n\nNone.'
+"#;
+    let repository = Repository::new("moved", CHECK, work);
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("`feat/moved`"), "{error}");
+    assert!(error.contains("another commit"), "{error}");
+    assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+// SPEC.md says: "A change from `lira run` always waits for you." This test
+// shows that `lira run` stops at the pull request that is ready. It is no
+// quote: the merge queue is not there yet, so no test can show "always".
+#[test]
+fn lira_run_stops_at_the_pull_request_that_is_ready() {
+    let repository = Repository::new("waits", CHECK, &work_and_describe(DESCRIPTION));
+    passed(&repository.run());
+    // The pull request is ready for review, and that is where Lira stops:
+    // it does not merge the change, and it sets no label that lets an
+    // agent merge it.
+    let calls = repository.calls("");
+    assert_eq!(calls.last().unwrap(), &format!("pr ready {ADDRESS}"));
+    assert!(
+        !calls.iter().any(|call| call.contains("merge")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.contains("label")),
+        "{calls:?}"
+    );
+    // The main branch of the remote is as it was.
+    assert_eq!(
+        repository.on_remote("main"),
+        Some(git_ok(&repository.seed, &["rev-parse", "HEAD"]))
+    );
+}
+
+#[test]
+fn a_pull_request_that_github_does_not_mark_ready_is_a_failure() {
+    let repository = Repository::new("not-ready", CHECK, &work_and_describe(DESCRIPTION));
+    // This `gh` does all but `pr ready`.
+    let gh = GH.replace(
+        "if [ \"$1 $2\" = \"pr ready\" ]; then",
+        "if [ \"$1 $2\" = \"pr ready\" ]; then\n  echo 'GitHub says no' >&2\n  exit 1",
+    );
+    program(&repository.top.join("bin").join("gh"), &gh);
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("GitHub says no"), "{error}");
+    assert!(error.contains(ADDRESS), "{error}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
 /// If a process with this number runs. A process that ended, and that its
@@ -2061,7 +2324,7 @@ reply 'I committed it.'
     assert!(second.contains("the check"), "{second}");
     // The check ran again on the commit with the repair, and the Reviewer
     // read that commit.
-    assert_eq!(repository.order(), "check check");
+    assert_eq!(repository.order(), "check check ready");
     assert_eq!(repository.kept("review-greeting"), "formatted");
 }
 
@@ -2207,7 +2470,7 @@ reply 'I am back on my branch.'
     assert!(second.contains("`fix/moved-by-check`"), "{second}");
     // The check ran again, on the commit of the pull request, and the
     // Reviewer read that commit.
-    assert_eq!(repository.order(), "check check");
+    assert_eq!(repository.order(), "check check ready");
     assert!(repository.kept("review-files").contains("greeting.txt"));
 }
 
@@ -2310,7 +2573,7 @@ exec "{real}" "$@"
     passed(&repository.run_in_order());
     // The check ran again for the late commit, before a Reviewer read the
     // change, and the Reviewer read the change with it.
-    assert_eq!(repository.order(), "check check review");
+    assert_eq!(repository.order(), "check check review ready");
     assert!(repository.first_message(2).contains("+++ b/late.txt"));
 }
 

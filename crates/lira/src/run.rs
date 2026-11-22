@@ -18,6 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The instructions for the agent. The request follows them.
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
+/// The message that asks the agent for the description of the pull
+/// request.
+const DESCRIBE: &str = include_str!("description.md");
+
 /// After this many failed tries at the check, one after the other, Lira
 /// stops.
 const TRIES: usize = 3;
@@ -36,8 +40,9 @@ const NAMES: usize = 3;
 /// `lira run "<request>"`: makes a new worktree of the repository in
 /// `folder`, and runs an agent on the request in it. It opens a draft pull
 /// request at the first commit of the agent. When the reply of the agent
-/// ends, it runs the check and a Reviewer on the change, and prints the
-/// address of the pull request when both pass.
+/// ends, it runs the check and a Reviewer on the change, and marks the
+/// pull request ready for review when both pass. Then it prints the address
+/// of the pull request.
 pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     // A missing login stops the run here, before an agent works.
     github::require_login(folder)?;
@@ -80,7 +85,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     };
     let branch = run.pull_request.branch().unwrap_or(&made.branch);
     eprintln!(
-        "lira: the check and a Reviewer passed the change. It is on the branch `{branch}`, and its worktree is {place}"
+        "lira: the check and a Reviewer passed the change, and the pull request is ready for review. The change is on the branch `{branch}`, and its worktree is {place}"
     );
     eprintln!("{}", wrote(&run.said));
     println!("{address}");
@@ -115,6 +120,7 @@ impl Run<'_> {
         self.work(&message(&self.made.branch, self.request))?;
         let mut tries = 0;
         let mut rounds = 0;
+        let mut asked = false;
         loop {
             // Check.
             if let Some(failure) = self.check()? {
@@ -140,10 +146,21 @@ impl Run<'_> {
             }
             let review = self.review()?;
             if review.passed {
-                self.note("Nothing. The check and a Reviewer passed the change.")?;
-                if self.pull_request.commit() != checked.as_deref() {
+                // Ready. Lira asks the agent for the description one time.
+                // An agent that changes the change when it is asked is not
+                // asked again, so this loop ends.
+                let description = self.describe(!asked);
+                asked = true;
+                // The agent can change the worktree while it writes the
+                // description. Then the change is not what the check and
+                // the Reviewer passed, and both read it again.
+                let same = Some(git::head(&self.made.folder)?) == checked
+                    && git::changes(&self.made.folder)?.trim().is_empty();
+                if !same {
+                    self.note("Lira runs the check.")?;
                     continue;
                 }
+                self.pull_request.ready(&description)?;
                 return self.address();
             }
             rounds += 1;
@@ -257,6 +274,30 @@ impl Run<'_> {
             said => said,
         };
         self.pull_request.update(next, decisions)
+    }
+
+    /// The description for the pull request that is ready for review. With
+    /// `ask`, the agent writes it. When the agent does not, or writes it
+    /// with other headings, Lira writes it from what it has.
+    fn describe(&mut self, ask: bool) -> String {
+        let written = ask.then(|| {
+            // The agent has no reason to change a file here, so the answer
+            // to each permission request is no.
+            self.harness
+                .send(&self.conversation, DESCRIBE, &mut |_| false)
+        });
+        let written = match &written {
+            Some(Ok(reply)) if agent::stopped(&reply.stop).is_none() => description_in(&reply.text),
+            _ => None,
+        };
+        match written {
+            Some(written) => written.to_string(),
+            None => {
+                let from = &self.made.commit;
+                let subjects = git::subjects(&self.made.folder, from, "HEAD").unwrap_or_default();
+                own_description(self.request, &subjects, &self.said)
+            }
+        }
     }
 
     /// Says in the progress note that Lira stopped, and why. GitHub is
@@ -415,6 +456,96 @@ impl Run<'_> {
     }
 }
 
+/// The description in a reply of the agent: the text from the line
+/// `## Problem` on. It is `None` when the text does not have the three
+/// headings in their order.
+fn description_in(text: &str) -> Option<&str> {
+    let mut wanted = ["## Problem", "## Change", "## Decisions"]
+        .into_iter()
+        .peekable();
+    let mut start = None;
+    let mut at = 0;
+    // A line in a block of code is no heading. `code` is the row of
+    // backticks or tildes that opened the block that the line is in.
+    let mut code: Option<(u8, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        match code {
+            Some(open) if closes_code(line, open) => code = None,
+            Some(_) => {}
+            None => match opens_code(line) {
+                Some(open) => code = Some(open),
+                None => {
+                    if wanted
+                        .peek()
+                        .is_some_and(|heading| line.trim_end() == *heading)
+                    {
+                        wanted.next();
+                        start = start.or(Some(at));
+                    }
+                }
+            },
+        }
+        at += line.len();
+    }
+    match (start, wanted.peek()) {
+        (Some(start), None) => Some(text[start..].trim_end()),
+        _ => None,
+    }
+}
+
+/// If a line opens a block of code: it starts with three or more backticks,
+/// or three or more tildes, after at most three spaces. It returns the
+/// character and how many there are.
+fn opens_code(line: &str) -> Option<(u8, usize)> {
+    let line = row_of_code(line)?;
+    let byte = *line.as_bytes().first()?;
+    if byte != b'`' && byte != b'~' {
+        return None;
+    }
+    let length = line.bytes().take_while(|b| *b == byte).count();
+    (length >= 3).then_some((byte, length))
+}
+
+/// If a line closes the block of code that `open` opened: it has the same
+/// character, at least as many times, and nothing after it.
+fn closes_code(line: &str, (byte, length): (u8, usize)) -> bool {
+    let Some(line) = row_of_code(line) else {
+        return false;
+    };
+    let run = line.bytes().take_while(|b| *b == byte).count();
+    run >= length && line[run..].trim().is_empty()
+}
+
+/// A line with no spaces at its start, when it has at most three there. A
+/// line with more is text of a block, and no start or end of one.
+fn row_of_code(line: &str) -> Option<&str> {
+    let spaces = line.bytes().take_while(|b| *b == b' ').count();
+    (spaces <= 3).then(|| &line[spaces..])
+}
+
+/// The description that Lira writes when the agent wrote none: the request,
+/// the subject of each commit, and what the agent said at the end of its
+/// work.
+fn own_description(request: &str, subjects: &[String], said: &str) -> String {
+    let request: String = request.lines().map(|line| format!("> {line}\n")).collect();
+    let change: String = subjects
+        .iter()
+        .map(|subject| format!("- {subject}\n"))
+        .collect();
+    // What the agent said is a quote, as the request is. So a heading in
+    // it is no heading of the description.
+    let decisions = match said.trim() {
+        "" => "The agent named none.\n".to_string(),
+        said => {
+            let said: String = said.lines().map(|line| format!("> {line}\n")).collect();
+            format!("The agent wrote this at the end of its work:\n\n{said}")
+        }
+    };
+    format!(
+        "## Problem\n\nThe request was:\n\n{request}\n## Change\n\n{change}\n## Decisions\n\n{decisions}"
+    )
+}
+
 /// A check that did not pass.
 struct Failure {
     /// The message that tells the agent to repair the change.
@@ -503,6 +634,56 @@ mod tests {
         // A cut does not go through a character.
         assert_eq!(end_of("aééé", 3), "é");
         assert_eq!(end_of("", 3), "");
+    }
+
+    #[test]
+    fn a_description_has_the_three_headings_in_their_order() {
+        let good = "## Problem\n\nP.\n\n## Change\n\nC.\n\n### More\n\n## Decisions\n\nNone.";
+        assert_eq!(description_in(good), Some(good));
+        // Text before the first heading is left out, and spaces at the end.
+        assert_eq!(
+            description_in(&format!("Here it is:\n\n{good}  \n\n")),
+            Some(good)
+        );
+        assert_eq!(
+            description_in("## Problem\n## Decisions\n## Change\n"),
+            None
+        );
+        assert_eq!(description_in("## Problem\n## Change\n"), None);
+        assert_eq!(description_in("Problem, Change, Decisions"), None);
+        assert_eq!(description_in(""), None);
+        // A line in a block of code is no heading.
+        let quoted = "## Problem\n\nThe old form was:\n\n```\n## Change\n## Decisions\n```\n";
+        assert_eq!(description_in(quoted), None);
+        // A shorter row of backticks does not end a block, and a row with
+        // text after it does not end one.
+        let longer = "## Problem\n````\n```\n## Change\n## Decisions\n````\n";
+        assert_eq!(description_in(longer), None);
+        let not_an_end = "## Problem\n```\n``` sh\n## Change\n## Decisions\n```\n";
+        assert_eq!(description_in(not_an_end), None);
+        let never_ends = "## Problem\n```\n## Change\n## Decisions\n";
+        assert_eq!(description_in(never_ends), None);
+        let with_code =
+            "## Problem\n\n~~~sh\n## a comment\n~~~\n\n## Change\n\nC.\n\n## Decisions\n\nNone.";
+        assert_eq!(description_in(with_code), Some(with_code));
+    }
+
+    #[test]
+    fn lira_writes_a_description_from_what_it_has() {
+        let subjects = ["Add a file".to_string()];
+        assert_eq!(
+            own_description("Add a file.\nMake it short.", &subjects, " Done. \n"),
+            "## Problem\n\nThe request was:\n\n> Add a file.\n> Make it short.\n\n## Change\n\n- Add a file\n\n## Decisions\n\nThe agent wrote this at the end of its work:\n\n> Done.\n"
+        );
+        // A heading in what the agent said is no heading of the description.
+        let with_heading = own_description("Do it.", &subjects, "Done.\n\n## Summary\n\nA file.");
+        let headings: Vec<&str> = with_heading
+            .lines()
+            .filter(|line| line.starts_with('#'))
+            .collect();
+        assert_eq!(headings, ["## Problem", "## Change", "## Decisions"]);
+        assert!(with_heading.contains("> ## Summary\n"));
+        assert!(own_description("Do it.", &subjects, "").ends_with("\n\nThe agent named none.\n"));
     }
 
     #[test]

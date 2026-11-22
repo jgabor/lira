@@ -176,6 +176,11 @@ pub fn describe(folder: &Path, address: &str, description: &Path) -> Result<(), 
     pull_request(folder, &args).map(|_| ())
 }
 
+/// Marks the pull request at `address` ready for review.
+pub fn mark_ready(folder: &Path, address: &str) -> Result<(), String> {
+    pull_request(folder, &[OsStr::new("ready"), OsStr::new(address)]).map(|_| ())
+}
+
 /// The scores of the main branch: those in the comment on the last merged
 /// pull request. `branch` is the name of the main branch on GitHub. With no
 /// such pull request, or no such comment on it, no score has a value.
