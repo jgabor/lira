@@ -33,7 +33,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
 
-    let (mut harness, conversation) = match start(folder, &made) {
+    let (harness, conversation) = match start(folder, &made) {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -64,7 +64,8 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
                 pull_request.look();
             }
         });
-        harness.send_and_watch(
+        let mut harness = harness;
+        let reply = harness.send_and_watch(
             &conversation,
             &message,
             // Nobody is there to answer, and the agent works in a worktree
@@ -74,11 +75,13 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
             &mut || {
                 let _ = look.send(());
             },
-        )
+        );
+        // The harness stops here, so that the agent changes nothing after
+        // this. A look that still talks to GitHub does not hold that up.
+        drop(harness);
+        reply
         // The thread ends here: nothing can ask for a look any more.
     });
-    // The harness stops here, so that the agent changes nothing after this.
-    drop(harness);
     // Where the work is, for an error.
     let left = |pull_request: &PullRequest| {
         let mut left = format!("What the agent did is in {place}");

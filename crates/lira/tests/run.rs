@@ -88,6 +88,16 @@ if [ "$1 $2" = "pr create" ]; then
   fi
   # A slow answer of GitHub.
   [ -e "$here/slow-create" ] && sleep 1.5
+  # An answer of GitHub that waits for the file `go`, for 10 seconds at most.
+  if [ -e "$here/hold-create" ]; then
+    echo started > "$here/create-started"
+    tries=0
+    until [ -e "$here/go" ]; do
+      tries=$((tries + 1))
+      if [ "$tries" -gt 200 ]; then echo "gave up" > "$here/gave-up"; exit 1; fi
+      sleep 0.05
+    done
+  fi
   cp "$description" "$here/created"
   pwd > "$here/created-in"
   if [ -e "$here/lose-create" ]; then
@@ -1260,6 +1270,9 @@ fn a_branch_that_was_there_before_the_run_is_not_the_work_of_the_agent() {
         &["commit", "--quiet", "--message", "My own work"],
     );
     git_ok(&repository.root, &["checkout", "--quiet", "--detach"]);
+    // A tag with the same name changes how git prints the short name of
+    // the branch.
+    git_ok(&repository.root, &["tag", "mine", "HEAD~1"]);
     let error = failed(&repository.run());
     assert!(error.contains("made no commit"), "{error}");
     assert_eq!(repository.on_remote("mine"), None);
@@ -1303,9 +1316,16 @@ impl Repository {
             r#"#!/bin/sh
 here="$(dirname "$0")"
 if [ "$1" = push ] && [ -e "$here/lose-push" ]; then
-  rm "$here/lose-push"
+  # With the file `ask-too`, the next question to the remote fails too.
+  [ -e "$here/ask-too" ] && touch "$here/lose-ask"
   "{real}" "$@"
   echo "the connection was lost" >&2
+  rm "$here/lose-push"
+  exit 1
+fi
+if [ "$1" = ls-remote ] && [ -e "$here/lose-ask" ]; then
+  echo "the connection was lost" >&2
+  rm "$here/lose-ask"
   exit 1
 fi
 exec "{real}" "$@"
@@ -1385,23 +1405,30 @@ fn a_pull_request_whose_answer_got_lost_is_found_again() {
         listed[0].contains(&format!("--head {branch} ")),
         "{listed:?}"
     );
+    // Lira does not know which description the pull request got, so it
+    // writes the description again.
+    let edited = repository.calls("pr edit");
+    assert_eq!(edited.len(), 1, "{edited:?}");
+    assert!(repository.gh("edited").contains("- Add a greeting\n"));
 }
 
 #[test]
 fn the_agent_does_not_wait_while_lira_opens_the_pull_request() {
-    // GitHub is slow. The agent asks for permission right after its first
-    // commit, and gets the answer before the pull request is there.
+    // GitHub does not answer until the agent has its permission. The agent
+    // asks for the permission after Lira started to open the pull request.
     let work = r#"commit one 'Add a file'
 ended
+until [ -e "$here/../bin/create-started" ]; do sleep 0.05; done
 say '{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-2","title":"Write b.txt","kind":"edit"},"options":[{"optionId":"yes","name":"Yes","kind":"allow_once"}]}}'
 next
-[ -e "$here/../bin/created" ] || touch "$here/answered-first"
+touch "$here/../bin/go"
 "#;
     let repository = Repository::new("slow-github", CHECK, &format!("{work}{REPLY}"));
-    fs::write(repository.top.join("bin").join("slow-create"), "").unwrap();
+    fs::write(repository.top.join("bin").join("hold-create"), "").unwrap();
     let output = repository.run();
     passed(&output);
-    assert!(repository.harness.join("answered-first").exists());
+    // GitHub got its sign from the agent, and did not give up before.
+    assert!(!repository.top.join("bin").join("gave-up").exists());
     assert_eq!(repository.calls("pr create").len(), 1);
 }
 
@@ -1442,4 +1469,58 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
     assert!(Repository::has_no_worktree(
         &repository.top.join("xdg").join("lira")
     ));
+}
+
+#[test]
+fn a_child_of_the_harness_does_not_change_the_work_after_the_reply() {
+    // GitHub is slow. The harness leaves a child that makes a commit after
+    // the reply ended, while Lira still waits for GitHub.
+    let work = r#"git branch -m fix/no-late-commit
+commit one 'Add a file'
+git rev-parse HEAD > "$here/one"
+ended
+(sleep 0.5; commit late 'A late commit') > /dev/null 2>&1 &
+"#;
+    let repository = Repository::new("late-child", CHECK, &format!("{work}{REPLY}"));
+    fs::write(repository.top.join("bin").join("slow-create"), "").unwrap();
+    passed(&repository.run());
+    assert_eq!(
+        repository.on_remote("fix/no-late-commit"),
+        Some(repository.kept("one"))
+    );
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        git_ok(&folder, &["rev-parse", "HEAD"]),
+        repository.kept("one")
+    );
+}
+
+#[test]
+fn a_first_push_that_lira_could_not_ask_about_makes_no_second_branch() {
+    // The remote takes the first push. Its answer gets lost, and so does
+    // the answer when Lira asks the remote for the branch. Then the agent
+    // gives its branch another name.
+    let work = r#"git branch -m fix/first-name
+touch "$here/../bin/lose-push"
+commit one 'Add a file'
+ended
+until [ ! -e "$here/../bin/lose-push" ] && [ ! -e "$here/../bin/lose-ask" ]; do sleep 0.05; done
+sleep 0.3
+git branch -m fix/second-name
+commit two 'Add a second file'
+ended
+"#;
+    let repository = Repository::new("lost-push-and-ask", CHECK, &format!("{work}{REPLY}"));
+    repository.git_that_loses_a_push();
+    fs::write(repository.top.join("bin").join("ask-too"), "").unwrap();
+    passed(&repository.run());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("fix/first-name"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(repository.on_remote("fix/second-name"), None);
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head fix/first-name "), "{created:?}");
 }

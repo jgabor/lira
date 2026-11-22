@@ -310,9 +310,11 @@ pub fn commit_of(folder: &Path, branch: &str) -> Result<Option<String>, String> 
 
 /// The name of each branch of the repository.
 pub fn branches(folder: &Path) -> Result<Vec<String>, String> {
+    // The full name, and not the short one: git prints the short name of a
+    // branch in another form when a tag has the same name.
     let names = run(
         folder,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
     )
     .map_err(|wrote| {
         format!(
@@ -320,7 +322,10 @@ pub fn branches(folder: &Path) -> Result<Vec<String>, String> {
             folder.display()
         )
     })?;
-    Ok(names.lines().map(str::to_string).collect())
+    let names = names
+        .lines()
+        .filter_map(|name| name.strip_prefix("refs/heads/"));
+    Ok(names.map(str::to_string).collect())
 }
 
 /// Pushes a commit to a branch of a remote. `before` is the commit that

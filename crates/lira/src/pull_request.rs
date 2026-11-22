@@ -145,8 +145,15 @@ impl<'a> PullRequest<'a> {
             Some(address) => github::describe(folder, address, &file),
             None => {
                 let main = &self.worktree.main;
-                github::open_draft(folder, main, branch, &subjects[0], &file)
-                    .map(|address| self.address = Some(address))
+                github::open_draft(folder, main, branch, &subjects[0], &file).and_then(|draft| {
+                    self.address = Some(draft.address);
+                    match (&self.address, draft.new) {
+                        // GitHub opened this pull request before, with a
+                        // description that can be older than this one.
+                        (Some(address), false) => github::describe(folder, address, &file),
+                        _ => Ok(()),
+                    }
+                })
             }
         };
         let _ = fs::remove_file(&file);
@@ -235,6 +242,15 @@ impl<'a> PullRequest<'a> {
     fn new_name(&mut self) -> Result<String, String> {
         let folder = &self.worktree.folder;
         let remote = &self.worktree.remote;
+        // A first push whose answer got lost, under a name that the branch
+        // of the agent had then.
+        if let Some(tried_as) = self.tried_as.clone()
+            && let Some(there) = git::remote_commit(folder, remote, &tried_as)?
+            && self.tried.contains(&there)
+        {
+            self.pushed = Some(there);
+            return Ok(tried_as);
+        }
         let name = self.local.clone();
         let names = [name.clone()]
             .into_iter()
@@ -247,14 +263,6 @@ impl<'a> PullRequest<'a> {
                             "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
                         );
                     }
-                    return Ok(other);
-                }
-                // The branch is Lira's own: the remote took the first push,
-                // and the answer got lost.
-                Some(there)
-                    if self.tried_as.as_deref() == Some(&other) && self.tried.contains(&there) =>
-                {
-                    self.pushed = Some(there);
                     return Ok(other);
                 }
                 Some(_) => {}
