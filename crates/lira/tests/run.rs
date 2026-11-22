@@ -143,6 +143,8 @@ if [ "$1 $2" = "pr list" ]; then
 fi
 if [ "$1 $2" = "pr edit" ]; then
   cp "$description" "$here/edited"
+  # A slow answer of GitHub.
+  [ -e "$here/slow-edit" ] && sleep 1
   exit 0
 fi
 if [ "$1 $2" = "pr ready" ]; then
@@ -567,7 +569,9 @@ fn with_no_folder_for_the_data_it_is_an_error() {
 // spec(Harnesses): The harness is the program that `LIRA_HARNESS` names.
 #[test]
 fn the_harness_is_the_program_that_lira_harness_names() {
-    let repository = Repository::new("named", CHECK, WORK);
+    // The Lira file names a program too, and that one is not there.
+    let lira_file = format!("{CHECK}[harness]\nprogram = \"not-there\"\n");
+    let repository = Repository::new("named", &lira_file, WORK);
     let other = repository.top.join("other").join("my-harness");
     program(&other, &format!("{START}touch \"$here/started\"\n{WORK}"));
     let output = repository
@@ -581,9 +585,38 @@ fn the_harness_is_the_program_that_lira_harness_names() {
     assert!(!repository.harness.join("folder").exists());
 }
 
-// spec(Harnesses): When `LIRA_HARNESS` is not set, the harness is the program `claude-agent-acp`.
+// spec(Format of the Lira file): | `harness.program` | Text | The program of the harness. |
+// spec(Harnesses): When `LIRA_HARNESS` is not set, the harness is the program that `harness.program` in the Lira file names.
 #[test]
-fn with_no_lira_harness_the_harness_is_claude_agent_acp() {
+fn with_no_lira_harness_the_harness_is_the_program_of_the_lira_file() {
+    let lira_file = format!("{CHECK}[harness]\nprogram = \"file-harness\"\n");
+    let repository = Repository::new("file-harness", &lira_file, WORK);
+    // Two programs in a folder of `PATH`: the one that the Lira file names,
+    // and the one that Lira starts when nothing names a program.
+    let bin = repository.top.join("bin");
+    for name in ["file-harness", "claude-agent-acp"] {
+        program(
+            &bin.join(name),
+            &format!("{START}touch \"$here/started-{name}\"\n{WORK}"),
+        );
+    }
+    for set in [false, true] {
+        let _ = fs::remove_file(bin.join("started-file-harness"));
+        let mut lira = repository.lira();
+        lira.env_remove("LIRA_HARNESS");
+        if set {
+            // An empty value is the same as no value.
+            lira.env("LIRA_HARNESS", "");
+        }
+        passed(&lira.args(["run", REQUEST]).output().unwrap());
+        assert!(bin.join("started-file-harness").exists());
+        assert!(!bin.join("started-claude-agent-acp").exists());
+    }
+}
+
+// spec(Harnesses): When `LIRA_HARNESS` is not set and the Lira file has no `harness.program`, the harness is the program `claude-agent-acp`.
+#[test]
+fn with_no_lira_harness_and_no_key_the_harness_is_claude_agent_acp() {
     let repository = Repository::new("default", CHECK, WORK);
     // A program with that name, in a folder of `PATH`.
     let default = repository.top.join("bin").join("claude-agent-acp");
@@ -629,6 +662,7 @@ fn a_harness_that_is_not_there_is_an_error_and_leaves_no_worktree() {
     let error = failed(&output);
     assert!(error.contains("nothing-here"), "{error}");
     assert!(error.contains("`LIRA_HARNESS`"), "{error}");
+    assert!(error.contains("`harness.program`"), "{error}");
     assert!(Repository::has_no_worktree(
         &repository.top.join("xdg").join("lira")
     ));
@@ -1090,31 +1124,68 @@ fn when_the_work_is_complete_the_progress_note_has_what_the_agent_wrote() {
     assert!(note.contains("- Add a greeting\n"), "{note}");
 }
 
-#[test]
-fn a_branch_that_the_remote_has_already_gets_another_name_there() {
-    let work = "git branch -m feat/taken\n";
-    let repository = Repository::new("taken", CHECK, &format!("{work}{WORK}"));
-    // Another person pushed a branch with this name.
+/// A repository whose remote has a branch `feat/taken` of another person
+/// already. It returns the commit of that branch too.
+fn with_a_taken_branch(test: &str, work: &str) -> (Repository, Option<String>) {
+    let repository = Repository::new(test, CHECK, work);
     git_ok(&repository.seed, &["branch", "feat/taken"]);
     let remote = repository.remote.to_str().unwrap();
     git_ok(&repository.seed, &["push", "--quiet", remote, "feat/taken"]);
     let theirs = repository.on_remote("feat/taken");
+    assert!(theirs.is_some());
+    (repository, theirs)
+}
 
+// spec(lira run): When the remote has a branch with the name that the agent chose, Lira tells the agent to give its branch another name.
+#[test]
+fn the_agent_renames_a_branch_that_the_remote_has_already() {
+    // The agent gives its branch another name when a second message comes.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}next\nprintf '%s\\n' \"$line\" > \"$here/second\"\ngit branch -m feat/free\n{REPLY}"
+    );
+    let (repository, theirs) = with_a_taken_branch("taken", &work);
     let output = repository.run();
     passed(&output);
+    // Lira told the agent which name the remote has, and how to change it.
+    let second = repository.kept("second");
+    assert!(second.contains("\"method\":\"session/prompt\""), "{second}");
+    assert!(second.contains("`feat/taken`"), "{second}");
+    assert!(second.contains("git branch -m"), "{second}");
+    // The branch of the other person is as it was, and the work is on the
+    // branch with the new name, and on no other branch.
     assert_eq!(repository.on_remote("feat/taken"), theirs);
     let folder = PathBuf::from(repository.kept("folder"));
     assert_eq!(
-        repository.on_remote("feat/taken-2"),
+        repository.on_remote("feat/free"),
         Some(git_ok(&folder, &["rev-parse", "HEAD"]))
     );
+    assert_eq!(repository.on_remote("feat/taken-2"), None);
     let created = repository.calls("pr create");
-    assert!(created[0].contains("--head feat/taken-2 "), "{created:?}");
-    assert!(
-        errors(&output).contains("`feat/taken-2`"),
-        "{}",
-        errors(&output)
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head feat/free "), "{created:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), ADDRESS);
+    // The progress note has what the agent wrote at the end of its work,
+    // and not its answer to the second message.
+    let note = repository.gh("created");
+    assert!(note.contains("- Add a greeting\n"), "{note}");
+}
+
+#[test]
+fn an_agent_that_keeps_a_taken_name_is_a_failure_after_3_messages() {
+    // The agent answers each message, and never changes the name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}while :; do\nnext\necho asked >> \"$here/asked\"\n{REPLY}done\n"
     );
+    let (repository, theirs) = with_a_taken_branch("never-renamed", &work);
+    let error = failed(&repository.run());
+    assert!(error.contains("`feat/taken`"), "{error}");
+    assert!(error.contains("3 messages"), "{error}");
+    assert_eq!(repository.kept("asked").lines().count(), 3);
+    // Lira pushed nothing, and opened no pull request.
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    assert_eq!(repository.calls("pr create"), Vec::<String>::new());
+    let branches = git_ok(&repository.remote, &["branch", "--list"]);
+    assert_eq!(branches.lines().count(), 2, "{branches}");
 }
 
 #[test]
