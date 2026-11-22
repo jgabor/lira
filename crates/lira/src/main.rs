@@ -6,8 +6,9 @@ const USAGE: &str = "\
 usage: lira <command>
 
 commands:
-  check       run the check command of the Lira file, and print each score
-  --version   print the version
+  run \"<request>\"   run an agent on the request, in a new worktree
+  check             run the check command of the Lira file, and print each score
+  --version         print the version
 
 exit status: 0 success, 1 failure, 2 bad usage
 ";
@@ -24,6 +25,13 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["check"] => check(),
+        ["run", request] if !request.trim().is_empty() => run(request),
+        ["run", ..] => {
+            eprint!(
+                "usage: lira run \"<request>\"\n\nThe request is one argument, and it is not empty.\n"
+            );
+            ExitCode::from(2)
+        }
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)
@@ -39,6 +47,17 @@ fn check() -> ExitCode {
     match lira::check::command(&folder) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
+        Err(message) => failure(&message),
+    }
+}
+
+fn run(request: &str) -> ExitCode {
+    let folder = match std::env::current_dir() {
+        Ok(folder) => folder,
+        Err(e) => return failure(&format!("couldn't find the current folder: {e}")),
+    };
+    match lira::run::command(&folder, request) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(message) => failure(&message),
     }
 }
