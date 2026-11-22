@@ -287,7 +287,9 @@ pub fn comments(folder: &Path, address: &str) -> Result<Vec<Comment>, String> {
     let comments = format!("{}/comments", issue_of(address));
     // Each comment is one line of JSON, so no text of a comment can look
     // like the start of another one.
-    let each = ".[] | [.user.login, .body] | @json";
+    // GitHub has no user for a comment of a login that is gone, and shows
+    // `ghost` for it.
+    let each = ".[] | [.user.login // \"ghost\", .body] | @json";
     let printed = api(folder, &[&comments, "--paginate", "--jq", each])?;
     comments_in(&printed)
 }

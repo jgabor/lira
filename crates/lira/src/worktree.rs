@@ -131,8 +131,18 @@ pub fn continued(
             if found.is_some() {
                 git::prune_worktrees(repository)?;
             }
-            let place = place(data, &[&owner, &name], branch)?;
-            new_for(repository, place, branch, &on_remote, remote, &file)?
+            // The old worktree can be in the folder of the branch, and on
+            // another branch or on no branch. Then it goes back to the
+            // branch.
+            let folder = data.join("worktrees").join(&owner).join(&name).join(branch);
+            if is_a_worktree_of(&folder, repository)? {
+                git::check_out(&folder, branch)?;
+                take(&folder, branch, &on_remote, remote)?;
+                folder
+            } else {
+                let place = place(data, &[&owner, &name], branch)?;
+                new_for(repository, place, branch, &on_remote, remote, &file)?
+            }
         }
     };
     let head = git::head(&folder)?;
@@ -146,6 +156,22 @@ pub fn continued(
         commit,
     };
     Ok((worktree, on_remote))
+}
+
+/// If `folder` is the top folder of a worktree of the repository in
+/// `repository`.
+fn is_a_worktree_of(folder: &Path, repository: &Path) -> Result<bool, String> {
+    if !folder.join(".git").exists() {
+        return Ok(false);
+    }
+    let same = |one: PathBuf, other: PathBuf| match (one.canonicalize(), other.canonicalize()) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => false,
+    };
+    Ok(same(
+        git::common_folder(folder)?,
+        git::common_folder(repository)?,
+    ))
 }
 
 /// Takes the commits that the remote has on the branch, up to the commit
