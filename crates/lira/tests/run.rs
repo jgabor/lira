@@ -1083,6 +1083,27 @@ fn the_agent_renames_a_branch_that_the_remote_has_already() {
 }
 
 #[test]
+fn a_new_branch_is_another_name_for_a_taken_one() {
+    // The agent does not give its branch another name. It makes a new
+    // branch for its work, and leaves the one with the taken name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}next\necho asked >> \"$here/asked\"\ngit checkout --quiet -b feat/free\n{REPLY}"
+    );
+    let (repository, theirs) = with_a_taken_branch("taken-new-branch", &work);
+    passed(&repository.run());
+    assert_eq!(repository.kept("asked").lines().count(), 1);
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("feat/free"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head feat/free "), "{created:?}");
+}
+
+#[test]
 fn an_agent_that_keeps_a_taken_name_is_a_failure_after_3_messages() {
     // The agent answers each message, and never changes the name.
     let work = format!(
@@ -1558,7 +1579,8 @@ fn a_commit_that_comes_after_the_reply_is_in_the_pull_request() {
 commit one 'Add a file'
 ended
 called 'pr create'
-(until [ -e "$here/../bin/edited" ]; do sleep 0.05; done; commit late 'A late commit') > /dev/null 2>&1 &
+(until [ -e "$here/../bin/edited" ]; do sleep 0.05; done; commit late 'A late commit'; sleep 30) > /dev/null 2>&1 &
+echo "$!" > "$here/child"
 "#;
     let repository = Repository::new("late-child", CHECK, &format!("{work}{REPLY}"));
     fs::write(repository.top.join("bin").join("slow-edit"), "").unwrap();
@@ -1575,6 +1597,9 @@ called 'pr create'
     );
     let note = repository.gh("edited");
     assert!(note.contains("- A late commit\n"), "{note}");
+    // Lira stopped the harness and its child, so nothing changes the work
+    // after that look.
+    assert!(!runs(&repository.kept("child")));
 }
 
 #[test]
