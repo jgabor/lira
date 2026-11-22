@@ -3706,6 +3706,19 @@ fn lira_run_writes_the_request_as_the_first_comment_of_the_draft() {
     assert!(comment.contains(&format!("\n> {REQUEST}\n")), "{comment}");
 }
 
+// spec(lira continue): `lira run` fails before an agent starts when the request is too long for a comment on GitHub.
+#[test]
+fn a_request_too_long_for_a_comment_fails_before_an_agent_starts() {
+    let repository = Repository::new("request-too-long", CHECK, WORK);
+    let long = "a".repeat(70_000);
+    let output = repository.lira().args(["run", &long]).output().unwrap();
+    let error = failed(&output);
+    assert!(error.contains("too long"), "{error}");
+    assert!(!repository.harness.join("starts").exists());
+    let data = repository.top.join("xdg").join("lira");
+    assert!(!Repository::worktrees(&data).exists());
+}
+
 // spec(lira continue): `lira continue <number>` starts a new agent on the branch of that pull request.
 // spec(lira continue): The agent gets the request, what stopped the work, and your answer.
 // spec(lira continue): The command removes `needs:answer` when the pull request has it.

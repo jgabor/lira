@@ -27,6 +27,14 @@ pub fn request(request: &str) -> String {
     )
 }
 
+/// The most characters that GitHub takes in a comment.
+pub const LONGEST: usize = 65_536;
+
+/// If the comment with the request fits in a comment on GitHub.
+pub fn request_fits(request: &str) -> bool {
+    self::request(request).chars().count() <= LONGEST
+}
+
 /// A text as a quote of Markdown.
 pub fn quote(text: &str) -> String {
     text.trim_end()
@@ -125,6 +133,16 @@ mod tests {
             author: author.to_string(),
             body: body.to_string(),
         }
+    }
+
+    #[test]
+    fn a_request_fits_when_its_comment_has_at_most_the_longest_count_of_characters() {
+        let around = request("x").chars().count() - 1;
+        // Each character here is more than one byte, and counts as one.
+        let fits = "é".repeat(LONGEST - around);
+        assert_eq!(request(&fits).chars().count(), LONGEST);
+        assert!(request_fits(&fits));
+        assert!(!request_fits(&format!("{fits}é")));
     }
 
     #[test]
