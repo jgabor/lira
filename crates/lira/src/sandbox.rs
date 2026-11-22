@@ -1,5 +1,6 @@
-//! The sandbox of an agent. The harness runs in it, and it can change files
-//! only in the folders that Lira names. It can read all files of the host.
+//! The sandbox of an agent. The harness runs in it, and so does the check of
+//! the change of the agent. What runs in it can change files only in the
+//! folders that Lira names. It can read all files of the host.
 //!
 //! This is the one place that knows how the sandbox works. Lira makes it
 //! with the program `bwrap` (bubblewrap), so it runs on Linux only.
@@ -15,7 +16,7 @@ const BWRAP: &str = "bwrap";
 
 /// The folders and files that an agent can change, and the ones in them
 /// that it can't.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Sandbox {
     /// Each path, and if the agent can change it. A later path inside an
     /// earlier one wins there.

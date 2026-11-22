@@ -78,7 +78,7 @@ fn read(started: &Path, worktree: &Worktree, copy: &Path, message: &str) -> Resu
     let mut sandbox = Sandbox::new();
     sandbox.writable(copy);
     let (mut harness, conversation) =
-        agent::start(started, copy, sandbox, &worktree.file, model)
+        agent::start(started, copy, &mut sandbox, &worktree.file, model)
             .map_err(|error| format!("the Reviewer did not start: {error}"))?;
     let reply = harness
         .send(&conversation, message, &mut |_| false)

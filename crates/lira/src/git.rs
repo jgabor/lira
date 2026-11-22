@@ -289,9 +289,20 @@ pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, Stri
 /// The changes of the worktree in a folder that are in no commit, one file
 /// on each line, as `git status --short` prints them. It is empty when all
 /// is in a commit.
+///
+/// A submodule counts as changed when it is at another commit. git does not
+/// go into the submodule for that. Lira runs this outside the sandbox of the
+/// agent, and the agent can write the configuration of a submodule, so git
+/// in the submodule would run what the agent wrote there.
 pub fn changes(folder: &Path) -> Result<String, String> {
     // A setting of git can hide new files. Lira asks for them.
-    run(folder, &["status", "--short", "--untracked-files=all"]).map_err(|wrote| {
+    let args = [
+        "status",
+        "--short",
+        "--untracked-files=all",
+        "--ignore-submodules=dirty",
+    ];
+    run(folder, &args).map_err(|wrote| {
         format!(
             "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
             folder.display()

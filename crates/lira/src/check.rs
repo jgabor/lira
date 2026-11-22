@@ -2,8 +2,10 @@
 //! change. SPEC.md, "Check", and `lira check`.
 
 use crate::lira_file::{self, LiraFile, Score};
+use crate::sandbox::Sandbox;
 use crate::scores::Scores;
 use crate::{git, github};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -31,10 +33,24 @@ pub enum Output {
 }
 
 /// Runs the check command of `file` in `folder`. `base` is the commit of the
-/// main branch that the change is compared with.
-pub fn run(file: &LiraFile, folder: &Path, base: &str, output: Output) -> Result<Outcome, String> {
+/// main branch that the change is compared with. With a `sandbox`, the
+/// check runs in it, and it can also write the file of the scores.
+pub fn run(
+    file: &LiraFile,
+    folder: &Path,
+    base: &str,
+    output: Output,
+    sandbox: Option<&Sandbox>,
+) -> Result<Outcome, String> {
     let scores_file = empty_file()?;
-    let mut command = Command::new("sh");
+    let mut command = match sandbox {
+        Some(sandbox) => {
+            let mut sandbox = sandbox.clone();
+            sandbox.writable(&scores_file);
+            sandbox.command(OsStr::new("sh"))
+        }
+        None => Command::new("sh"),
+    };
     command
         .args(["-c", &file.check])
         .current_dir(folder)
@@ -118,7 +134,7 @@ pub fn command(folder: &Path) -> Result<bool, String> {
     } else {
         github::main_scores(folder, &main.name)?
     };
-    let outcome = run(&file, folder, &base, Output::Shown)?;
+    let outcome = run(&file, folder, &base, Output::Shown, None)?;
     for line in report(&file.scores, &outcome.scores, &on_main) {
         println!("{line}");
     }
