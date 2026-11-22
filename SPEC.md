@@ -240,7 +240,10 @@ is success, 1 is a failure, and 2 is bad usage.
 - A commit that is on the remote and not in the worktree is taken first.
 - The new agent has a new conversation, and it runs under the same rules as an agent of `lira run`.
 - Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again. The work can stop and ask again.
+- The Reviewer gets the request and your answer.
 - It is an error when the pull request is not open, or has no comment with the request.
+- It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
+- It is an error when the worktree and the remote both have commits on the branch that the other does not have.
 - It prints the address of the pull request.
 
 ### lira check

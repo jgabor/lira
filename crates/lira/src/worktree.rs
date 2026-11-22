@@ -118,7 +118,13 @@ pub fn continued(
                     folder.display()
                 ));
             }
-            take(&folder, branch, &on_remote, remote)?;
+            take(
+                &folder,
+                &worktree_named(&folder),
+                branch,
+                &on_remote,
+                remote,
+            )?;
             folder
         }
         _ => {
@@ -131,12 +137,18 @@ pub fn continued(
             // branch. The repository can have no such branch any more,
             // when the agent gave it another name.
             let folder = ours.join(branch);
-            if is_inside(&folder, &ours) && is_a_worktree_of(&folder, repository)? {
+            if is_at(&folder, &ours, branch) && is_a_worktree_of(&folder, repository)? {
                 if !git::has_branch(repository, branch)? {
                     git::add_branch(repository, branch, &on_remote)?;
                 }
                 git::check_out(&folder, branch)?;
-                take(&folder, branch, &on_remote, remote)?;
+                take(
+                    &folder,
+                    &worktree_named(&folder),
+                    branch,
+                    &on_remote,
+                    remote,
+                )?;
                 folder
             } else {
                 let place = place(data, &[&owner, &name], branch)?;
@@ -166,6 +178,20 @@ fn is_inside(folder: &Path, ours: &Path) -> bool {
     }
 }
 
+/// If `folder` is the folder `branch` in the folder `ours`, with each link
+/// in both paths followed. A link there to another folder is not.
+fn is_at(folder: &Path, ours: &Path, branch: &str) -> bool {
+    match (folder.canonicalize(), ours.canonicalize()) {
+        (Ok(folder), Ok(ours)) => folder == ours.join(branch),
+        _ => false,
+    }
+}
+
+/// The worktree in `folder`, as an error names it.
+fn worktree_named(folder: &Path) -> String {
+    format!("the worktree `{}`", folder.display())
+}
+
 /// If `folder` is the top folder of a worktree of the repository in
 /// `repository`.
 fn is_a_worktree_of(folder: &Path, repository: &Path) -> Result<bool, String> {
@@ -184,16 +210,22 @@ fn is_a_worktree_of(folder: &Path, repository: &Path) -> Result<bool, String> {
 
 /// Takes the commits that the remote has on the branch, up to the commit
 /// `on_remote`, and that the worktree in `folder` does not have. The
-/// worktree is on the branch.
-fn take(folder: &Path, branch: &str, on_remote: &str, remote: &str) -> Result<(), String> {
+/// worktree is on the branch. `whose` names where the commits of the branch
+/// are, for an error.
+fn take(
+    folder: &Path,
+    whose: &str,
+    branch: &str,
+    on_remote: &str,
+    remote: &str,
+) -> Result<(), String> {
     let head = git::head(folder)?;
     if git::is_in(folder, on_remote, &head)? {
         return Ok(());
     }
     if !git::is_in(folder, &head, on_remote)? {
         return Err(format!(
-            "the worktree `{}` has commits on the branch `{branch}` that the remote `{remote}` does not have, and the remote has commits on it that the worktree does not have. Put them together on one branch, and run `lira continue` again",
-            folder.display()
+            "{whose} has commits on the branch `{branch}` that the remote `{remote}` does not have, and the remote has commits on it that {whose} does not have. Put them together on one branch, and run `lira continue` again"
         ));
     }
     git::fast_forward(folder, on_remote)
@@ -219,7 +251,9 @@ fn new_for(
     }
     let made = git::add_worktree(repository, &place.folder, branch)
         .and_then(|()| place.holds_the_worktree())
-        .and_then(|()| take(&place.folder, branch, on_remote, remote))
+        // The worktree is new, so the commits are those of the branch in
+        // the repository, and Lira removes the worktree after an error.
+        .and_then(|()| take(&place.folder, "the repository", branch, on_remote, remote))
         .and_then(|()| match &file.setup {
             Some(command) => setup(command, &place.folder),
             None => Ok(()),
