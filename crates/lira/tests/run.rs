@@ -1925,7 +1925,7 @@ done
 "#;
     let repository = Repository::new("no-label", CHECK, work);
     repository.reviewer("reply 'It is still wrong.\\n\\nReview: findings'\n");
-    fs::write(repository.top.join("bin").join("no-label"), "").unwrap();
+    fs::write(repository.shared.join("bin").join("no-label"), "").unwrap();
     let error = failed(&repository.run());
     assert!(error.contains("3 rounds"), "{error}");
     assert!(
