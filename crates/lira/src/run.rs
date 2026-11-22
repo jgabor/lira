@@ -3,7 +3,7 @@
 //! change.
 
 use crate::check::{self, Output};
-use crate::harness::Harness;
+use crate::harness::{Harness, Reply};
 use crate::pull_request::PullRequest;
 use crate::worktree::{self, Worktree};
 use crate::{agent, data, git, github, review};
@@ -29,6 +29,10 @@ const ROUNDS: usize = 3;
 /// is the end of the output, where a check says what is wrong.
 const KEPT: usize = 20_000;
 
+/// How many times Lira tells the agent to give its branch another name,
+/// when the remote has a branch with the name of the agent already.
+const NAMES: usize = 3;
+
 /// `lira run "<request>"`: makes a new worktree of the repository in
 /// `folder`, and runs an agent on the request in it. It opens a draft pull
 /// request at the first commit of the agent. When the reply of the agent
@@ -43,7 +47,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     eprintln!("lira: the agent works in {place}");
 
     let model = made.file.models.agent.as_deref();
-    let (harness, conversation) = match agent::start(folder, &made.folder, model) {
+    let (harness, conversation) = match agent::start(folder, &made.folder, &made.file, model) {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -157,10 +161,54 @@ impl Run<'_> {
         }
     }
 
+    /// The agent works on a message, and Lira brings the pull request up to
+    /// date. After this, all commits of the agent are in the pull request.
+    /// When the remote has a branch with the name of the agent already, the
+    /// agent gives its branch another name first.
+    fn work(&mut self, message: &str) -> Result<(), String> {
+        let reply = self.give(message)?;
+        self.said = reply.text;
+        if let Some(why) = agent::stopped(&reply.stop) {
+            return Err(format!(
+                "the agent stopped before the end of its work: {why}\n{}",
+                wrote(&self.said)
+            ));
+        }
+        let mut asked = 0;
+        loop {
+            let noted = self.note("Lira runs the check.");
+            let Some(name) = self.pull_request.taken().map(str::to_string) else {
+                return noted
+                    .and_then(|()| self.address())
+                    .map(|_| ())
+                    .map_err(|error| format!("{error}\n{}", wrote(&self.said)));
+            };
+            let remote = &self.made.remote;
+            if asked == NAMES {
+                return Err(format!(
+                    "the remote `{remote}` has a branch `{name}` already, and the agent gave its branch no other name after {NAMES} messages, so Lira pushed nothing\n{}",
+                    wrote(&self.said)
+                ));
+            }
+            asked += 1;
+            eprintln!(
+                "lira: the remote `{remote}` has a branch `{name}` already, so the agent gives its branch another name"
+            );
+            // What the agent wrote at the end of its work stays. Its answer
+            // here is only the new name.
+            let renamed = self.give(&rename(remote, &name))?;
+            if let Some(why) = agent::stopped(&renamed.stop) {
+                return Err(format!(
+                    "the agent stopped before it gave its branch another name: {why}\n{}",
+                    wrote(&self.said)
+                ));
+            }
+        }
+    }
+
     /// Gives a message to the agent, and waits for its reply. While the
     /// agent works, Lira looks for a new commit each time a tool call ends.
-    /// After the reply, all commits of the agent are in the pull request.
-    fn work(&mut self, message: &str) -> Result<(), String> {
+    fn give(&mut self, message: &str) -> Result<Reply, String> {
         let Run {
             harness,
             pull_request,
@@ -194,21 +242,10 @@ impl Run<'_> {
             )
             // The thread ends here: nothing can ask for a look any more.
         });
-        let reply = reply.map_err(|error| match self.pull_request.problem() {
+        reply.map_err(|error| match self.pull_request.problem() {
             Some(problem) => format!("{error}\n{problem}"),
             None => error.to_string(),
-        })?;
-        self.said = reply.text;
-        if let Some(why) = agent::stopped(&reply.stop) {
-            return Err(format!(
-                "the agent stopped before the end of its work: {why}\n{}",
-                wrote(&self.said)
-            ));
-        }
-        self.note("Lira runs the check.")
-            .and_then(|()| self.address())
-            .map(|_| ())
-            .map_err(|error| format!("{error}\n{}", wrote(&self.said)))
+        })
     }
 
     /// Brings the pull request up to date, with this text under `Next` in
@@ -384,6 +421,14 @@ struct Failure {
     for_the_agent: String,
     /// The end of the error for the person, when Lira stops.
     for_you: String,
+}
+
+/// The message for an agent whose branch has a name that the remote has
+/// already.
+fn rename(remote: &str, name: &str) -> String {
+    format!(
+        "The remote `{remote}` has a branch `{name}` already, and it is not your work. So Lira can't push your branch with this name. Give your branch another name that says what the work is: run `git branch -m <name>`. Change nothing else, and answer with the new name only.\n"
+    )
 }
 
 /// What the agent wrote in a reply, for the person to read.

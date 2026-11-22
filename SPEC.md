@@ -31,6 +31,7 @@ place where a repository sets something for Lira.
 | `models.agent` | Text | The AI model for the agent. |
 | `models.planner` | Text | The AI model for the Planner. |
 | `models.reviewer` | Text | The AI model for the Reviewer. |
+| `harness.program` | Text | The program of the harness. |
 | `reviewer.harnesses` | List of text | The harnesses for the Reviewer, in order of preference. |
 | `score` | List of tables | The scores. Each has a `name` and a `better`. |
 | `planner.on` | True or false | If the Planner runs. |
@@ -42,6 +43,7 @@ place where a repository sets something for Lira.
 - A Lira file with no `check` is an error.
 - The value of `better` is `higher` or `lower`.
 - Two scores with the same name are an error.
+- The value of `harness.program` is the name of a program, or an absolute path.
 - A path in `protected` that ends with `/` is a folder, and it covers all that is in it.
 - A path in `protected` is relative to the root of the repository.
 - The agent limit of a repository can't be larger than the agent limit of the host.
@@ -208,6 +210,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - The request needs no issue.
 - The new worktree starts on a branch `lira/run-<8 letters or digits>`.
 - The instructions tell the agent to give the branch a name that says what the work is, such as `fix/login-timeout`.
+- When the remote has a branch with the name that the agent chose, Lira tells the agent to give its branch another name.
+- *Proposed:* After 3 such messages with no new name, `lira run` fails.
 - Lira opens a draft pull request at the first commit of the agent.
 - The title of the pull request is the subject of the first commit.
 - When the agent makes no commit, Lira opens no pull request, and `lira run` fails.
@@ -263,7 +267,8 @@ is success, 1 is a failure, and 2 is bad usage.
 
 - Lira runs an agent through the Agent Client Protocol (ACP).
 - The harness is the program that `LIRA_HARNESS` names.
-- When `LIRA_HARNESS` is not set, the harness is the program `claude-agent-acp`.
+- When `LIRA_HARNESS` is not set, the harness is the program that `harness.program` in the Lira file names.
+- When `LIRA_HARNESS` is not set and the Lira file has no `harness.program`, the harness is the program `claude-agent-acp`.
 - *Proposed:* The first harness is Claude Code.
 - When a harness stops at a usage limit, Lira keeps the work in Now, and continues when the limit ends.
 

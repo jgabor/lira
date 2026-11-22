@@ -10,10 +10,6 @@ use std::fs;
 /// the worktree, outside the files of the repository.
 const DESCRIPTION: &str = "lira-description.md";
 
-/// How many names Lira tries for the branch on the remote, when the remote
-/// has a branch with the name of the agent already.
-const NAMES: u32 = 9;
-
 /// What the progress note says under `Next` while the agent works.
 const WORKS: &str = "The agent works on the request.";
 
@@ -44,6 +40,10 @@ pub struct PullRequest<'a> {
     /// What went wrong when Lira last looked, if something did. Lira tries
     /// again the next time.
     problem: Option<String>,
+    /// The name of the branch of the agent, when Lira could not push it
+    /// the last time because the remote has a branch with that name
+    /// already.
+    taken: Option<String>,
 }
 
 impl<'a> PullRequest<'a> {
@@ -61,6 +61,7 @@ impl<'a> PullRequest<'a> {
             address: None,
             described: String::new(),
             problem: None,
+            taken: None,
         })
     }
 
@@ -115,11 +116,20 @@ impl<'a> PullRequest<'a> {
         self.problem.as_deref()
     }
 
+    /// The name of the branch of the agent, when the remote has a branch
+    /// with that name already, so that Lira pushed nothing the last time.
+    /// The branch on the remote is not the work of the agent, and Lira
+    /// does not change it.
+    pub fn taken(&self) -> Option<&str> {
+        self.taken.as_deref()
+    }
+
     /// Makes the remote and the pull request fit what the worktree has now.
     /// `next` and `decisions` are the text of these parts of the progress
     /// note.
     fn bring_up_to_date(&mut self, next: &str, decisions: &str) -> Result<(), String> {
         let folder = &self.worktree.folder;
+        self.taken = None;
         // The agent can make a commit while Lira looks. So Lira reads the
         // newest commit one time, and pushes and describes that commit.
         let commit = self.work()?;
@@ -256,8 +266,8 @@ impl<'a> PullRequest<'a> {
     }
 
     /// The name for the branch on the remote: the name that the branch of
-    /// the agent has now, or that name with a number when the remote has
-    /// such a branch already.
+    /// the agent has now. It is an error when the remote has such a branch
+    /// already, and `taken` then has the name.
     fn new_name(&mut self) -> Result<String, String> {
         let folder = &self.worktree.folder;
         let remote = &self.worktree.remote;
@@ -271,23 +281,14 @@ impl<'a> PullRequest<'a> {
             return Ok(tried_as);
         }
         let name = self.local.clone();
-        let names = [name.clone()]
-            .into_iter()
-            .chain((2..=NAMES).map(|number| format!("{name}-{number}")));
-        for other in names {
-            if git::remote_commit(folder, remote, &other)?.is_none() {
-                if other != name {
-                    eprintln!(
-                        "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
-                    );
-                }
-                return Ok(other);
-            }
+        if git::remote_commit(folder, remote, &name)?.is_some() {
+            let error = format!(
+                "the remote `{remote}` has a branch `{name}` already, so Lira did not push the branch of the agent"
+            );
+            self.taken = Some(name);
+            return Err(error);
         }
-        Err(format!(
-            "the remote `{remote}` has a branch `{name}` already, and `{name}-2` to `{name}-{NAMES}` too. Give the branch in `{}` another name",
-            folder.display()
-        ))
+        Ok(name)
     }
 }
 

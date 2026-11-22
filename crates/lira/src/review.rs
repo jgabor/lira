@@ -70,7 +70,7 @@ fn read(started: &Path, worktree: &Worktree, copy: &Path, message: &str) -> Resu
     // A Reviewer uses a different harness from the agent when the Lira file
     // names one that is available. Lira knows one harness now, so the
     // Reviewer has the harness of the agent.
-    let (mut harness, conversation) = agent::start(started, copy, model)
+    let (mut harness, conversation) = agent::start(started, copy, &worktree.file, model)
         .map_err(|error| format!("the Reviewer did not start: {error}"))?;
     let reply = harness
         .send(&conversation, message, &mut |_| false)
