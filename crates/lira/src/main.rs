@@ -6,7 +6,7 @@ const USAGE: &str = "\
 usage: lira <command>
 
 commands:
-  run \"<request>\"   run an agent on the request, in a new worktree
+  run \"<request>\"   run an agent on the request, to a pull request that is ready for review
   check             run the check command of the Lira file, and print each score
   --version         print the version
 

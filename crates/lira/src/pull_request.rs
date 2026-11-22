@@ -83,6 +83,39 @@ impl<'a> PullRequest<'a> {
         Ok(())
     }
 
+    /// Gives the pull request this description, and marks it ready for
+    /// review. The pull request must be up to date.
+    pub fn ready(&mut self, description: &str) -> Result<(), String> {
+        let Some(address) = self.address.clone() else {
+            return Err("there is no pull request to mark ready for review".to_string());
+        };
+        self.describe(&address, description)?;
+        github::mark_ready(&self.worktree.folder, &address)
+    }
+
+    /// Gives the pull request at `address` this description.
+    fn describe(&mut self, address: &str, description: &str) -> Result<(), String> {
+        let folder = &self.worktree.folder;
+        let file = self.write(description)?;
+        let sent = github::describe(folder, address, &file);
+        let _ = fs::remove_file(&file);
+        sent?;
+        self.described = description.to_string();
+        Ok(())
+    }
+
+    /// Writes a description to the file that `gh` reads it from.
+    fn write(&self, description: &str) -> Result<std::path::PathBuf, String> {
+        let file = git::own_file(&self.worktree.folder, DESCRIPTION)?;
+        fs::write(&file, description).map_err(|error| {
+            format!(
+                "Lira can't write the description of the pull request to `{}`: {error}",
+                file.display()
+            )
+        })?;
+        Ok(file)
+    }
+
     /// What went wrong at the last look, if something did.
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
@@ -115,24 +148,15 @@ impl<'a> PullRequest<'a> {
         if self.address.is_some() && self.described == description {
             return Ok(());
         }
-        let file = git::own_file(folder, DESCRIPTION)?;
-        fs::write(&file, &description).map_err(|error| {
-            format!(
-                "Lira can't write the description of the pull request to `{}`: {error}",
-                file.display()
-            )
-        })?;
+        if let Some(address) = self.address.clone() {
+            return self.describe(&address, &description);
+        }
+        let file = self.write(&description)?;
         let branch = self.branch.as_deref().expect("the branch was pushed");
-        let sent = match &self.address {
-            Some(address) => github::describe(folder, address, &file),
-            None => {
-                let main = &self.worktree.main;
-                github::open_draft(folder, main, branch, &subjects[0], &file)
-                    .map(|address| self.address = Some(address))
-            }
-        };
+        let main = &self.worktree.main;
+        let opened = github::open_draft(folder, main, branch, &subjects[0], &file);
         let _ = fs::remove_file(&file);
-        sent?;
+        self.address = Some(opened?);
         self.described = description;
         Ok(())
     }
