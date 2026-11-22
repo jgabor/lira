@@ -128,11 +128,8 @@ fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
     // folder that it is in.
     let main_common = common.join("commondir");
     for (file, content) in [(&own_config, ""), (&main_config, ""), (&main_common, ".\n")] {
-        if !file.exists() {
-            fs::write(file, content).map_err(|error| {
-                format!("Lira can't make the file `{}`: {error}", file.display())
-            })?;
-        }
+        make_whole(file, content)
+            .map_err(|error| format!("Lira can't make the file `{}`: {error}", file.display()))?;
     }
     let own_folder = git::own_file(folder, "")?;
     let mut sandbox = Sandbox::new();
@@ -155,6 +152,26 @@ fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
         .read_only(&git::own_file(folder, "commondir")?)
         .read_only(&git::own_file(folder, "gitdir")?);
     Ok(sandbox)
+}
+
+/// Makes the file with this content when nothing has its name, also no
+/// link. git can read the file at any time, and another run can make it at
+/// the same time, so the file is never there with a part of its content:
+/// Lira writes another file, and then gives it this name too.
+fn make_whole(file: &Path, content: &str) -> std::io::Result<()> {
+    if file.symlink_metadata().is_ok() {
+        return Ok(());
+    }
+    let mut name = file.as_os_str().to_owned();
+    name.push(format!(".lira-{}", process::id()));
+    let written = Path::new(&name);
+    fs::write(written, content)?;
+    let made = fs::hard_link(written, file);
+    let _ = fs::remove_file(written);
+    match made {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// One run of `lira run`, after the agent started.
@@ -871,5 +888,26 @@ mod tests {
         let (one, other) = (new_branch(), new_branch());
         assert_ne!(one, other);
         assert_eq!(one.len(), "lira/run-".len() + 8);
+    }
+
+    #[test]
+    fn lira_makes_a_file_whole_and_leaves_what_has_its_name() {
+        let folder = std::env::temp_dir().join(format!("lira-make-whole-{}", process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("commondir");
+        make_whole(&file, ".\n").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), ".\n");
+        make_whole(&file, "other\n").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), ".\n");
+        // Lira writes nothing through a link, also when its target is not
+        // there.
+        let link = folder.join("config.worktree");
+        std::os::unix::fs::symlink(folder.join("elsewhere"), &link).unwrap();
+        make_whole(&link, "").unwrap();
+        assert!(!folder.join("elsewhere").exists());
+        // Lira leaves no other file.
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 2);
+        fs::remove_dir_all(&folder).unwrap();
     }
 }

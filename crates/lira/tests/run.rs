@@ -1061,38 +1061,43 @@ git config --file "$common/config.worktree" core.fsmonitor "touch '$here/../esca
     );
 }
 
-/// The command lines of the processes of the host that have this text.
+/// The numbers of the processes of the host whose command lines have this
+/// text.
 fn processes_with(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     for entry in fs::read_dir("/proc").unwrap().flatten() {
         let Ok(line) = fs::read(entry.path().join("cmdline")) else {
             continue;
         };
-        let line = String::from_utf8_lossy(&line).replace('\0', " ");
-        if line.contains(text) {
-            found.push(line);
+        if String::from_utf8_lossy(&line).contains(text) {
+            found.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
     found
 }
 
+/// The number of the process that leads the terminal group of a process:
+/// the sixth field of its `stat`. `setsid` gives a process a terminal
+/// group of its own, with no terminal, and the process leads it.
+fn leader_of(process: &str) -> String {
+    let stat = fs::read_to_string(format!("/proc/{process}/stat")).unwrap();
+    let fields = stat.rsplit(')').next().unwrap();
+    fields.split(' ').nth(4).unwrap().to_string()
+}
+
 #[test]
 fn the_harness_has_no_terminal_of_lira_and_lira_still_stops_its_children() {
-    // `setsid` gives a process a terminal group of its own, with no
-    // terminal, and the process leads it. The sixth field of `stat` is the
-    // number of the process that leads the group of the harness. In the
-    // sandbox, it is 0 when that process is outside the sandbox.
-    //
-    // Then the harness starts two children that run until something stops
-    // them: one stays in the process group of the harness, and one leaves
-    // it. The harness itself does not end when Lira closes its input.
-    let work = r#"cut -d ' ' -f 6 "/proc/$$/stat" > "$here/leader"
-sh -c 'while :; do sleep 0.1; done' "$here/child" &
-first=$!
-setsid sh -c 'while :; do sleep 0.1; done' "$here/child" &
-second=$!
-sleep 0.2
-kill -0 "$first" && kill -0 "$second" && echo yes > "$here/children"
+    // The harness starts two children that run until something stops them:
+    // one stays in the terminal group and the process group of the
+    // harness, and one leaves them. The harness waits for the test before
+    // it works. It does not end when Lira closes its input.
+    let work = r#"sh -c 'while :; do sleep 0.1; done' "$here/child-stays" &
+setsid sh -c 'while :; do sleep 0.1; done' "$here/child-leaves" &
+echo started > "$here/started"
+tries=0
+until [ -e "$here/go" ]; do
+  tries=$((tries + 1)); [ "$tries" -gt 200 ] && exit 1; sleep 0.05
+done
 "#;
     let wait = r#"while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),"method".*/\1/p')
@@ -1101,23 +1106,30 @@ done
 while :; do sleep 0.1; done
 "#;
     let repository = Repository::new("terminal", CHECK, &format!("{work}{WORK}{wait}"));
-    passed(&repository.run());
-    // The process that leads the group of the harness is in the sandbox,
-    // and it is not the one that leads the group of this test.
-    let leader = repository.kept("leader");
-    assert_ne!(leader, "0");
-    let own = fs::read_to_string("/proc/self/stat").unwrap();
-    let own = own.rsplit(')').next().unwrap().split(' ').nth(4).unwrap();
-    assert_ne!(leader, own);
-    assert_eq!(repository.kept("children"), "yes");
-    let child = repository.harness.join("child");
-    let child = child.to_str().unwrap();
-    let mut tries = 0;
-    while !processes_with(child).is_empty() && tries < 100 {
-        tries += 1;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert_eq!(processes_with(child), Vec::<String>::new());
+    let lira = repository
+        .lira()
+        .args(["run", REQUEST])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let path = |name: &str| repository.harness.join(name).to_str().unwrap().to_string();
+    let (stays, child, harness) = (path("child-stays"), path("child"), path("agent"));
+    wait_for("the start of the children", || {
+        repository.harness.join("started").exists() && processes_with(&child).len() >= 2
+    });
+    // The process that leads the terminal group of the harness is not the
+    // one that leads the group of this test. The test reads both numbers
+    // on the host.
+    let stays = processes_with(&stays);
+    assert_eq!(stays.len(), 1, "{stays:?}");
+    let own = leader_of("self");
+    assert_ne!(leader_of(&stays[0]), own);
+    fs::write(repository.harness.join("go"), "").unwrap();
+    passed(&lira.wait_with_output().unwrap());
+    wait_for("the end of the harness and of its children", || {
+        processes_with(&child).is_empty() && processes_with(&harness).is_empty()
+    });
 }
 
 // spec(Check): Lira runs the check of an agent in the sandbox of the agent.
