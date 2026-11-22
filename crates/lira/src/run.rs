@@ -5,6 +5,7 @@
 use crate::check::{self, Output};
 use crate::harness::{Harness, Reply};
 use crate::pull_request::PullRequest;
+use crate::sandbox::{self, Sandbox};
 use crate::worktree::{self, Worktree};
 use crate::{agent, data, git, github, review};
 use std::fs::{self, File};
@@ -47,13 +48,17 @@ const NAMES: usize = 3;
 pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     // A missing login stops the run here, before an agent works.
     github::require_login(folder)?;
+    // A host with no sandbox stops the run here too.
+    sandbox::require()?;
     let data = data::folder()?;
     let made = worktree::make(folder, &data, &new_branch())?;
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
 
     let model = made.file.models.agent.as_deref();
-    let (harness, conversation) = match agent::start(folder, &made.folder, &made.file, model) {
+    let started = sandbox_of(&made.folder)
+        .and_then(|sandbox| agent::start(folder, &made.folder, sandbox, &made.file, model));
+    let (harness, conversation) = match started {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -91,6 +96,48 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     eprintln!("{}", wrote(&run.said));
     println!("{address}");
     Ok(())
+}
+
+/// The sandbox of the agent that works in the worktree `folder`. The agent
+/// can change the worktree, and the git folder of the repository, where a
+/// commit of the worktree goes. Lira runs git outside the sandbox later, so
+/// the agent can't change the hooks and the configuration of git there, or
+/// the files that say where git finds them.
+fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
+    let common = git::common_folder(folder)?;
+    let hooks = common.join("hooks");
+    // An agent could make the folder of the hooks when it is not there.
+    fs::create_dir_all(&hooks)
+        .map_err(|error| format!("Lira can't make the folder `{}`: {error}", hooks.display()))?;
+    // A worktree has its own configuration of git when the repository says
+    // so. The agent could make it when it is not there.
+    let own_config = git::own_file(folder, "config.worktree")?;
+    if !own_config.exists() {
+        fs::write(&own_config, "").map_err(|error| {
+            format!(
+                "Lira can't make the file `{}`: {error}",
+                own_config.display()
+            )
+        })?;
+    }
+    let own_folder = git::own_file(folder, "")?;
+    let mut sandbox = Sandbox::new();
+    sandbox
+        .writable(folder)
+        .writable(&common)
+        .read_only(&hooks)
+        .read_only(&common.join("config"))
+        // The git folders of the other worktrees say where git finds their
+        // configuration, as the files below do for this one.
+        .read_only(&common.join("worktrees"))
+        .writable(&own_folder)
+        .read_only(&own_config)
+        // These say where git finds the git folder of the worktree, and the
+        // configuration. So they could name a configuration of the agent.
+        .read_only(&folder.join(".git"))
+        .read_only(&git::own_file(folder, "commondir")?)
+        .read_only(&git::own_file(folder, "gitdir")?);
+    Ok(sandbox)
 }
 
 /// One run of `lira run`, after the agent started.

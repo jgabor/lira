@@ -262,8 +262,16 @@ impl Harness {
     /// Starts the harness, and agrees with it on the version of the
     /// protocol. The command says in which folder and with which variables
     /// the harness runs.
-    pub fn start(mut command: Command) -> Result<Harness, Error> {
+    pub fn start(command: Command) -> Result<Harness, Error> {
         let program = command.get_program().to_string_lossy().into_owned();
+        Harness::start_as(command, &program)
+    }
+
+    /// Starts the harness as `start` does. The command can start the
+    /// harness through another program, and `program` is the name of the
+    /// harness in each error.
+    pub fn start_as(mut command: Command, program: &str) -> Result<Harness, Error> {
+        let program = program.to_string();
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -13,6 +13,8 @@ what the first version does.
 - The first version is a server and a command line on one host.
 - GitHub is the only screen. You read issues and pull requests there.
 - Lira uses your GitHub login, through the GitHub command line, `gh`.
+- Lira runs on Linux, and needs `bwrap` (bubblewrap). Each agent works in a
+  sandbox, where it can change its own worktree, and not your other files.
 - A repository sets itself up for Lira with one file, `lira.toml`. It names
   the check: the one command that says pass or fail for a change.
 - The check can print scores. A change that makes a score worse waits for
