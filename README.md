@@ -39,7 +39,7 @@ An issue with no `auto:` label does not start.
 |---|---|
 | `lira init` | Makes a Lira file for the repository, and opens the setup pull request. |
 | `lira run "<request>"` | Runs an agent on a request, from the request to a pull request that is ready for review. |
-| `lira continue <number>` | Continues the work on a pull request of `lira run` after your answer in a comment. |
+| `lira continue <number>` | Continues the work on a pull request of `lira run` that stopped, after your answer. |
 | `lira check` | Runs the check command of the Lira file, as the server runs it. |
 | `lira inbox` | Lists each issue and chat that waits for you, with the reason. |
 | `lira merge <number>` | Puts the change of a pull request in the merge queue. |
