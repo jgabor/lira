@@ -155,7 +155,9 @@ if [ "$1 $2" = "pr comment" ]; then
   count=$(( $(cat "$here/comment-count" 2>/dev/null || echo 0) + 1 ))
   echo "$count" > "$here/comment-count"
   cp "$description" "$here/comment-$count"
-  { printf '%s\037' "$(cat "$here/login" 2>/dev/null || echo you)"; cat "$description"; printf '\036\n'; } >> "$here/listed"
+  # A comment here has no `"`, `\\` or tab, so each end of line is all that
+  # JSON writes in another form.
+  { printf '["%s","' "$(cat "$here/login" 2>/dev/null || echo you)"; awk 'BEGIN { ORS = "" } NR > 1 { print "\\n" } { print }' "$description"; printf '"]\n'; } >> "$here/listed"
   exit 0
 fi
 if [ "$1 $2" = "api user" ]; then
@@ -3588,6 +3590,12 @@ impl Repository {
     /// request is open, a draft, and has `needs:answer`. After this, each
     /// Reviewer passes the change, and the agent does `CONTINUE`.
     fn stopped(test: &str) -> Repository {
+        Repository::stopped_with(test, CHECK)
+    }
+
+    /// A run that stops as `stopped` says, in a repository with this Lira
+    /// file.
+    fn stopped_with(test: &str, lira_file: &str) -> Repository {
         let work = r#"commit greeting 'Add a greeting'
 reply 'I made the file.'
 while :; do
@@ -3595,7 +3603,7 @@ while :; do
   reply 'I do not agree.'
 done
 "#;
-        let repository = Repository::new(test, CHECK, work);
+        let repository = Repository::new(test, lira_file, work);
         repository.reviewer("reply 'It is still wrong.\\n\\nReview: findings'\n");
         failed(&repository.run());
         fs::remove_file(repository.harness.join("reviewer.sh")).unwrap();
@@ -3635,7 +3643,7 @@ done
             .append(true)
             .open(self.shared.join("bin").join("listed"))
             .unwrap();
-        writeln!(listed, "{login}\u{1f}{body}\u{1e}").unwrap();
+        writeln!(listed, "{}", listed_comment(login, body)).unwrap();
     }
 
     /// `lira continue 7`.
@@ -3672,6 +3680,16 @@ done
     }
 }
 
+/// One comment as the stand-in for `gh` lists it: a list of JSON with the
+/// login and the text.
+fn listed_comment(login: &str, body: &str) -> String {
+    let list = Json::List(vec![
+        Json::Text(login.to_string()),
+        Json::Text(body.to_string()),
+    ]);
+    list.to_string()
+}
+
 // spec(lira continue): `lira run` writes the request as the first comment of the draft pull request.
 #[test]
 fn lira_run_writes_the_request_as_the_first_comment_of_the_draft() {
@@ -3691,7 +3709,6 @@ fn lira_run_writes_the_request_as_the_first_comment_of_the_draft() {
 // spec(lira continue): `lira continue <number>` starts a new agent on the branch of that pull request.
 // spec(lira continue): The agent gets the request, what stopped the work, and your answer.
 // spec(lira continue): The command removes `needs:answer` when the pull request has it.
-// spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
 // spec(lira continue): It prints the address of the pull request.
 // spec(Steps): When you answer, Lira removes `needs:answer` and the work continues.
 #[test]
@@ -3775,12 +3792,9 @@ fn your_answer_is_each_comment_of_your_login_after_the_last_comment_of_lira() {
     // A remark of yours before the question of Lira is no answer.
     let listed = repository.shared.join("bin").join("listed");
     let text = fs::read_to_string(&listed).unwrap();
-    let (request, question) = text.split_once('\u{1e}').unwrap();
-    fs::write(
-        &listed,
-        format!("{request}\u{1e}\nyou\u{1f}An old remark.\u{1e}{question}"),
-    )
-    .unwrap();
+    let (request, question) = text.split_once('\n').unwrap();
+    let remark = listed_comment("you", "An old remark.");
+    fs::write(&listed, format!("{request}\n{remark}\n{question}")).unwrap();
     repository.comment("you", ANSWER);
     // Someone else writes what looks like a comment of Lira.
     repository.comment(
@@ -3840,22 +3854,36 @@ fn a_pull_request_that_is_ready_becomes_a_draft_again() {
 // spec(lira continue): A commit that is on the remote and not in the worktree is taken first.
 #[test]
 fn the_agent_works_in_the_old_worktree_or_in_a_new_one_with_the_commits_of_the_remote() {
-    for gone in [false, true] {
-        let test = if gone {
-            "worktree-gone"
-        } else {
-            "worktree-there"
-        };
-        let repository = Repository::stopped(test);
+    // The `setup` command keeps the subject of the newest commit.
+    let setup = r#"setup = "git log -1 --format=%s > \"$HOME/setup-saw\"""#;
+    let lira_file = format!("{CHECK}{setup}\n");
+    // The old worktree stays, or it is gone with its branch, or it is gone
+    // and its branch stays without your commit.
+    for (test, gone, branch_too) in [
+        ("worktree-there", false, false),
+        ("worktree-gone", true, true),
+        ("worktree-gone-branch-kept", true, false),
+    ] {
+        let repository = Repository::stopped_with(test, &lira_file);
         let branch = repository.pull_request_branch();
         let old = PathBuf::from(repository.kept("folder"));
         if gone {
             let old = old.to_str().unwrap();
             git_ok(&repository.root, &["worktree", "remove", "--force", old]);
-            git_ok(&repository.root, &["branch", "--quiet", "-D", &branch]);
+            if branch_too {
+                git_ok(&repository.root, &["branch", "--quiet", "-D", &branch]);
+            }
         }
         let yours = repository.push_to(&branch, "yours.txt");
+        let saw = repository.top.join("home").join("setup-saw");
+        fs::remove_file(&saw).unwrap();
         passed(&repository.continue_work());
+        // The `setup` command runs in a new worktree only, after it took
+        // your commit.
+        match gone {
+            true => assert_eq!(fs::read_to_string(&saw).unwrap(), "A commit of yours\n"),
+            false => assert!(!saw.exists()),
+        }
         let folder = PathBuf::from(repository.kept("folder"));
         if gone {
             let data = repository.top.join("xdg").join("lira");
@@ -3876,6 +3904,47 @@ fn the_agent_works_in_the_old_worktree_or_in_a_new_one_with_the_commits_of_the_r
     }
 }
 
+// spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
+#[test]
+fn the_check_runs_again_with_its_limit_at_0() {
+    // This agent never makes the file that the check looks for, so the run
+    // stops after 3 failed checks.
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+while :; do
+  next
+  reply 'I can not repair it.'
+done
+"#;
+    let repository = Repository::checked("continue-check", NEEDS_FIXED, work);
+    failed(&repository.run_in_order());
+    repository.view(true, &[]);
+    // The new agent makes the file only after one more failed check.
+    program(
+        &repository.harness.join("agent"),
+        &format!(
+            "{START}{}",
+            r#"commit other 'Add another file'
+reply 'I made another file.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+commit fixed 'Add the fixed file'
+reply 'I repaired it.'
+"#
+        ),
+    );
+    repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
+    fs::remove_file(repository.shared.join("order")).unwrap();
+    passed(&repository.continue_work());
+    assert_eq!(repository.order(), "check check review ready");
+    assert!(
+        repository
+            .kept("second-message")
+            .contains("and fixed.txt is not there")
+    );
+}
+
+// spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
 // spec(lira continue): The work can stop and ask again.
 #[test]
 fn the_work_can_stop_and_ask_again() {
@@ -3924,7 +3993,8 @@ fn it_is_an_error_when_the_pull_request_is_not_open_or_has_no_request() {
 
     fs::write(&view, &open).unwrap();
     let listed = repository.shared.join("bin").join("listed");
-    fs::write(&listed, format!("you\u{1f}{ANSWER}\u{1e}\n")).unwrap();
+    fs::write(&listed, "").unwrap();
+    repository.comment("you", ANSWER);
     // A comment of someone else that looks like the request is not one.
     repository.comment(
         "someone",

@@ -90,9 +90,15 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
 /// The worktree for the branch `branch` of a pull request whose work
 /// continues. It is the old worktree of the branch when git still has it in
 /// `data`, and a new one from the branch of the remote when it does not.
-/// The `setup` command runs in a new one. A commit that the remote has on
-/// the branch, and that the worktree does not have, is taken first.
-pub fn continued(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, String> {
+/// A commit that the remote has on the branch, and that the worktree does
+/// not have, is taken first. Then the `setup` command runs in a new
+/// worktree. It returns the worktree, and the commit that the remote has on
+/// the branch.
+pub fn continued(
+    repository: &Path,
+    data: &Path,
+    branch: &str,
+) -> Result<(Worktree, String), String> {
     if !git::allows_branch(repository, branch)? {
         return Err(format!(
             "`{branch}` is not a name that git allows for a branch"
@@ -102,6 +108,7 @@ pub fn continued(repository: &Path, data: &Path, branch: &str) -> Result<Worktre
     let (owner, name) = git::repository_of(repository, &newest.remote)?;
     let file = git::lira_file_at(repository, &newest.main, &newest.commit)?;
     let on_remote = git::fetch_branch(repository, &newest.remote, branch)?;
+    let remote = &newest.remote;
     let folder = match git::worktree_of(repository, branch)? {
         Some(folder) if folder.exists() => {
             let ours = data.join("worktrees").join(&owner).join(&name);
@@ -115,6 +122,7 @@ pub fn continued(repository: &Path, data: &Path, branch: &str) -> Result<Worktre
                     folder.display()
                 ));
             }
+            take(&folder, branch, &on_remote, remote)?;
             folder
         }
         found => {
@@ -123,58 +131,61 @@ pub fn continued(repository: &Path, data: &Path, branch: &str) -> Result<Worktre
             if found.is_some() {
                 git::prune_worktrees(repository)?;
             }
-            new_for(
-                repository,
-                data,
-                &[&owner, &name],
-                branch,
-                &on_remote,
-                &file,
-            )?
+            let place = place(data, &[&owner, &name], branch)?;
+            new_for(repository, place, branch, &on_remote, remote, &file)?
         }
     };
     let head = git::head(&folder)?;
-    if !git::is_in(&folder, &on_remote, &head)? {
-        if !git::is_in(&folder, &head, &on_remote)? {
-            return Err(format!(
-                "the worktree `{}` has commits on the branch `{branch}` that the remote `{}` does not have, and the remote has commits on it that the worktree does not have. Put them together on one branch, and run `lira continue` again",
-                folder.display(),
-                newest.remote
-            ));
-        }
-        git::fast_forward(&folder, &on_remote)?;
-    }
-    let head = git::head(&folder)?;
     let commit = git::base_of(&folder, &newest.commit, &head)?.unwrap_or(newest.commit);
-    Ok(Worktree {
+    let worktree = Worktree {
         folder,
         branch: branch.to_string(),
         file,
         remote: newest.remote,
         main: newest.main.name,
         commit,
-    })
+    };
+    Ok((worktree, on_remote))
 }
 
-/// Makes a new worktree of the branch `branch`. When the repository does
-/// not have the branch, it starts at the commit `commit`. The `setup`
-/// command runs in it.
+/// Takes the commits that the remote has on the branch, up to the commit
+/// `on_remote`, and that the worktree in `folder` does not have. The
+/// worktree is on the branch.
+fn take(folder: &Path, branch: &str, on_remote: &str, remote: &str) -> Result<(), String> {
+    let head = git::head(folder)?;
+    if git::is_in(folder, on_remote, &head)? {
+        return Ok(());
+    }
+    if !git::is_in(folder, &head, on_remote)? {
+        return Err(format!(
+            "the worktree `{}` has commits on the branch `{branch}` that the remote `{remote}` does not have, and the remote has commits on it that the worktree does not have. Put them together on one branch, and run `lira continue` again",
+            folder.display()
+        ));
+    }
+    git::fast_forward(folder, on_remote)
+}
+
+/// Makes a new worktree of the branch `branch` in `place`. When the
+/// repository does not have the branch, it starts at `on_remote`, the
+/// commit of the remote. The worktree takes the commits of the remote, and
+/// then the `setup` command runs in it. When a step fails, Lira removes the
+/// worktree, and the branch when it made the branch.
 fn new_for(
     repository: &Path,
-    data: &Path,
-    owner_and_name: &[&str],
+    place: Place,
     branch: &str,
-    commit: &str,
+    on_remote: &str,
+    remote: &str,
     file: &LiraFile,
 ) -> Result<PathBuf, String> {
-    let place = place(data, owner_and_name, branch)?;
     let new_branch = !git::has_branch(repository, branch)?;
-    if new_branch && let Err(error) = git::add_branch(repository, branch, commit) {
+    if new_branch && let Err(error) = git::add_branch(repository, branch, on_remote) {
         let _ = fs::remove_dir(&place.folder);
         return Err(error);
     }
     let made = git::add_worktree(repository, &place.folder, branch)
         .and_then(|()| place.holds_the_worktree())
+        .and_then(|()| take(&place.folder, branch, on_remote, remote))
         .and_then(|()| match &file.setup {
             Some(command) => setup(command, &place.folder),
             None => Ok(()),

@@ -2,6 +2,7 @@
 //! token of its own: `gh` uses its login.
 
 use crate::comment::Comment;
+use crate::json;
 use crate::scores::Scores;
 use std::ffi::OsStr;
 use std::io::ErrorKind;
@@ -281,30 +282,34 @@ pub fn view(folder: &Path, number: &str) -> Result<View, String> {
     })
 }
 
-/// What `gh --jq` prints between the login and the text of a comment.
-const END_OF_AUTHOR: char = '\u{1f}';
-
 /// The comments on the pull request at `address`, the oldest first.
 pub fn comments(folder: &Path, address: &str) -> Result<Vec<Comment>, String> {
     let comments = format!("{}/comments", issue_of(address));
-    let each = format!(".[] | .user.login + \"{END_OF_AUTHOR}\" + .body + \"{END_OF_COMMENT}\"");
-    let printed = api(folder, &[&comments, "--paginate", "--jq", &each])?;
-    Ok(comments_in(&printed))
+    // Each comment is one line of JSON, so no text of a comment can look
+    // like the start of another one.
+    let each = ".[] | [.user.login, .body] | @json";
+    let printed = api(folder, &[&comments, "--paginate", "--jq", each])?;
+    comments_in(&printed)
 }
 
-/// The comments in what `gh --jq` printed: each is the login, the
-/// character `END_OF_AUTHOR`, the text, and the character
-/// `END_OF_COMMENT`. `gh` puts an end of line after each.
-fn comments_in(printed: &str) -> Vec<Comment> {
+/// The comments in what `gh --jq` printed: on each line a list of JSON
+/// with the login and the text of one comment.
+fn comments_in(printed: &str) -> Result<Vec<Comment>, String> {
+    let wrong = |line: &str| format!("`gh api` printed a line that is no comment: {line}");
     printed
-        .split(END_OF_COMMENT)
-        .filter_map(|part| {
-            let part = part.strip_prefix('\n').unwrap_or(part);
-            let (author, body) = part.split_once(END_OF_AUTHOR)?;
-            Some(Comment {
-                author: author.to_string(),
-                body: body.to_string(),
-            })
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value = json::read(line).map_err(|_| wrong(line))?;
+            let parts = value.as_list().ok_or_else(|| wrong(line))?;
+            match parts {
+                [author, body] => Ok(Comment {
+                    author: author.as_text().ok_or_else(|| wrong(line))?.to_string(),
+                    // A comment with no text has `null` there.
+                    body: body.as_text().unwrap_or_default().to_string(),
+                }),
+                _ => Err(wrong(line)),
+            }
         })
         .collect()
 }
@@ -415,21 +420,22 @@ mod tests {
 
     #[test]
     fn each_comment_has_its_login_and_its_text() {
-        let printed = "you\u{1f}One.\n\nTwo.\u{1e}\nsomeone\u{1f}\u{1e}\n";
+        let printed = "[\"you\",\"One.\\n\\nTwo.\"]\n[\"someone\",\"a\\u001e[\\\"you\\\",\\\"b\\\"]\"]\n[\"other\",null]\n";
+        let of = |author: &str, body: &str| Comment {
+            author: author.to_string(),
+            body: body.to_string(),
+        };
         assert_eq!(
-            comments_in(printed),
+            comments_in(printed).unwrap(),
             [
-                Comment {
-                    author: "you".to_string(),
-                    body: "One.\n\nTwo.".to_string()
-                },
-                Comment {
-                    author: "someone".to_string(),
-                    body: String::new()
-                }
+                of("you", "One.\n\nTwo."),
+                // Text in a comment that looks like another comment is text.
+                of("someone", "a\u{1e}[\"you\",\"b\"]"),
+                of("other", "")
             ]
         );
-        assert_eq!(comments_in(""), []);
+        assert_eq!(comments_in("").unwrap(), []);
+        assert!(comments_in("you\u{1f}One.\u{1e}\n").is_err());
     }
 
     #[test]

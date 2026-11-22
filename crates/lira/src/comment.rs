@@ -21,7 +21,10 @@ pub struct Comment {
 
 /// The comment that keeps the request on the pull request.
 pub fn request(request: &str) -> String {
-    format!("{REQUEST}\nThe request of the user:\n\n{}", quote(request))
+    format!(
+        "{REQUEST}\nThe request that the agent works on:\n\n{}",
+        quote(request)
+    )
 }
 
 /// A text as a quote of Markdown.
