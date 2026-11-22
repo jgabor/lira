@@ -1,5 +1,6 @@
 //! The Reviewer: an agent that reads a change, and says if it is good.
 
+use crate::sandbox::Sandbox;
 use crate::worktree::Worktree;
 use crate::{agent, git};
 use std::fs;
@@ -29,7 +30,8 @@ pub struct Review {
 /// The Reviewer can't change a file of the change. It works in a copy of
 /// the repository for itself alone, which shares no branch with the
 /// repository and knows no remote, and Lira removes the copy afterwards.
-/// Lira also says no to each of its permission requests.
+/// Its sandbox holds it to the copy, and Lira also says no to each of its
+/// permission requests.
 pub fn run(
     started: &Path,
     worktree: &Worktree,
@@ -70,8 +72,13 @@ fn read(started: &Path, worktree: &Worktree, copy: &Path, message: &str) -> Resu
     // A Reviewer uses a different harness from the agent when the Lira file
     // names one that is available. Lira knows one harness now, so the
     // Reviewer has the harness of the agent.
-    let (mut harness, conversation) = agent::start(started, copy, &worktree.file, model)
-        .map_err(|error| format!("the Reviewer did not start: {error}"))?;
+    // The copy is the only folder of the repository that the Reviewer can
+    // change, and Lira removes it afterwards.
+    let mut sandbox = Sandbox::new();
+    sandbox.writable(copy);
+    let (mut harness, conversation) =
+        agent::start(started, copy, sandbox, &worktree.file, model)
+            .map_err(|error| format!("the Reviewer did not start: {error}"))?;
     let reply = harness
         .send(&conversation, message, &mut |_| false)
         .map_err(|error| format!("the Reviewer did not end its review: {error}"))?;

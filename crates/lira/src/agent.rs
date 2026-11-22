@@ -3,8 +3,8 @@
 
 use crate::harness::{Harness, Stop};
 use crate::lira_file::LiraFile;
+use crate::sandbox::Sandbox;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The program of the harness when `LIRA_HARNESS` names none, and the Lira
 /// file names none. It is the program that lets Claude Code speak the Agent
@@ -15,9 +15,12 @@ const HARNESS: &str = "claude-agent-acp";
 /// works there. It returns the harness and the name of the conversation.
 /// `from` is the folder that Lira started in. `file` is the Lira file, and
 /// `model` is the AI model for the agent, when the Lira file names one.
+///
+/// The harness runs in `sandbox`. It can change its own data there too.
 pub fn start(
     from: &Path,
     folder: &Path,
+    mut sandbox: Sandbox,
     file: &LiraFile,
     model: Option<&str>,
 ) -> Result<(Harness, String), String> {
@@ -34,17 +37,55 @@ pub fn start(
         // The Lira file has a name, or a path from the root of the host.
         None => PathBuf::from(file.harness.program.as_deref().unwrap_or(HARNESS)),
     };
-    let mut command = Command::new(&program);
-    command.current_dir(folder);
-    let mut harness = Harness::start(command).map_err(|error| {
+    let named = |error: String| {
         format!(
             "{error}. `LIRA_HARNESS` names the program of the harness. With no value, it is `harness.program` in `lira.toml`, and with no such key it is `{HARNESS}`"
         )
+    };
+    let shown = program.display().to_string();
+    let found = find(&program).ok_or_else(|| {
+        named(format!(
+            "Lira can't find the harness `{shown}` on this host, or a program that it needs to start"
+        ))
     })?;
+    for data in harness_data() {
+        sandbox.writable(&data);
+    }
+    let mut command = sandbox.command(found.as_os_str());
+    command.current_dir(folder);
+    let mut harness =
+        Harness::start_as(command, &shown).map_err(|error| named(error.to_string()))?;
     let conversation = harness
         .converse(folder, model)
         .map_err(|error| error.to_string())?;
     Ok((harness, conversation))
+}
+
+/// The file of a program: the path itself, or for a name with no folder,
+/// the first file with that name in a folder of `PATH`.
+fn find(program: &Path) -> Option<PathBuf> {
+    if program.components().count() > 1 {
+        return program.is_file().then(|| program.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|folder| folder.join(program))
+        .find(|file| file.is_file())
+}
+
+/// The folders where the harness keeps its own data, such as its login and
+/// its conversations. The harness can change them in its sandbox. Claude
+/// Code keeps its data in `CLAUDE_CONFIG_DIR`, or in `~/.claude` when that
+/// is not set. A folder that is not there is left out.
+fn harness_data() -> Vec<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|folder| folder.is_absolute())
+    };
+    let data =
+        absolute("CLAUDE_CONFIG_DIR").or_else(|| absolute("HOME").map(|home| home.join(".claude")));
+    data.into_iter().filter(|folder| folder.is_dir()).collect()
 }
 
 /// Why an agent did not end its reply, or `None` when it did.

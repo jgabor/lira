@@ -12,6 +12,7 @@ mod process;
 mod pull_request;
 mod review;
 pub mod run;
+mod sandbox;
 pub mod scores;
 mod toml;
 pub mod worktree;

@@ -119,6 +119,7 @@ Lira does these steps for each issue, in this order.
 
 - No AI model decides which issue starts.
 - An agent works only in its own worktree.
+- When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
 - Lira runs the `setup` command in a new worktree before the agent starts.
 - Lira runs the `setup` command with `sh -c`.
 - When the `setup` command fails, Lira removes the new worktree and its branch, and the error shows what the command wrote.

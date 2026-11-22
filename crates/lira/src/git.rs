@@ -441,6 +441,23 @@ pub fn own_file(folder: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(path.trim_end_matches('\n')))
 }
 
+/// The git folder that the worktree in `folder` shares with the
+/// repository: where its commits, its branches and the configuration of git
+/// are.
+pub fn common_folder(folder: &Path) -> Result<PathBuf, String> {
+    let path = run(
+        folder,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map_err(|wrote| {
+        format!(
+            "Lira can't find the git folder of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(PathBuf::from(path.trim_end_matches('\n')))
+}
+
 /// If the repository has this branch.
 pub fn has_branch(folder: &Path, branch: &str) -> Result<bool, String> {
     let full = format!("refs/heads/{branch}");
