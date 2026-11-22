@@ -101,19 +101,37 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
 /// The sandbox of the agent that works in the worktree `folder`. The agent
 /// can change the worktree, and the git folder of the repository, where a
 /// commit of the worktree goes. Lira runs git outside the sandbox later, so
-/// the agent can't change the hooks and the configuration of git there.
+/// the agent can't change the hooks and the configuration of git there, or
+/// the files that say where git finds them.
 fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
     let common = git::common_folder(folder)?;
     let hooks = common.join("hooks");
     // An agent could make the folder of the hooks when it is not there.
     fs::create_dir_all(&hooks)
         .map_err(|error| format!("Lira can't make the folder `{}`: {error}", hooks.display()))?;
+    // A worktree has its own configuration of git when the repository says
+    // so. The agent could make it when it is not there.
+    let own_config = git::own_file(folder, "config.worktree")?;
+    if !own_config.exists() {
+        fs::write(&own_config, "").map_err(|error| {
+            format!(
+                "Lira can't make the file `{}`: {error}",
+                own_config.display()
+            )
+        })?;
+    }
     let mut sandbox = Sandbox::new();
     sandbox
         .writable(folder)
         .writable(&common)
         .read_only(&hooks)
-        .read_only(&common.join("config"));
+        .read_only(&common.join("config"))
+        .read_only(&own_config)
+        // These say where git finds the git folder of the worktree, and the
+        // configuration. So they could name a configuration of the agent.
+        .read_only(&folder.join(".git"))
+        .read_only(&git::own_file(folder, "commondir")?)
+        .read_only(&git::own_file(folder, "gitdir")?);
     Ok(sandbox)
 }
 

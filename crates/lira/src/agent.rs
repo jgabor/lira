@@ -50,6 +50,16 @@ pub fn start(
     })?;
     for data in harness_data() {
         sandbox.writable(&data);
+        // What tells the harness how to work, and what it runs, stays as it
+        // is. The harness reads it in each later conversation, also outside
+        // a sandbox.
+        for name in OWN_SETTINGS {
+            // A link can't be read-only in its folder. The file that it
+            // names can.
+            if let Ok(path) = data.join(name).canonicalize() {
+                sandbox.read_only(&path);
+            }
+        }
     }
     let mut command = sandbox.command(found.as_os_str());
     command.current_dir(folder);
@@ -72,6 +82,21 @@ fn find(program: &Path) -> Option<PathBuf> {
         .map(|folder| folder.join(program))
         .find(|file| file.is_file())
 }
+
+/// What the harness keeps in its data folder that says how it works, and
+/// what it runs: its instructions, its settings with their hooks, and its
+/// plugins.
+const OWN_SETTINGS: [&str; 9] = [
+    "CLAUDE.md",
+    "settings.json",
+    "settings.local.json",
+    "hooks",
+    "agents",
+    "commands",
+    "skills",
+    "plugins",
+    "output-styles",
+];
 
 /// The folders where the harness keeps its own data, such as its login and
 /// its conversations. The harness can change them in its sandbox. Claude
