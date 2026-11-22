@@ -148,7 +148,7 @@ impl<'a> PullRequest<'a> {
         };
         let folder = &self.worktree.folder;
         let commented = git::own_file(folder, COMMENT).and_then(|file| {
-            fs::write(&file, question).map_err(|error| {
+            git::write_new(&file, question).map_err(|error| {
                 format!(
                     "Lira can't write the comment to `{}`: {error}",
                     file.display()
@@ -190,7 +190,7 @@ impl<'a> PullRequest<'a> {
     /// Writes a description to the file that `gh` reads it from.
     fn write(&self, description: &str) -> Result<std::path::PathBuf, String> {
         let file = git::own_file(&self.worktree.folder, DESCRIPTION)?;
-        fs::write(&file, description).map_err(|error| {
+        git::write_new(&file, description).map_err(|error| {
             format!(
                 "Lira can't write the description of the pull request to `{}`: {error}",
                 file.display()
