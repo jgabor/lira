@@ -57,6 +57,7 @@ branch of a change.
 - The server does not listen on the network.
 - The data folder is `$XDG_DATA_HOME/lira`.
 - When `XDG_DATA_HOME` is not set, the data folder is `~/.local/share/lira`.
+- An `XDG_DATA_HOME` that is empty, or that is not an absolute path, counts as not set.
 - The server keeps a numbered log of all messages and changes of state in one database file.
 - Each entry in the log has a number that is one more than the number before it.
 - The server keeps the worktrees in its data folder.

@@ -11,6 +11,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The instructions for the agent. The request follows them.
@@ -66,7 +68,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         request,
         harness,
         conversation,
-        pull_request: PullRequest::new(&made),
+        pull_request: PullRequest::new(&made)?,
         said: String::new(),
     };
     let address = match run.steps() {
@@ -172,17 +174,36 @@ impl Run<'_> {
         let Run {
             harness,
             pull_request,
+            conversation,
             ..
         } = self;
-        let reply = harness.send_and_watch(
-            &self.conversation,
-            message,
-            // Nobody is there to answer, and the agent works in a worktree
-            // of its own. So the answer to each permission request is yes.
-            &mut |_| true,
-            // A tool call can be the first commit, or a later one.
-            &mut || pull_request.look(),
-        );
+        // Lira looks for a new commit on a thread of its own. So the agent
+        // does not wait for a permission while Lira talks to the remote or
+        // to GitHub.
+        let reply = thread::scope(|scope| {
+            let (look, looks) = mpsc::channel();
+            scope.spawn(move || {
+                while looks.recv().is_ok() {
+                    // One look is enough for all tool calls that ended
+                    // since the look before.
+                    while looks.try_recv().is_ok() {}
+                    pull_request.look();
+                }
+            });
+            harness.send_and_watch(
+                conversation,
+                message,
+                // Nobody is there to answer, and the agent works in a
+                // worktree of its own. So the answer to each permission
+                // request is yes.
+                &mut |_| true,
+                // A tool call can be the first commit, or a later one.
+                &mut || {
+                    let _ = look.send(());
+                },
+            )
+            // The thread ends here: nothing can ask for a look any more.
+        });
         let reply = reply.map_err(|error| match self.pull_request.problem() {
             Some(problem) => format!("{error}\n{problem}"),
             None => error.to_string(),
@@ -260,7 +281,20 @@ impl Run<'_> {
     fn check(&mut self) -> Result<Option<Failure>, String> {
         let folder = &self.made.folder;
         // The check reads the files of the worktree, and the pull request
-        // has only what is in a commit. So the two must be the same.
+        // has the commits of the branch of the agent. So the two must be
+        // the same: the worktree is at the newest commit of the pull
+        // request, and all in it is in a commit.
+        if self.pull_request.commit() != Some(git::head(folder)?.as_str()) {
+            let branch = self.pull_request.local();
+            return Ok(Some(Failure {
+                for_the_agent: format!(
+                    "Your worktree is not at the newest commit of your branch, `{branch}`, so the check waits. Lira takes the commits of that branch for the pull request. Check out `{branch}`, and put on it what belongs to the change.\n"
+                ),
+                for_you: format!(
+                    "the worktree was not at the newest commit of the branch `{branch}` of the agent, so the check did not run\n"
+                ),
+            }));
+        }
         let changes = git::changes(folder)?;
         if !changes.trim().is_empty() {
             let changes = changes.trim_end();
@@ -301,6 +335,7 @@ impl Run<'_> {
         let folder = &self.made.folder;
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
         let from = git::base(folder, &main)?;
+        // The check passed this commit just now.
         let to = git::head(folder)?;
         review::run(self.started, self.made, self.request, &from, &to)
     }
