@@ -30,9 +30,9 @@ pub struct Review {
 /// The Reviewer can't change a file of the change. It works in a copy of
 /// the repository for itself alone, which shares no branch with the
 /// repository and knows no remote, and Lira removes the copy afterwards.
-/// Its sandbox holds it to the copy and to the data of its harness, and
-/// Lira also says no to each of its
-/// permission requests.
+/// Its sandbox holds it to the copy, to a data folder of its harness for
+/// itself alone, and to the login of the harness. Lira also says no to each
+/// of its permission requests.
 pub fn run(
     started: &Path,
     worktree: &Worktree,
@@ -77,13 +77,13 @@ fn read(started: &Path, worktree: &Worktree, copy: &Path, message: &str) -> Resu
     // change, and Lira removes it afterwards.
     let mut sandbox = Sandbox::new();
     sandbox.writable(copy);
-    let (mut harness, conversation) =
-        agent::start(started, copy, &mut sandbox, &worktree.file, model)
-            .map_err(|error| format!("the Reviewer did not start: {error}"))?;
-    let reply = harness
-        .send(&conversation, message, &mut |_| false)
+    let mut agent = agent::start(started, copy, &mut sandbox, &worktree.file, model)
+        .map_err(|error| format!("the Reviewer did not start: {error}"))?;
+    let reply = agent
+        .harness
+        .send(&agent.conversation, message, &mut |_| false)
         .map_err(|error| format!("the Reviewer did not end its review: {error}"))?;
-    drop(harness);
+    drop(agent);
     match agent::stopped(&reply.stop) {
         None => Ok(reply.text),
         Some(why) => Err(format!("the Reviewer did not end its review: {why}")),

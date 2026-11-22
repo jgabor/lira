@@ -18,9 +18,9 @@ const BWRAP: &str = "bwrap";
 /// that it can't.
 #[derive(Clone, Default)]
 pub struct Sandbox {
-    /// Each path, and if the agent can change it. A later path inside an
-    /// earlier one wins there.
-    paths: Vec<(PathBuf, bool)>,
+    /// Each path of the host, the path where the agent sees it, and if the
+    /// agent can change it. A later path inside an earlier one wins there.
+    paths: Vec<(PathBuf, PathBuf, bool)>,
 }
 
 impl Sandbox {
@@ -32,14 +32,30 @@ impl Sandbox {
     /// The agent can change what is in this folder or file, also when it
     /// is in a read-only folder that came before.
     pub fn writable(&mut self, path: &Path) -> &mut Sandbox {
-        self.paths.push((path.to_path_buf(), true));
-        self
+        self.writable_at(path, path)
     }
 
     /// The agent can't change this folder or file, also when it is in a
     /// writable folder that came before. It must be there.
     pub fn read_only(&mut self, path: &Path) -> &mut Sandbox {
-        self.paths.push((path.to_path_buf(), false));
+        self.read_only_at(path, path)
+    }
+
+    /// The agent sees the folder or file `path` at `place` too, and can
+    /// change it there, as with `writable`. What was at `place` is not
+    /// there for the agent.
+    pub fn writable_at(&mut self, path: &Path, place: &Path) -> &mut Sandbox {
+        self.paths
+            .push((path.to_path_buf(), place.to_path_buf(), true));
+        self
+    }
+
+    /// The agent sees the folder or file `path` at `place` too, and can't
+    /// change it there, as with `read_only`. What was at `place` is not
+    /// there for the agent.
+    pub fn read_only_at(&mut self, path: &Path, place: &Path) -> &mut Sandbox {
+        self.paths
+            .push((path.to_path_buf(), place.to_path_buf(), false));
         self
     }
 
@@ -47,9 +63,9 @@ impl Sandbox {
     /// folder that the command is given.
     pub fn command(&self, program: &OsStr) -> Command {
         let mut command = base();
-        for (path, writable) in &self.paths {
+        for (path, place, writable) in &self.paths {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
-            command.arg(bind).arg(path).arg(path);
+            command.arg(bind).arg(path).arg(place);
         }
         command.arg("--").arg(program);
         command
