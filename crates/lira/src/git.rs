@@ -441,11 +441,23 @@ pub fn push(
     let full = format!("refs/heads/{branch}");
     let lease = format!("--force-with-lease={full}:{}", before.unwrap_or(""));
     let what = format!("{commit}:{full}");
-    run(folder, &["push", "--quiet", &lease, "--", remote, &what])
-        .map(|_| ())
-        .map_err(|wrote| {
-            format!("Lira can't push the branch `{branch}` to the remote `{remote}`. git wrote:\n{wrote}")
-        })
+    // A setting of git can push the submodules first. git goes into a
+    // submodule for that, and runs what the agent wrote in its
+    // configuration.
+    let args = [
+        "push",
+        "--quiet",
+        "--recurse-submodules=no",
+        &lease,
+        "--",
+        remote,
+        &what,
+    ];
+    run(folder, &args).map(|_| ()).map_err(|wrote| {
+        format!(
+            "Lira can't push the branch `{branch}` to the remote `{remote}`. git wrote:\n{wrote}"
+        )
+    })
 }
 
 /// The path of a file that git keeps for the worktree in a folder, outside
