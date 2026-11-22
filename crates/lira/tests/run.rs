@@ -1187,6 +1187,22 @@ fn a_new_branch_is_another_name_for_a_taken_one() {
 }
 
 #[test]
+fn a_new_branch_with_no_work_is_not_another_name_for_a_taken_one() {
+    // The new branch of the agent starts before its commit, so the work
+    // stays on the branch with the taken name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}while :; do\nnext\necho asked >> \"$here/asked\"\ngit checkout --quiet -B feat/free HEAD~1\n{REPLY}done\n"
+    );
+    let (repository, _) = with_a_taken_branch("taken-empty-branch", &work);
+    let error = failed(&repository.run());
+    assert!(error.contains("`feat/taken`"), "{error}");
+    assert!(error.contains("3 messages"), "{error}");
+    assert!(!error.contains("made no commit"), "{error}");
+    assert_eq!(repository.kept("asked").lines().count(), 3);
+    assert_eq!(repository.on_remote("feat/free"), None);
+}
+
+#[test]
 fn an_agent_that_keeps_a_taken_name_is_a_failure_after_3_messages() {
     // The agent answers each message, and never changes the name.
     let work = format!(
