@@ -125,7 +125,7 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         ));
     };
     let data = data::folder()?;
-    let made = worktree::continued(folder, &data, &view.branch)?;
+    let (made, on_remote) = worktree::continued(folder, &data, &view.branch)?;
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
     if view.labels.iter().any(|label| label == NEEDS_ANSWER) {
@@ -150,7 +150,7 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         request: &read.request,
         agent,
         sandbox,
-        pull_request: PullRequest::continued(&made, address, &view.branch)?,
+        pull_request: PullRequest::continued(&made, address, &view.branch, &on_remote)?,
         said: String::new(),
         outputs: 0,
     };

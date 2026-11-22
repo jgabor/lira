@@ -77,15 +77,17 @@ impl<'a> PullRequest<'a> {
     }
 
     /// For the pull request at `address`, whose work continues in the
-    /// worktree. Its branch on the remote is `branch`, and the worktree is
-    /// on a branch with the same name.
+    /// worktree. Its branch on the remote is `branch`, at the commit
+    /// `pushed`, and the worktree is on a branch with the same name. Lira
+    /// pushes over that commit only.
     pub fn continued(
         worktree: &'a Worktree,
         address: &str,
         branch: &str,
+        pushed: &str,
     ) -> Result<PullRequest<'a>, String> {
         let folder = &worktree.folder;
-        let pushed = git::remote_commit(folder, &worktree.remote, branch)?;
+        let pushed = Some(pushed.to_string());
         Ok(PullRequest {
             worktree,
             before: git::branches(folder)?,
