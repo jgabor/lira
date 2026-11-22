@@ -7,6 +7,7 @@ usage: lira <command>
 
 commands:
   run \"<request>\"   run an agent on the request, to a pull request that is ready for review
+  continue <number> continue the work on a pull request of `lira run` after your answer
   check             run the check command of the Lira file, and print each score
   --version         print the version
 
@@ -35,6 +36,13 @@ fn main() -> ExitCode {
             );
             ExitCode::from(2)
         }
+        ["continue", number] if is_a_number(number) => continue_work(number),
+        ["continue", ..] => {
+            eprint!(
+                "usage: lira continue <number>\n\nThe number is the number of a pull request of `lira run`.\n"
+            );
+            ExitCode::from(2)
+        }
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)
@@ -45,6 +53,11 @@ fn main() -> ExitCode {
 /// If an argument looks like an option: one word that starts with `-`.
 fn is_an_option(argument: &str) -> bool {
     argument.starts_with('-') && !argument.trim().contains(char::is_whitespace)
+}
+
+/// If an argument is the number of a pull request: digits only.
+fn is_a_number(argument: &str) -> bool {
+    !argument.is_empty() && argument.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn check() -> ExitCode {
@@ -65,6 +78,17 @@ fn run(request: &str) -> ExitCode {
         Err(e) => return failure(&format!("couldn't find the current folder: {e}")),
     };
     match lira::run::command(&folder, request) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => failure(&message),
+    }
+}
+
+fn continue_work(number: &str) -> ExitCode {
+    let folder = match std::env::current_dir() {
+        Ok(folder) => folder,
+        Err(e) => return failure(&format!("couldn't find the current folder: {e}")),
+    };
+    match lira::run::continue_command(&folder, number) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => failure(&message),
     }

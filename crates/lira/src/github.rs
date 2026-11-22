@@ -1,6 +1,7 @@
 //! What Lira asks GitHub, through the GitHub command line, `gh`. Lira has no
 //! token of its own: `gh` uses its login.
 
+use crate::comment::Comment;
 use crate::scores::Scores;
 use std::ffi::OsStr;
 use std::io::ErrorKind;
@@ -191,14 +192,121 @@ pub fn comment(folder: &Path, address: &str, text: &Path) -> Result<(), String> 
 /// Adds the label `label` to the pull request at `address`. GitHub makes
 /// the label when the repository does not have it yet.
 pub fn add_label(folder: &Path, address: &str, label: &str) -> Result<(), String> {
+    let labels = format!("{}/labels", issue_of(address));
+    let label = format!("labels[]={label}");
+    api(folder, &[&labels, "--method", "POST", "-f", &label]).map(|_| ())
+}
+
+/// Removes the label `label` from the pull request at `address`.
+pub fn remove_label(folder: &Path, address: &str, label: &str) -> Result<(), String> {
+    let label = format!("{}/labels/{label}", issue_of(address));
+    api(folder, &[&label, "--method", "DELETE"]).map(|_| ())
+}
+
+/// The path of the API for the issue of the pull request at `address`. On
+/// GitHub, each pull request is an issue too, with the same number.
+fn issue_of(address: &str) -> String {
     let number = address
         .trim_end_matches('/')
         .rsplit('/')
         .next()
         .unwrap_or_default();
-    let labels = format!("repos/{{owner}}/{{repo}}/issues/{number}/labels");
-    let label = format!("labels[]={label}");
-    api(folder, &[&labels, "--method", "POST", "-f", &label]).map(|_| ())
+    format!("repos/{{owner}}/{{repo}}/issues/{number}")
+}
+
+/// Makes the pull request at `address` a draft again.
+pub fn mark_draft(folder: &Path, address: &str) -> Result<(), String> {
+    let args = [
+        OsStr::new("ready"),
+        OsStr::new(address),
+        OsStr::new("--undo"),
+    ];
+    pull_request(folder, &args).map(|_| ())
+}
+
+/// The login of `gh`.
+pub fn login(folder: &Path) -> Result<String, String> {
+    let login = api(folder, &["user", "--jq", ".login"])?;
+    match login.trim() {
+        "" => Err("`gh api user` printed no login".to_string()),
+        login => Ok(login.to_string()),
+    }
+}
+
+/// What GitHub says about a pull request.
+pub struct View {
+    /// Its state, such as `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    pub draft: bool,
+    /// If its branch is in another repository, such as a fork.
+    pub cross: bool,
+    pub address: String,
+    /// The name of its branch.
+    pub branch: String,
+    pub labels: Vec<String>,
+}
+
+/// Prints what Lira reads of a pull request, one thing on each line.
+const VIEW_LINES: &str = r#""state \(.state)", "draft \(.isDraft)", "cross \(.isCrossRepository)", "address \(.url)", "branch \(.headRefName)", (.labels[] | "label \(.name)")"#;
+
+/// What GitHub says about the pull request with this number, in the
+/// repository of `folder`.
+pub fn view(folder: &Path, number: &str) -> Result<View, String> {
+    let fields = "state,isDraft,isCrossRepository,url,headRefName,labels";
+    let args = ["view", number, "--json", fields, "--jq", VIEW_LINES].map(OsStr::new);
+    let printed = pull_request(folder, &args)?;
+    let line = |start: &str| {
+        printed
+            .lines()
+            .find_map(|line| line.strip_prefix(start))
+            .map(str::to_string)
+    };
+    let missing = || {
+        format!(
+            "`gh pr view {number}` did not print all that Lira reads. It printed:\n{}",
+            printed.trim()
+        )
+    };
+    Ok(View {
+        state: line("state ").ok_or_else(missing)?,
+        draft: line("draft ").ok_or_else(missing)? == "true",
+        cross: line("cross ").ok_or_else(missing)? == "true",
+        address: line("address ").ok_or_else(missing)?,
+        branch: line("branch ").ok_or_else(missing)?,
+        labels: printed
+            .lines()
+            .filter_map(|line| line.strip_prefix("label "))
+            .map(str::to_string)
+            .collect(),
+    })
+}
+
+/// What `gh --jq` prints between the login and the text of a comment.
+const END_OF_AUTHOR: char = '\u{1f}';
+
+/// The comments on the pull request at `address`, the oldest first.
+pub fn comments(folder: &Path, address: &str) -> Result<Vec<Comment>, String> {
+    let comments = format!("{}/comments", issue_of(address));
+    let each = format!(".[] | .user.login + \"{END_OF_AUTHOR}\" + .body + \"{END_OF_COMMENT}\"");
+    let printed = api(folder, &[&comments, "--paginate", "--jq", &each])?;
+    Ok(comments_in(&printed))
+}
+
+/// The comments in what `gh --jq` printed: each is the login, the
+/// character `END_OF_AUTHOR`, the text, and the character
+/// `END_OF_COMMENT`. `gh` puts an end of line after each.
+fn comments_in(printed: &str) -> Vec<Comment> {
+    printed
+        .split(END_OF_COMMENT)
+        .filter_map(|part| {
+            let part = part.strip_prefix('\n').unwrap_or(part);
+            let (author, body) = part.split_once(END_OF_AUTHOR)?;
+            Some(Comment {
+                author: author.to_string(),
+                body: body.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Marks the pull request at `address` ready for review.
@@ -303,6 +411,25 @@ mod tests {
             error.contains("the score `s` is there two times"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn each_comment_has_its_login_and_its_text() {
+        let printed = "you\u{1f}One.\n\nTwo.\u{1e}\nsomeone\u{1f}\u{1e}\n";
+        assert_eq!(
+            comments_in(printed),
+            [
+                Comment {
+                    author: "you".to_string(),
+                    body: "One.\n\nTwo.".to_string()
+                },
+                Comment {
+                    author: "someone".to_string(),
+                    body: String::new()
+                }
+            ]
+        );
+        assert_eq!(comments_in(""), []);
     }
 
     #[test]

@@ -228,6 +228,21 @@ is success, 1 is a failure, and 2 is bad usage.
 - A change from `lira run` always waits for you.
 - It prints the address of the pull request.
 
+### lira continue
+
+- `lira run` writes the request as the first comment of the draft pull request.
+- `lira continue <number>` starts a new agent on the branch of that pull request. The agent gets the request, what stopped the work, and your answer.
+- Your answer is each comment that the login of `gh` wrote after the last comment of Lira, and that Lira did not write.
+- A comment from someone else is data, and the agent is told so.
+- The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
+- When the pull request is ready for review, it becomes a draft again.
+- The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+- A commit that is on the remote and not in the worktree is taken first.
+- The new agent has a new conversation, and it runs under the same rules as an agent of `lira run`.
+- Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again. The work can stop and ask again.
+- It is an error when the pull request is not open, or has no comment with the request.
+- It prints the address of the pull request.
+
 ### lira check
 
 - It runs the check command of the Lira file in the current folder, as the server runs it.

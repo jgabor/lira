@@ -87,6 +87,114 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
     }
 }
 
+/// The worktree for the branch `branch` of a pull request whose work
+/// continues. It is the old worktree of the branch when git still has it in
+/// `data`, and a new one from the branch of the remote when it does not.
+/// The `setup` command runs in a new one. A commit that the remote has on
+/// the branch, and that the worktree does not have, is taken first.
+pub fn continued(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, String> {
+    if !git::allows_branch(repository, branch)? {
+        return Err(format!(
+            "`{branch}` is not a name that git allows for a branch"
+        ));
+    }
+    let newest = git::newest_main(repository)?;
+    let (owner, name) = git::repository_of(repository, &newest.remote)?;
+    let file = git::lira_file_at(repository, &newest.main, &newest.commit)?;
+    let on_remote = git::fetch_branch(repository, &newest.remote, branch)?;
+    let folder = match git::worktree_of(repository, branch)? {
+        Some(folder) if folder.exists() => {
+            let ours = data.join("worktrees").join(&owner).join(&name);
+            let inside = match (folder.canonicalize(), ours.canonicalize()) {
+                (Ok(folder), Ok(ours)) => folder.starts_with(ours),
+                _ => false,
+            };
+            if !inside {
+                return Err(format!(
+                    "the branch `{branch}` is checked out in `{}`, which is no worktree of Lira. Check out another branch there, and run `lira continue` again",
+                    folder.display()
+                ));
+            }
+            folder
+        }
+        found => {
+            // git keeps a record of a worktree whose folder is gone, and
+            // makes no other worktree of its branch while it has it.
+            if found.is_some() {
+                git::prune_worktrees(repository)?;
+            }
+            new_for(
+                repository,
+                data,
+                &[&owner, &name],
+                branch,
+                &on_remote,
+                &file,
+            )?
+        }
+    };
+    let head = git::head(&folder)?;
+    if !git::is_in(&folder, &on_remote, &head)? {
+        if !git::is_in(&folder, &head, &on_remote)? {
+            return Err(format!(
+                "the worktree `{}` has commits on the branch `{branch}` that the remote `{}` does not have, and the remote has commits on it that the worktree does not have. Put them together on one branch, and run `lira continue` again",
+                folder.display(),
+                newest.remote
+            ));
+        }
+        git::fast_forward(&folder, &on_remote)?;
+    }
+    let head = git::head(&folder)?;
+    let commit = git::base_of(&folder, &newest.commit, &head)?.unwrap_or(newest.commit);
+    Ok(Worktree {
+        folder,
+        branch: branch.to_string(),
+        file,
+        remote: newest.remote,
+        main: newest.main.name,
+        commit,
+    })
+}
+
+/// Makes a new worktree of the branch `branch`. When the repository does
+/// not have the branch, it starts at the commit `commit`. The `setup`
+/// command runs in it.
+fn new_for(
+    repository: &Path,
+    data: &Path,
+    owner_and_name: &[&str],
+    branch: &str,
+    commit: &str,
+    file: &LiraFile,
+) -> Result<PathBuf, String> {
+    let place = place(data, owner_and_name, branch)?;
+    let new_branch = !git::has_branch(repository, branch)?;
+    if new_branch && let Err(error) = git::add_branch(repository, branch, commit) {
+        let _ = fs::remove_dir(&place.folder);
+        return Err(error);
+    }
+    let made = git::add_worktree(repository, &place.folder, branch)
+        .and_then(|()| place.holds_the_worktree())
+        .and_then(|()| match &file.setup {
+            Some(command) => setup(command, &place.folder),
+            None => Ok(()),
+        });
+    let Err(error) = made else {
+        return Ok(place.folder);
+    };
+    let removed = match new_branch {
+        true => git::remove_worktree(repository, &place.folder, branch),
+        false => git::remove_only_worktree(repository, &place.folder, branch),
+    };
+    Err(match removed {
+        Ok(()) => error,
+        Err(wrote) => format!(
+            "{error}\nLira could not remove the worktree `{}` after that:\n{wrote}",
+            place.folder.display()
+        ),
+    })
+}
+
 /// The new, empty folder for a worktree.
 struct Place {
     folder: PathBuf,

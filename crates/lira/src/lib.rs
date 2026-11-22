@@ -2,6 +2,7 @@
 
 mod agent;
 pub mod check;
+mod comment;
 mod data;
 mod git;
 mod github;

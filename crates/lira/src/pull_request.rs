@@ -3,7 +3,7 @@
 //! keeps the progress note up to date.
 
 use crate::worktree::Worktree;
-use crate::{git, github};
+use crate::{comment, git, github};
 use std::fs;
 
 /// The file that holds a description on its way to GitHub. git keeps it for
@@ -15,7 +15,7 @@ const DESCRIPTION: &str = "lira-description.md";
 const COMMENT: &str = "lira-comment.md";
 
 /// The label of a pull request whose agent stopped and asks.
-const NEEDS_ANSWER: &str = "needs:answer";
+pub const NEEDS_ANSWER: &str = "needs:answer";
 
 /// What the progress note says under `Next` while the agent works.
 const WORKS: &str = "The agent works on the request.";
@@ -51,13 +51,17 @@ pub struct PullRequest<'a> {
     /// the last time because the remote has a branch with that name
     /// already.
     taken: Option<String>,
+    /// The comment with the request, until Lira wrote it on the pull
+    /// request.
+    request: Option<String>,
 }
 
 impl<'a> PullRequest<'a> {
-    /// For the work in a new worktree, before the agent starts. There is no
-    /// pull request yet.
-    pub fn new(worktree: &'a Worktree) -> Result<PullRequest<'a>, String> {
+    /// For the work on `request` in a new worktree, before the agent
+    /// starts. There is no pull request yet.
+    pub fn new(worktree: &'a Worktree, request: &str) -> Result<PullRequest<'a>, String> {
         Ok(PullRequest {
+            request: Some(comment::request(request)),
             worktree,
             before: git::branches(&worktree.folder)?,
             local: worktree.branch.clone(),
@@ -69,6 +73,32 @@ impl<'a> PullRequest<'a> {
             described: String::new(),
             problem: None,
             taken: None,
+        })
+    }
+
+    /// For the pull request at `address`, whose work continues in the
+    /// worktree. Its branch on the remote is `branch`, and the worktree is
+    /// on a branch with the same name.
+    pub fn continued(
+        worktree: &'a Worktree,
+        address: &str,
+        branch: &str,
+    ) -> Result<PullRequest<'a>, String> {
+        let folder = &worktree.folder;
+        let pushed = git::remote_commit(folder, &worktree.remote, branch)?;
+        Ok(PullRequest {
+            worktree,
+            before: git::branches(folder)?,
+            local: worktree.branch.clone(),
+            branch: Some(branch.to_string()),
+            pushed,
+            tried: Vec::new(),
+            tried_as: None,
+            address: Some(address.to_string()),
+            described: String::new(),
+            problem: None,
+            taken: None,
+            request: None,
         })
     }
 
@@ -147,17 +177,7 @@ impl<'a> PullRequest<'a> {
             return Err("there is no pull request to write the question on".to_string());
         };
         let folder = &self.worktree.folder;
-        let commented = git::own_file(folder, COMMENT).and_then(|file| {
-            git::write_new(&file, question).map_err(|error| {
-                format!(
-                    "Lira can't write the comment to `{}`: {error}",
-                    file.display()
-                )
-            })?;
-            let sent = github::comment(folder, address, &file);
-            let _ = fs::remove_file(&file);
-            sent
-        });
+        let commented = self.comment(address, &comment::question(question));
         let labeled = github::add_label(folder, address, NEEDS_ANSWER);
         let mut problems = Vec::new();
         if let Err(error) = commented {
@@ -174,6 +194,34 @@ impl<'a> PullRequest<'a> {
             true => Ok(()),
             false => Err(problems.join("\n")),
         }
+    }
+
+    /// Writes a comment on the pull request at `address`.
+    fn comment(&self, address: &str, text: &str) -> Result<(), String> {
+        let folder = &self.worktree.folder;
+        let file = git::own_file(folder, COMMENT)?;
+        git::write_new(&file, text).map_err(|error| {
+            format!(
+                "Lira can't write the comment to `{}`: {error}",
+                file.display()
+            )
+        })?;
+        let sent = github::comment(folder, address, &file);
+        let _ = fs::remove_file(&file);
+        sent
+    }
+
+    /// Writes the comment with the request on the pull request, when there
+    /// is a pull request and Lira did not write the comment yet.
+    fn keep_request(&mut self) -> Result<(), String> {
+        let (Some(address), Some(request)) = (&self.address, &self.request) else {
+            return Ok(());
+        };
+        self.comment(address, request).map_err(|error| {
+            format!("Lira could not write the request as a comment on the pull request: {error}")
+        })?;
+        self.request = None;
+        Ok(())
     }
 
     /// Gives the pull request at `address` this description.
@@ -212,10 +260,20 @@ impl<'a> PullRequest<'a> {
         self.taken.as_deref()
     }
 
-    /// Makes the remote and the pull request fit what the worktree has now.
+    /// Makes the remote and the pull request fit what the worktree has now,
+    /// and writes the request as the first comment of a new pull request.
     /// `next` and `decisions` are the text of these parts of the progress
     /// note.
     fn bring_up_to_date(&mut self, next: &str, decisions: &str) -> Result<(), String> {
+        let brought = self.fit(next, decisions);
+        // A pull request that GitHub opened gets the request, also when its
+        // description failed.
+        let kept = self.keep_request();
+        brought.and(kept)
+    }
+
+    /// Makes the remote and the pull request fit what the worktree has now.
+    fn fit(&mut self, next: &str, decisions: &str) -> Result<(), String> {
         let folder = &self.worktree.folder;
         let was_taken = self.taken.take().is_some();
         // The agent can make a commit while Lira looks. So Lira reads the
