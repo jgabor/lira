@@ -53,10 +53,20 @@ pub fn start(
         // What tells the harness how to work, and what it runs, stays as it
         // is. The harness reads it in each later conversation, also outside
         // a sandbox.
-        for name in OWN_SETTINGS {
+        for (name, empty) in OWN_SETTINGS {
+            let path = data.join(name);
+            // The agent could make what is not there. So Lira makes it
+            // empty first, and that changes nothing for the harness.
+            if path.symlink_metadata().is_err() {
+                let made = match empty {
+                    Some(text) => std::fs::write(&path, text),
+                    None => std::fs::create_dir(&path),
+                };
+                made.map_err(|error| format!("Lira can't make `{}`: {error}", path.display()))?;
+            }
             // A link can't be read-only in its folder. The file that it
             // names can.
-            if let Ok(path) = data.join(name).canonicalize() {
+            if let Ok(path) = path.canonicalize() {
                 sandbox.read_only(&path);
             }
         }
@@ -86,16 +96,17 @@ fn find(program: &Path) -> Option<PathBuf> {
 /// What the harness keeps in its data folder that says how it works, and
 /// what it runs: its instructions, its settings with their hooks, and its
 /// plugins.
-const OWN_SETTINGS: [&str; 9] = [
-    "CLAUDE.md",
-    "settings.json",
-    "settings.local.json",
-    "hooks",
-    "agents",
-    "commands",
-    "skills",
-    "plugins",
-    "output-styles",
+/// Each is a file with its text when it is empty, or a folder.
+const OWN_SETTINGS: [(&str, Option<&str>); 9] = [
+    ("CLAUDE.md", Some("")),
+    ("settings.json", Some("{}\n")),
+    ("settings.local.json", Some("{}\n")),
+    ("hooks", None),
+    ("agents", None),
+    ("commands", None),
+    ("skills", None),
+    ("plugins", None),
+    ("output-styles", None),
 ];
 
 /// The folders where the harness keeps its own data, such as its login and

@@ -57,8 +57,14 @@ impl Sandbox {
 }
 
 /// `bwrap` with what each sandbox has: all files of the host, read-only;
-/// its own `/dev` and `/proc`; and an empty `/tmp` of its own, which goes
-/// away with the sandbox.
+/// its own `/dev` and `/proc`; and an empty `/tmp` and `/run` of its own,
+/// which go away with the sandbox. The sandbox ends when Lira stops `bwrap`.
+///
+/// A program can talk to a socket on a read-only folder, and the sockets of
+/// the services of the host are in `/run`, such as the one of
+/// `systemd-run --user`. A service could change a file for the agent, so the
+/// agent sees none of them. The file of the name servers can be there too,
+/// and the agent keeps it.
 fn base() -> Command {
     let mut command = Command::new(BWRAP);
     command.args([
@@ -71,7 +77,15 @@ fn base() -> Command {
         "/proc",
         "--tmpfs",
         "/tmp",
+        "--tmpfs",
+        "/run",
+        "--die-with-parent",
     ]);
+    if let Ok(names) = Path::new("/etc/resolv.conf").canonicalize()
+        && names.starts_with("/run")
+    {
+        command.arg("--ro-bind").arg(&names).arg(&names);
+    }
     command
 }
 
