@@ -59,6 +59,14 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     github::require_login(folder)?;
     // A host with no sandbox stops the run here too.
     sandbox::require()?;
+    // `lira continue` reads the request from its comment, so the comment
+    // must fit.
+    if !comment::request_fits(request) {
+        return Err(format!(
+            "the request is too long for a comment on GitHub, which takes {} characters at most. Lira keeps the request in a comment on the pull request, so no agent started",
+            comment::LONGEST
+        ));
+    }
     let data = data::folder()?;
     let made = worktree::make(folder, &data, &new_branch())?;
     let place = format!("`{}`", made.folder.display());

@@ -230,6 +230,7 @@ is success, 1 is a failure, and 2 is bad usage.
 ### lira continue
 
 - `lira run` writes the request as the first comment of the draft pull request.
+- `lira run` fails before an agent starts when the request is too long for a comment on GitHub.
 - `lira continue <number>` starts a new agent on the branch of that pull request. The agent gets the request, what stopped the work, and your answer.
 - Your answer is each comment that the login of `gh` wrote after the last comment of Lira, and that Lira did not write.
 - A comment from someone else is data, and the agent is told so.
