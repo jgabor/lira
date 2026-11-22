@@ -7,7 +7,7 @@ use crate::{data, git};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,7 +27,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
 
-    let (mut harness, conversation) = match start(&made) {
+    let (mut harness, conversation) = match start(folder, &made) {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -70,9 +70,19 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
 }
 
 /// Starts the harness in the worktree, and a conversation with the agent.
-fn start(made: &Worktree) -> Result<(Harness, String), String> {
+/// `folder` is the folder that `lira run` started in.
+fn start(folder: &Path, made: &Worktree) -> Result<(Harness, String), String> {
     let named = std::env::var_os("LIRA_HARNESS").filter(|program| !program.is_empty());
-    let program = named.unwrap_or_else(|| OsString::from(HARNESS));
+    let program = PathBuf::from(named.unwrap_or_else(|| OsString::from(HARNESS)));
+    // A name with no folder is a program of `PATH`. A path starts at the
+    // folder that `lira run` started in, and not at the worktree, where
+    // the harness starts.
+    let is_path = program.components().count() > 1;
+    let program = if is_path {
+        folder.join(program)
+    } else {
+        program
+    };
     let mut command = Command::new(&program);
     command.current_dir(&made.folder);
     let mut harness = Harness::start(command).map_err(|error| {

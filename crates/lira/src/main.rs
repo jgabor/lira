@@ -25,10 +25,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["check"] => check(),
-        ["run", request] if !request.trim().is_empty() => run(request),
+        // Lira has no options for a run. So an argument that starts with
+        // `-` is a mistake, and no agent starts on it.
+        ["run", request] if !request.trim().is_empty() && !request.starts_with('-') => run(request),
         ["run", ..] => {
             eprint!(
-                "usage: lira run \"<request>\"\n\nThe request is one argument, and it is not empty.\n"
+                "usage: lira run \"<request>\"\n\nThe request is one argument. It is not empty, and it does not start with `-`.\n"
             );
             ExitCode::from(2)
         }

@@ -387,6 +387,21 @@ fn with_no_lira_harness_the_harness_is_claude_agent_acp() {
 }
 
 #[test]
+fn a_path_in_lira_harness_starts_at_the_current_folder() {
+    let repository = Repository::new("relative-harness", CHECK, REPLY);
+    // The harness starts in the worktree, and the path does not start
+    // there.
+    let output = repository
+        .lira()
+        .env("LIRA_HARNESS", "../harness/agent")
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert!(repository.harness.join("folder").exists());
+}
+
+#[test]
 fn a_harness_that_is_not_there_is_an_error_and_leaves_no_worktree() {
     let repository = Repository::new("no-harness", CHECK, REPLY);
     let nothing = repository.top.join("nothing-here");
@@ -584,6 +599,9 @@ fn lira_run_takes_one_request() {
         &["run", "one", "two"],
         &["run", ""],
         &["run", " \n"],
+        // Lira has no options for a run, so this is a mistake and no request.
+        &["run", "--help"],
+        &["run", "-h"],
     ] {
         let output = repository.lira().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}");
