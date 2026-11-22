@@ -1,18 +1,37 @@
 //! A new worktree for a branch, in the data folder of Lira.
 
+use crate::lira_file::LiraFile;
 use crate::{git, process};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+/// A worktree that Lira made.
+pub struct Worktree {
+    pub folder: PathBuf,
+    /// The branch that the worktree started on.
+    pub branch: String,
+    /// The Lira file of the main branch that the worktree started from.
+    pub file: LiraFile,
+}
+
+impl Worktree {
+    /// Removes the worktree and its branch, with all that is in them. It is
+    /// for a worktree that Lira made just now, and that no agent worked in.
+    /// `repository` is the folder that the worktree was made from.
+    pub fn remove(&self, repository: &Path) -> Result<(), String> {
+        git::remove_worktree(repository, &self.folder, &self.branch)
+    }
+}
+
 /// Makes a worktree of the repository in `repository`, on the new branch
-/// `branch`, and returns its folder. The branch starts from the newest main
-/// branch of the remote. The `setup` command of the Lira file runs in the
-/// worktree before this returns.
+/// `branch`. The branch starts from the newest main branch of the remote.
+/// The `setup` command of the Lira file runs in the worktree before this
+/// returns.
 ///
 /// The worktree is `worktrees/<owner>/<repository>/<branch>` in `data`.
-pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<PathBuf, String> {
+pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, String> {
     if !git::allows_branch(repository, branch)? {
         return Err(format!(
             "`{branch}` is not a name that git allows for a branch"
@@ -42,7 +61,11 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<PathBuf, Str
             None => Ok(()),
         });
     match made {
-        Ok(()) => Ok(place.folder),
+        Ok(()) => Ok(Worktree {
+            folder: place.folder,
+            branch: branch.to_string(),
+            file,
+        }),
         Err(error) => Err(
             match git::remove_worktree(repository, &place.folder, branch) {
                 Ok(()) => error,

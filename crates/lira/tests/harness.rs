@@ -107,14 +107,69 @@ fn a_harness_with_another_version_of_the_protocol_is_an_error() {
 fn lira_starts_a_conversation_in_a_folder() {
     let stand_in = StandIn::new("conversation", &format!("{HELLO}{CONVERSATION}"));
     let mut harness = stand_in.start();
-    let extra = read(r#"{"claudeCode":{"options":{"model":"small"}}}"#);
-    let conversation = harness.converse(&stand_in.folder, Some(extra)).unwrap();
+    let conversation = harness.converse(&stand_in.folder, None).unwrap();
     assert_eq!(conversation, "c-1");
     let folder = Json::text(stand_in.folder.to_str().unwrap());
     let expected = format!(
-        r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":{folder},"mcpServers":[],"_meta":{{"claudeCode":{{"options":{{"model":"small"}}}}}}}}}}"#
+        r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":{folder},"mcpServers":[]}}}}"#
     );
     assert_eq!(stand_in.received(2), read(&expected));
+    // With no AI model named, Lira asks for none.
+    let text = fs::read_to_string(stand_in.folder.join("received")).unwrap();
+    assert_eq!(text.lines().count(), 2, "{text}");
+}
+
+/// The answer to `session/new` of a harness that lets Lira choose the AI
+/// model, and then its answer to the choice.
+const CONVERSATION_WITH_MODELS: &str = r#"next; say '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"c-1","configOptions":[{"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"high","name":"High"}]},{"id":"the-model","name":"Model","category":"model","type":"select","currentValue":"large","options":[{"value":"large","name":"Large"},{"value":"small","name":"Small"}]}]}}'
+"#;
+
+#[test]
+fn lira_chooses_the_ai_model_of_a_conversation() {
+    let script = r#"next; say '{"jsonrpc":"2.0","id":3,"result":{"configOptions":[]}}'
+"#;
+    let stand_in = StandIn::new(
+        "model",
+        &format!("{HELLO}{CONVERSATION_WITH_MODELS}{script}"),
+    );
+    let mut harness = stand_in.start();
+    let conversation = harness.converse(&stand_in.folder, Some("small")).unwrap();
+    assert_eq!(conversation, "c-1");
+    // Lira sets the option of the harness that is for the AI model,
+    // whatever its name is.
+    let expected = r#"{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"c-1","configId":"the-model","value":"small"}}"#;
+    assert_eq!(stand_in.received(3), read(expected));
+}
+
+#[test]
+fn a_harness_that_does_not_take_the_ai_model_is_an_error() {
+    // This harness has no option for the AI model.
+    let stand_in = StandIn::new("no-models", &format!("{HELLO}{CONVERSATION}"));
+    let mut harness = stand_in.start();
+    let error = harness
+        .converse(&stand_in.folder, Some("small"))
+        .err()
+        .unwrap();
+    assert!(matches!(error, Error::Model { .. }), "{error:?}");
+    let text = error.to_string();
+    assert!(text.contains("`small`"), "{text}");
+
+    // This harness has the option, and refuses the value.
+    let script = r#"next; say '{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"no model with that name"}}'
+"#;
+    let stand_in = StandIn::new(
+        "model-refused",
+        &format!("{HELLO}{CONVERSATION_WITH_MODELS}{script}"),
+    );
+    let mut harness = stand_in.start();
+    let error = harness
+        .converse(&stand_in.folder, Some("tiny"))
+        .err()
+        .unwrap();
+    assert!(matches!(error, Error::Model { .. }), "{error:?}");
+    let text = error.to_string();
+    assert!(text.contains("no model with that name"), "{text}");
+    assert!(text.contains("`tiny`"), "{text}");
 }
 
 #[test]
@@ -127,8 +182,6 @@ fn a_folder_that_is_not_absolute_is_made_absolute() {
     let folder = Path::new(folder.as_text().unwrap());
     assert!(folder.is_absolute(), "{folder:?}");
     assert!(folder.ends_with("some/folder"), "{folder:?}");
-    // With nothing extra, the message has no `_meta`.
-    assert_eq!(message.get("params").unwrap().get("_meta"), None);
 }
 
 #[test]

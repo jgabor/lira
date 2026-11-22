@@ -31,6 +31,7 @@ place where a repository sets something for Lira.
 | `models.agent` | Text | The AI model for the agent. |
 | `models.planner` | Text | The AI model for the Planner. |
 | `models.reviewer` | Text | The AI model for the Reviewer. |
+| `harness.program` | Text | The program of the harness. |
 | `reviewer.harnesses` | List of text | The harnesses for the Reviewer, in order of preference. |
 | `score` | List of tables | The scores. Each has a `name` and a `better`. |
 | `planner.on` | True or false | If the Planner runs. |
@@ -42,6 +43,7 @@ place where a repository sets something for Lira.
 - A Lira file with no `check` is an error.
 - The value of `better` is `higher` or `lower`.
 - Two scores with the same name are an error.
+- The value of `harness.program` is the name of a program, or an absolute path.
 - A path in `protected` that ends with `/` is a folder, and it covers all that is in it.
 - A path in `protected` is relative to the root of the repository.
 - The agent limit of a repository can't be larger than the agent limit of the host.
@@ -55,7 +57,9 @@ branch of a change.
 - One server runs on a host.
 - *Proposed:* The server listens on the socket file `$XDG_RUNTIME_DIR/lira/server.sock`.
 - The server does not listen on the network.
-- *Proposed:* The server keeps its data in `$XDG_DATA_HOME/lira`.
+- The data folder is `$XDG_DATA_HOME/lira`.
+- When `XDG_DATA_HOME` is not set, the data folder is `~/.local/share/lira`.
+- An `XDG_DATA_HOME` that is empty, or that is not an absolute path, counts as not set.
 - The server keeps a numbered log of all messages and changes of state in one database file.
 - Each entry in the log has a number that is one more than the number before it.
 - The server keeps the worktrees in its data folder.
@@ -204,6 +208,8 @@ is success, 1 is a failure, and 2 is bad usage.
 
 - `lira run "<request>"` runs an agent on the request, in a new worktree of the repository in the current folder.
 - The request needs no issue.
+- The new worktree starts on a branch `lira/run-<8 letters or digits>`.
+- The instructions tell the agent to give the branch a name that says what the work is, such as `fix/login-timeout`.
 - The agent opens a draft pull request at its first commit.
 - Lira runs the check and a Reviewer on the change, and marks the pull request ready for review.
 - A change from `lira run` always waits for you.
@@ -256,6 +262,9 @@ is success, 1 is a failure, and 2 is bad usage.
 ## Harnesses
 
 - Lira runs an agent through the Agent Client Protocol (ACP).
+- The harness is the program that `LIRA_HARNESS` names.
+- When `LIRA_HARNESS` is not set, the harness is the program that `harness.program` in the Lira file names.
+- When `LIRA_HARNESS` is not set and the Lira file has no `harness.program`, the harness is the program `claude-agent-acp`.
 - *Proposed:* The first harness is Claude Code.
 - When a harness stops at a usage limit, Lira keeps the work in Now, and continues when the limit ends.
 

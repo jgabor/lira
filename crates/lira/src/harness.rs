@@ -11,7 +11,8 @@
 //! writes to its input. So the harness never waits for Lira while Lira
 //! writes to it, and Lira never waits in a write for a harness that ended.
 //! The harness runs in a process group of its own, so that Lira can stop it
-//! with its children.
+//! with its children. A small process guards it: when Lira ends with no
+//! time to stop the harness, the guard stops it.
 
 use crate::json::{self, Json};
 use std::fmt;
@@ -82,6 +83,10 @@ pub struct Harness {
     looked: Instant,
     /// If Lira sent the signal to the process group of the harness.
     group_stopped: bool,
+    /// A process that stops the harness and its children when Lira ends
+    /// with no time to do it, as after Ctrl-C. `None` after the harness
+    /// ended.
+    guard: Option<Child>,
     /// The end of what the harness wrote to its error output.
     errors: Arc<Mutex<Vec<u8>>>,
     /// It gets a value when the error output ends.
@@ -167,6 +172,13 @@ pub enum Error {
     /// The folder of a conversation has a name that is not UTF-8, so no
     /// message can hold it.
     Folder(String),
+    /// The harness did not take the AI model that Lira named. `reason` is
+    /// what the harness said, when it said something.
+    Model {
+        program: String,
+        model: String,
+        reason: Option<String>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -208,6 +220,22 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Error::Model {
+                program,
+                model,
+                reason: Some(reason),
+            } => write!(
+                f,
+                "the harness `{program}` does not take the AI model `{model}`: {reason}"
+            ),
+            Error::Model {
+                program,
+                model,
+                reason: None,
+            } => write!(
+                f,
+                "the harness `{program}` has no option for the AI model, so Lira can't give it the AI model `{model}`"
+            ),
             Error::Folder(folder) => write!(
                 f,
                 "the folder `{folder}` has a name that is not UTF-8, so a harness can't work in it"
@@ -261,6 +289,24 @@ impl Harness {
                 reason,
             }
         })?;
+        // Lira starts no harness that it can't stop when Lira itself is
+        // stopped.
+        let guard = match guard(child.id()) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                // This stops the harness, and not what the harness started
+                // in these first moments: Lira stops a process group with
+                // `sh`, and `sh` is what did not start here.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Start {
+                    reason: format!(
+                        "Lira can't start the process that guards the harness `{program}`. It is a `sh`, and it did not start: {error}"
+                    ),
+                    program,
+                });
+            }
+        };
         let (input, input_failed) = write_lines(child.stdin.take().expect("the input is a pipe"));
         let lines = read_lines(child.stdout.take().expect("the output is a pipe"));
         let (errors, errors_ended) = keep(child.stderr.take().expect("the error output is a pipe"));
@@ -273,6 +319,7 @@ impl Harness {
             ended_at: None,
             looked: Instant::now(),
             group_stopped: false,
+            guard,
             errors,
             errors_ended,
             next: 1,
@@ -315,27 +362,57 @@ impl Harness {
     }
 
     /// Starts a conversation with an agent that works in this folder, and
-    /// gives the name of the conversation. `extra` is what one harness
-    /// understands and the protocol does not, such as the AI model. It is
-    /// the `_meta` of the message.
-    pub fn converse(&mut self, folder: &Path, extra: Option<Json>) -> Result<String, Error> {
+    /// gives the name of the conversation. With `model`, the agent of the
+    /// conversation has that AI model, or the conversation is an error.
+    pub fn converse(&mut self, folder: &Path, model: Option<&str>) -> Result<String, Error> {
         let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
         let Some(folder) = folder.to_str() else {
             return Err(Error::Folder(folder.to_string_lossy().into_owned()));
         };
-        let mut params = vec![
-            ("cwd".to_string(), Json::text(folder)),
-            ("mcpServers".to_string(), Json::List(Vec::new())),
-        ];
-        if let Some(extra) = extra {
-            params.push(("_meta".to_string(), extra));
-        }
-        let result = self.request("session/new", Json::Object(params), None)?;
-        match result.get("sessionId").and_then(Json::as_text) {
-            Some(name) => Ok(name.to_string()),
-            None => Err(self.protocol(format!(
+        let params = Json::object([
+            ("cwd", Json::text(folder)),
+            ("mcpServers", Json::List(Vec::new())),
+        ]);
+        let result = self.request("session/new", params, None)?;
+        let Some(name) = result.get("sessionId").and_then(Json::as_text) else {
+            return Err(self.protocol(format!(
                 "its answer to `session/new` has no `sessionId`: {result}"
-            ))),
+            )));
+        };
+        if let Some(model) = model {
+            self.choose_model(name, model, &result)?;
+        }
+        Ok(name.to_string())
+    }
+
+    /// Gives a conversation its AI model. A harness says in its answer to
+    /// `session/new` which options a conversation has, and one of them can
+    /// be for the AI model. `new` is that answer.
+    fn choose_model(&mut self, conversation: &str, model: &str, new: &Json) -> Result<(), Error> {
+        let refused = |program: &str, reason: Option<String>| Error::Model {
+            program: program.to_string(),
+            model: model.to_string(),
+            reason,
+        };
+        let options = new.get("configOptions").and_then(Json::as_list);
+        let option = options.into_iter().flatten().find_map(|option| {
+            let for_the_model = option.get("category").and_then(Json::as_text) == Some("model");
+            option.get("id").filter(|_| for_the_model)
+        });
+        let Some(option) = option else {
+            return Err(refused(&self.program, None));
+        };
+        let params = Json::object([
+            ("sessionId", Json::text(conversation)),
+            ("configId", option.clone()),
+            ("value", Json::text(model)),
+        ]);
+        // The harness knows which names it takes. Lira does not look in the
+        // list of the option: a harness can take more names than it lists.
+        match self.request("session/set_config_option", params, None) {
+            Ok(_) => Ok(()),
+            Err(Error::Refused { message, .. }) => Err(refused(&self.program, Some(message))),
+            Err(error) => Err(error),
         }
     }
 
@@ -723,6 +800,13 @@ impl Harness {
             return;
         }
         self.group_stopped = true;
+        // Lira sends the signal itself now, so the guard is not needed. It
+        // goes first: after this, the number of the group can belong to
+        // other processes.
+        if let Some(mut guard) = self.guard.take() {
+            let _ = guard.kill();
+            let _ = guard.wait();
+        }
         let group = format!("-{}", self.child.id());
         let _ = Command::new("sh")
             .args(["-c", "kill -s KILL -- \"$1\"", "sh", &group])
@@ -780,6 +864,21 @@ impl Drop for Harness {
             self.stop();
         }
     }
+}
+
+/// Starts the process that guards a harness. It reads from a pipe that only
+/// Lira holds. The pipe ends when Lira ends, however that happens, and the
+/// guard then stops the process group of the harness. It has a process
+/// group of its own, so that Ctrl-C in the terminal does not reach it.
+fn guard(harness: u32) -> std::io::Result<Child> {
+    let wait_then_stop = r#"while IFS= read -r line; do :; done; kill -s KILL -- "$1""#;
+    Command::new("sh")
+        .args(["-c", wait_then_stop, "sh", &format!("-{harness}")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
 }
 
 /// Writes each line that it gets to the input of a harness, on a thread of

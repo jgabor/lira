@@ -109,7 +109,7 @@ impl Repository {
     }
 
     fn make(&self, branch: &str) -> Result<PathBuf, String> {
-        worktree::make(&self.root, &self.data, branch)
+        worktree::make(&self.root, &self.data, branch).map(|made| made.folder)
     }
 
     fn worktree(&self, branch: &str) -> PathBuf {
@@ -464,7 +464,9 @@ fn a_data_folder_that_is_not_absolute_is_made_absolute() {
     let here = std::env::current_dir().unwrap();
     let data = relative(&here, &repository.data);
     assert!(data.is_relative());
-    let folder = worktree::make(&repository.root, &data, "feat/relative").unwrap();
+    let folder = worktree::make(&repository.root, &data, "feat/relative")
+        .unwrap()
+        .folder;
     assert!(folder.is_absolute(), "{folder:?}");
     assert!(folder.join("README.md").is_file());
     assert_eq!(

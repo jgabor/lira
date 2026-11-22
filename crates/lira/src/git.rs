@@ -241,6 +241,19 @@ pub fn allows_branch(folder: &Path, branch: &str) -> Result<bool, String> {
     Ok(git(folder, &["check-ref-format", &full])?.is_some())
 }
 
+/// The branch that the worktree in a folder is on. It is `None` when the
+/// worktree is on no branch.
+pub fn current_branch(folder: &Path) -> Result<Option<String>, String> {
+    let branch = run(folder, &["branch", "--show-current"]).map_err(|wrote| {
+        format!(
+            "Lira can't read the branch of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    let branch = branch.trim();
+    Ok((!branch.is_empty()).then(|| branch.to_string()))
+}
+
 /// If the repository has this branch.
 pub fn has_branch(folder: &Path, branch: &str) -> Result<bool, String> {
     let full = format!("refs/heads/{branch}");
