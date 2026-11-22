@@ -1512,6 +1512,23 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     assert_eq!(repository.kept("seen"), "");
 }
 
+#[test]
+fn an_ssh_agent_of_dev_null_leaves_dev_null_as_it_is() {
+    // A host turns the ssh agent off with `SSH_AUTH_SOCK=/dev/null`. The
+    // sandbox has its own `/dev`, so `/dev/null` takes what a program writes.
+    let work = r#"echo text > /dev/null && echo written > "$here/null"
+"#;
+    let repository = Repository::new("dev-null", CHECK, &format!("{work}{WORK}"));
+    let output = repository
+        .lira()
+        .env("SSH_AUTH_SOCK", "/dev/null")
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("null"), "written");
+}
+
 // spec(Steps): When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
 #[test]
 fn with_no_bwrap_lira_runs_no_agent() {

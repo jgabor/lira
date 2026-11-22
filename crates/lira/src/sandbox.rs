@@ -91,10 +91,15 @@ const SSH_AGENT: &str = "SSH_AUTH_SOCK";
 /// ssh agent is not a socket there, and the variables with a token are not
 /// set. This comes after the other paths, so that it wins over them.
 ///
-/// A login in a folder that the sandbox has empty is hidden already. `bwrap`
-/// would make the folders of its path there, so it is left out.
+/// A login in a folder that the sandbox has of its own is hidden already:
+/// in `/dev`, `/proc`, `/tmp`, `/run`, or a folder of logins. `bwrap` would
+/// make the folders of its path there, or hide a file of the sandbox, such
+/// as `/dev/null`. So it is left out.
 fn hide_logins(command: &mut Command) {
-    let mut empty = vec![PathBuf::from("/tmp"), PathBuf::from("/run")];
+    let mut empty: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     let is_hidden =
         |path: &Path, empty: &[PathBuf]| empty.iter().any(|folder| path.starts_with(folder));
     for folder in login_folders() {
