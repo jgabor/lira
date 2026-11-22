@@ -174,9 +174,13 @@ impl Data {
         if let Some(host) = host_data().filter(|folder| folder.is_dir()) {
             for name in OWN_SETTINGS {
                 // The harness sees the file that a link names, and not the
-                // link. A link that names nothing is left out.
+                // link. A link that names nothing is left out. The file can
+                // be in a folder that the agent can change, so it is
+                // read-only at its own path too.
                 if let Ok(found) = host.join(name).canonicalize() {
-                    sandbox.read_only_at(&found, &self.folder.join(name));
+                    sandbox
+                        .read_only(&found)
+                        .read_only_at(&found, &self.folder.join(name));
                 }
             }
             if let Ok(login) = host.join(LOGIN).canonicalize()
