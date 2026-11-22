@@ -200,10 +200,16 @@ impl<'a> PullRequest<'a> {
             (None, Some(_)) => true,
             // The agent made a new branch for its work. It left the first
             // one where it started, or it left one with a name that the
-            // remote has already. After the first push, the branch of the
-            // pull request stays.
-            (Some(commit), Some(_)) => {
-                self.pushed.is_none() && (*commit == self.worktree.commit || was_taken)
+            // remote has already. Such a new branch is the work only when
+            // it has the commits of the first one. After the first push,
+            // the branch of the pull request stays.
+            (Some(commit), Some(new)) => {
+                let has_the_work = || {
+                    let new = format!("refs/heads/{new}");
+                    git::base_of(folder, &new, commit).map(|base| base.as_ref() == Some(commit))
+                };
+                self.pushed.is_none()
+                    && (*commit == self.worktree.commit || (was_taken && has_the_work()?))
             }
             _ => false,
         };
