@@ -115,7 +115,7 @@ impl Run<'_> {
         self.work(&message(&self.made.branch, self.request))?;
         let mut tries = 0;
         let mut rounds = 0;
-        let mut described = 0;
+        let mut asked = false;
         loop {
             // Check.
             if let Some(failure) = self.check()? {
@@ -137,19 +137,17 @@ impl Run<'_> {
             if review.passed {
                 // Ready.
                 let passed = git::head(&self.made.folder)?;
-                let description = self.describe();
+                // Lira asks the agent for the description one time. An
+                // agent that changes the change when it is asked is not
+                // asked again, so this loop ends.
+                let description = self.describe(!asked);
+                asked = true;
                 // The agent can change the worktree while it writes the
                 // description. Then the change is not what the check and
                 // the Reviewer passed, and both read it again.
                 let same = git::head(&self.made.folder)? == passed
                     && git::changes(&self.made.folder)?.trim().is_empty();
                 if !same {
-                    described += 1;
-                    if described == ROUNDS {
-                        return Err(format!(
-                            "the agent changed the change {ROUNDS} times after the check and a Reviewer passed it, so Lira stops here"
-                        ));
-                    }
                     self.note("Lira runs the check.")?;
                     continue;
                 }
@@ -236,17 +234,18 @@ impl Run<'_> {
         self.pull_request.update(next, decisions)
     }
 
-    /// The description for the pull request that is ready for review. The
-    /// agent writes it. When the agent does not, or writes it with other
-    /// headings, Lira writes it from what it has.
-    fn describe(&mut self) -> String {
-        // The agent has no reason to change a file here, so the answer to
-        // each permission request is no.
-        let reply = self
-            .harness
-            .send(&self.conversation, DESCRIBE, &mut |_| false);
-        let written = match &reply {
-            Ok(reply) if agent::stopped(&reply.stop).is_none() => description_in(&reply.text),
+    /// The description for the pull request that is ready for review. With
+    /// `ask`, the agent writes it. When the agent does not, or writes it
+    /// with other headings, Lira writes it from what it has.
+    fn describe(&mut self, ask: bool) -> String {
+        let written = ask.then(|| {
+            // The agent has no reason to change a file here, so the answer
+            // to each permission request is no.
+            self.harness
+                .send(&self.conversation, DESCRIBE, &mut |_| false)
+        });
+        let written = match &written {
+            Some(Ok(reply)) if agent::stopped(&reply.stop).is_none() => description_in(&reply.text),
             _ => None,
         };
         match written {
@@ -398,13 +397,25 @@ fn description_in(text: &str) -> Option<&str> {
         .peekable();
     let mut start = None;
     let mut at = 0;
+    // A line in a block of code is no heading. A block starts and ends with
+    // a line of three backticks or three tildes.
+    let mut code: Option<&str> = None;
     for line in text.split_inclusive('\n') {
-        if wanted
-            .peek()
-            .is_some_and(|heading| line.trim_end() == *heading)
-        {
-            wanted.next();
-            start = start.or(Some(at));
+        let fence = ["```", "~~~"]
+            .into_iter()
+            .find(|fence| line.trim_start().starts_with(fence));
+        match (code, fence) {
+            (None, Some(fence)) => code = Some(fence),
+            (Some(open), Some(fence)) if open == fence => code = None,
+            (None, None)
+                if wanted
+                    .peek()
+                    .is_some_and(|heading| line.trim_end() == *heading) =>
+            {
+                wanted.next();
+                start = start.or(Some(at));
+            }
+            _ => {}
         }
         at += line.len();
     }
@@ -530,6 +541,12 @@ mod tests {
         assert_eq!(description_in("## Problem\n## Change\n"), None);
         assert_eq!(description_in("Problem, Change, Decisions"), None);
         assert_eq!(description_in(""), None);
+        // A line in a block of code is no heading.
+        let quoted = "## Problem\n\nThe old form was:\n\n```\n## Change\n## Decisions\n```\n";
+        assert_eq!(description_in(quoted), None);
+        let with_code =
+            "## Problem\n\n~~~sh\n## a comment\n~~~\n\n## Change\n\nC.\n\n## Decisions\n\nNone.";
+        assert_eq!(description_in(with_code), Some(with_code));
     }
 
     #[test]

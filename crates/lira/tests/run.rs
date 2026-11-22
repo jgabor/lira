@@ -1755,12 +1755,13 @@ fn a_commit_that_comes_with_the_description_is_checked_and_reviewed() {
     let work = r#"commit greeting 'Add a greeting'
 reply 'I made the file.'
 next
-if [ ! -e late.txt ]; then
-  commit late 'Add a late file'
-fi
+commit late 'Add a late file'
 reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting.\n\n## Decisions\n\nNone.'
-next
-reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting, and a late file.\n\n## Decisions\n\nNone.'
+while :; do
+  next
+  echo message >> "$here/more-messages"
+  reply 'More.'
+done
 "#;
     let repository = Repository::checked("described-late", "echo check >> \"$ORDER\"\n", work);
     repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
@@ -1775,13 +1776,40 @@ reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting, and a late file.\n
         repository.on_remote(&branch),
         Some(git_ok(&folder, &["rev-parse", "HEAD"]))
     );
+    // Lira did not ask the agent a second time, so the agent could not
+    // change the change again. Lira wrote the description.
+    assert!(!repository.harness.join("more-messages").exists());
     let description = repository.gh("description-when-ready");
-    assert!(description.contains("and a late file"), "{description}");
+    assert!(is_a_description(&description), "{description}");
+    assert!(description.contains("- Add a late file"), "{description}");
 }
 
-// spec(lira run): A change from `lira run` always waits for you.
 #[test]
-fn a_change_from_lira_run_waits_for_you() {
+fn a_branch_that_changed_on_the_remote_is_not_marked_ready() {
+    // While the agent writes the description, the branch on the remote
+    // gets another commit than the one that the check and the Reviewer
+    // passed.
+    let work = r#"git branch -m feat/moved
+commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+git push --quiet --force "$(git remote get-url origin)" HEAD~1:refs/heads/feat/moved
+reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting.\n\n## Decisions\n\nNone.'
+"#;
+    let repository = Repository::new("moved", CHECK, work);
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("`feat/moved`"), "{error}");
+    assert!(error.contains("another commit"), "{error}");
+    assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+// SPEC.md says: "A change from `lira run` always waits for you." This test
+// shows that `lira run` stops at the pull request that is ready. It is no
+// quote: the merge queue is not there yet, so no test can show "always".
+#[test]
+fn lira_run_stops_at_the_pull_request_that_is_ready() {
     let repository = Repository::new("waits", CHECK, &work_and_describe(DESCRIPTION));
     passed(&repository.run());
     // The pull request is ready for review, and that is where Lira stops:
@@ -2109,7 +2137,7 @@ reply 'I committed it.'
     assert!(second.contains("the check"), "{second}");
     // The check ran again on the commit with the repair, and the Reviewer
     // read that commit.
-    assert_eq!(repository.order(), "check check");
+    assert_eq!(repository.order(), "check check ready");
     assert_eq!(repository.kept("review-greeting"), "formatted");
 }
 

@@ -111,11 +111,22 @@ impl<'a> PullRequest<'a> {
     }
 
     /// Gives the pull request this description, and marks it ready for
-    /// review. The pull request must be up to date.
+    /// review. The remote must have the commit that Lira pushed last.
     pub fn ready(&mut self, description: &str) -> Result<(), String> {
-        let Some(address) = self.address.clone() else {
+        let (Some(address), Some(branch), Some(pushed)) =
+            (self.address.clone(), &self.branch, &self.pushed)
+        else {
             return Err("there is no pull request to mark ready for review".to_string());
         };
+        // The check and a Reviewer passed the commit that Lira pushed. The
+        // pull request is ready only with that commit.
+        let folder = &self.worktree.folder;
+        let remote = &self.worktree.remote;
+        if git::remote_commit(folder, remote, branch)?.as_ref() != Some(pushed) {
+            return Err(format!(
+                "the branch `{branch}` has another commit on the remote `{remote}` than the one that the check and a Reviewer passed, so Lira does not mark the pull request ready for review"
+            ));
+        }
         self.describe(&address, description)?;
         github::mark_ready(&self.worktree.folder, &address)
     }
