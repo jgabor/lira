@@ -57,16 +57,34 @@ can't continue, stop and ask as AGENTS.md says.
 
 7. Load `mcp__t3-code__delegate_task` with ToolSearch. Start a Reviewer with
    `role` set to `review`, `mode` set to `wait`, and `timeoutMs` set to
-   600000. Use the first `target` of these that works, so that the Reviewer
-   has a different harness from yours when one is available:
+   600000. Use the first `target` of these that works, in this order, so
+   that the Reviewer has a different harness from yours when one is
+   available:
 
-   ```json
-   {"providerInstanceId": "acpRegistry_factory_droid", "model": "gpt-6.1-sol"}
-   ```
+   1. Factory Droid with Gemini 4 Neon, at high effort:
 
-   ```json
-   {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5"}
-   ```
+      ```json
+      {"providerInstanceId": "acpRegistry_factory_droid",
+       "model": "gemini-4-neon", "options": {"reasoning_effort": "high"}}
+      ```
+
+   2. Antigravity with Gemini 4 Neon, at high effort:
+
+      ```json
+      {"providerInstanceId": "antigravity",
+       "model": "gemini-4-neon", "options": {"thought_level": "high"}}
+      ```
+
+   3. Claude Code with Claude Opus 5.5, at high effort:
+
+      ```json
+      {"providerInstanceId": "claudeAgent",
+       "model": "claude-opus-5-5", "options": {"effort": "high"}}
+      ```
+
+   A Reviewer does not work when it can't start, or when it stops before its
+   review, for example because its usage is used up. Then start the next
+   one with the same task. When none of them works, stop and ask.
 
    Give the Reviewer the goal of the issue and the command
    `git diff origin/main...HEAD`. Tell it to change no file, and to say for
