@@ -22,10 +22,21 @@ const LATER: &str = "The agent lists them when its work is complete.";
 
 pub struct PullRequest<'a> {
     worktree: &'a Worktree,
+    /// The branches that the repository had before the agent started. A
+    /// branch of these is not the work of the agent.
+    before: Vec<String>,
+    /// The branch of the agent in the repository. It starts as the branch
+    /// of the worktree, and the agent gives it another name.
+    local: String,
     /// The name of the branch on the remote, after the first push.
     branch: Option<String>,
     /// The commit that the remote has on that branch.
     pushed: Option<String>,
+    /// Each commit that Lira tried to push, and the name that it tried for
+    /// the branch on the remote. The remote can have taken a push whose
+    /// answer got lost.
+    tried: Vec<String>,
+    tried_as: Option<String>,
     /// The address of the pull request, after GitHub opened it.
     address: Option<String>,
     /// The description that GitHub has.
@@ -36,21 +47,37 @@ pub struct PullRequest<'a> {
 }
 
 impl<'a> PullRequest<'a> {
-    /// For the work in a new worktree. There is no pull request yet.
-    pub fn new(worktree: &'a Worktree) -> PullRequest<'a> {
-        PullRequest {
+    /// For the work in a new worktree, before the agent starts. There is no
+    /// pull request yet.
+    pub fn new(worktree: &'a Worktree) -> Result<PullRequest<'a>, String> {
+        Ok(PullRequest {
             worktree,
+            before: git::branches(&worktree.folder)?,
+            local: worktree.branch.clone(),
             branch: None,
             pushed: None,
+            tried: Vec::new(),
+            tried_as: None,
             address: None,
             described: String::new(),
             problem: None,
-        }
+        })
     }
 
     /// The address of the pull request, when GitHub opened one.
     pub fn address(&self) -> Option<&str> {
         self.address.as_deref()
+    }
+
+    /// The newest commit that the remote has of the work, when Lira pushed
+    /// one.
+    pub fn commit(&self) -> Option<&str> {
+        self.pushed.as_deref()
+    }
+
+    /// The name that the branch of the agent has in the repository.
+    pub fn local(&self) -> &str {
+        &self.local
     }
 
     /// The name of the branch on the remote, when Lira pushed one.
@@ -95,22 +122,20 @@ impl<'a> PullRequest<'a> {
         let folder = &self.worktree.folder;
         // The agent can make a commit while Lira looks. So Lira reads the
         // newest commit one time, and pushes and describes that commit.
-        let head = git::head(folder)?;
-        let subjects = git::subjects(folder, &self.worktree.commit, &head)?;
+        let commit = self.work()?;
+        let subjects = git::subjects(folder, &self.worktree.commit, &commit)?;
         if subjects.is_empty() {
-            // The agent made no commit yet.
-            return Ok(());
-        }
-        if self.pushed.as_deref() != Some(&head) {
-            let branch = match &self.branch {
-                Some(branch) => branch.clone(),
-                None => self.new_name()?,
+            return match &self.pushed {
+                // The agent made no commit yet.
+                None => Ok(()),
+                // Lira removes no work from the remote.
+                Some(_) => Err(
+                    "the agent took its commits back, so its branch has no change now. The pull request still has the commits that Lira pushed before"
+                        .to_string(),
+                ),
             };
-            let before = self.pushed.as_deref();
-            git::push(folder, &self.worktree.remote, &head, &branch, before)?;
-            self.branch = Some(branch);
-            self.pushed = Some(head);
         }
+        self.push(&commit)?;
         let description = note(&subjects, next, decisions);
         if self.address.is_some() && self.described == description {
             return Ok(());
@@ -137,28 +162,109 @@ impl<'a> PullRequest<'a> {
         Ok(())
     }
 
-    /// The name for the branch on the remote: the name that the branch has
-    /// in the worktree now, or that name with a number when the remote has
-    /// such a branch already.
-    fn new_name(&self) -> Result<String, String> {
+    /// The newest commit of the work of the agent: the commit of its
+    /// branch. The worktree can be on another branch or on no branch, and
+    /// that changes nothing here.
+    fn work(&mut self) -> Result<String, String> {
         let folder = &self.worktree.folder;
-        let Some(name) = git::current_branch(folder)? else {
-            return Err(format!(
-                "the worktree `{}` is on no branch, so Lira can't push the work of the agent",
-                folder.display()
-            ));
+        let commit = git::commit_of(folder, &self.local)?;
+        let current = git::current_branch(folder)?;
+        // A branch that the agent made, and that the worktree is on now.
+        let new =
+            current.filter(|current| *current != self.local && !self.before.contains(current));
+        let moved = match (&commit, &new) {
+            // The agent gave its branch a new name.
+            (None, Some(_)) => true,
+            // The agent made a new branch for its work, and left the first
+            // one where it started. After the first push, the branch of
+            // the pull request stays.
+            (Some(commit), Some(_)) => *commit == self.worktree.commit && self.pushed.is_none(),
+            _ => false,
         };
-        let remote = &self.worktree.remote;
-        if !git::remote_has_branch(folder, remote, &name)? {
-            return Ok(name);
+        if let (true, Some(new)) = (moved, new) {
+            self.local = new;
+            return git::commit_of(folder, &self.local)?.ok_or_else(|| self.lost());
         }
-        for number in 2..=NAMES {
-            let other = format!("{name}-{number}");
-            if !git::remote_has_branch(folder, remote, &other)? {
-                eprintln!(
-                    "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
-                );
-                return Ok(other);
+        commit.ok_or_else(|| self.lost())
+    }
+
+    /// The error for a branch of the agent that is gone.
+    fn lost(&self) -> String {
+        format!(
+            "the branch `{}` of the agent is gone, and the worktree `{}` is on no new branch, so Lira can't find the work of the agent",
+            self.local,
+            self.worktree.folder.display()
+        )
+    }
+
+    /// Makes the branch on the remote have this commit.
+    fn push(&mut self, commit: &str) -> Result<(), String> {
+        if self.pushed.as_deref() == Some(commit) {
+            return Ok(());
+        }
+        let folder = &self.worktree.folder;
+        let remote = &self.worktree.remote;
+        let branch = match &self.branch {
+            Some(branch) => branch.clone(),
+            None => self.new_name()?,
+        };
+        // `new_name` can find a first push whose answer got lost.
+        let before = self.pushed.clone();
+        if before.as_deref() != Some(commit) {
+            self.tried.push(commit.to_string());
+            self.tried_as = Some(branch.clone());
+            if let Err(error) = git::push(folder, remote, commit, &branch, before.as_deref()) {
+                // The remote can have taken this push, or one before it,
+                // and the answer got lost. Then the remote has a commit
+                // that Lira tried to push, and Lira goes on from there.
+                let there = git::remote_commit(folder, remote, &branch).ok().flatten();
+                match there {
+                    Some(there) if there == commit => {}
+                    Some(there)
+                        if self.tried.contains(&there) && Some(&there) != before.as_ref() =>
+                    {
+                        self.branch = Some(branch.clone());
+                        self.pushed = Some(there.clone());
+                        git::push(folder, remote, commit, &branch, Some(&there))?;
+                    }
+                    _ => return Err(error),
+                }
+            }
+        }
+        self.branch = Some(branch);
+        self.pushed = Some(commit.to_string());
+        Ok(())
+    }
+
+    /// The name for the branch on the remote: the name that the branch of
+    /// the agent has now, or that name with a number when the remote has
+    /// such a branch already.
+    fn new_name(&mut self) -> Result<String, String> {
+        let folder = &self.worktree.folder;
+        let remote = &self.worktree.remote;
+        let name = self.local.clone();
+        let names = [name.clone()]
+            .into_iter()
+            .chain((2..=NAMES).map(|number| format!("{name}-{number}")));
+        for other in names {
+            match git::remote_commit(folder, remote, &other)? {
+                None => {
+                    if other != name {
+                        eprintln!(
+                            "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
+                        );
+                    }
+                    return Ok(other);
+                }
+                // The branch is Lira's own: the remote took the first push,
+                // and the answer got lost.
+                Some(there)
+                    if self.tried_as.as_deref() == Some(&other) && self.tried.contains(&there) =>
+                {
+                    self.pushed = Some(there);
+                    return Ok(other);
+                }
+                Some(_) => {}
             }
         }
         Err(format!(

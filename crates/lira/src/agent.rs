@@ -2,7 +2,6 @@
 //! that does the work and each Reviewer start in the same way.
 
 use crate::harness::{Harness, Stop};
-use crate::json::Json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,12 +27,6 @@ pub fn start(from: &Path, folder: &Path, model: Option<&str>) -> Result<(Harness
     let mut harness = Harness::start(command).map_err(|error| {
         format!("{error}. `LIRA_HARNESS` names the program of the harness, and with no value it is `{HARNESS}`")
     })?;
-    // The protocol has no place for the AI model. This is where the harness
-    // of Claude Code reads it.
-    let model = model.map(|model| {
-        let options = Json::object([("model", Json::text(model))]);
-        Json::object([("claudeCode", Json::object([("options", options)]))])
-    });
     let conversation = harness
         .converse(folder, model)
         .map_err(|error| error.to_string())?;

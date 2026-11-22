@@ -111,21 +111,38 @@ pub fn open_draft(
     let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     args.extend([OsStr::new("--title"), OsStr::new(title)]);
     args.extend([OsStr::new("--body-file"), description.as_os_str()]);
-    let printed = pull_request(folder, &args)?;
+    let printed = match pull_request(folder, &args) {
+        Ok(printed) => printed,
+        // GitHub can open the pull request, and its answer can get lost.
+        // The branch is new and Lira's own, so an open pull request for it
+        // is this one.
+        Err(error) => return open_for(folder, head).ok().flatten().ok_or(error),
+    };
     // `gh` prints the address of the new pull request on the last line.
-    let address = printed
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty());
-    match address {
-        Some(address) if address.starts_with("https://") || address.starts_with("http://") => {
-            Ok(address.to_string())
-        }
-        _ => Err(format!(
+    address_in(&printed).ok_or_else(|| {
+        format!(
             "`gh pr create` did not print the address of the pull request. It printed:\n{}",
             printed.trim()
-        )),
-    }
+        )
+    })
+}
+
+/// The last line of what `gh` printed, when it is an address.
+fn address_in(printed: &str) -> Option<String> {
+    let last = printed
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())?;
+    (last.starts_with("https://") || last.starts_with("http://")).then(|| last.to_string())
+}
+
+/// The address of the open pull request for the branch `head`, when there
+/// is one.
+fn open_for(folder: &Path, head: &str) -> Result<Option<String>, String> {
+    let args = ["list", "--head", head, "--state", "open"];
+    let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+    args.extend(["--json", "url", "--jq", ".[].url"].map(OsStr::new));
+    Ok(address_in(&pull_request(folder, &args)?))
 }
 
 /// Gives the pull request at `address` the text of the file `description`
