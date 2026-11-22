@@ -1396,8 +1396,8 @@ reply 'Review: pass'
     assert!(!Path::new(&own).exists(), "{own}");
 }
 
-/// Writes each login for GitHub that a program in the sandbox sees, to the
-/// file that follows it. `socket` is the socket of the ssh agent.
+/// A shell function that prints each login for GitHub that a program in
+/// the sandbox sees. `$HOME/s` is the socket of the ssh agent.
 const LOGINS: &str = r#"logins() {
   for folder in "$GH_CONFIG_DIR" "$XDG_CONFIG_HOME/gh" "$HOME/.config/gh" "$HOME/.ssh"; do
     echo "$folder: $(ls -A "$folder" 2>&1)"
@@ -1483,6 +1483,33 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
             "secret\n"
         );
     }
+}
+
+#[test]
+fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
+    // The socket of the ssh agent is in `~/.ssh`, and the folder of `gh` is
+    // in `/tmp`. The sandbox has its own empty `/tmp`, and an empty
+    // `~/.ssh`.
+    let work = r#"{ ls -A /tmp; ls -A "$HOME/.ssh"; } > "$here/seen"
+"#;
+    let repository = Repository::new("hidden-logins", CHECK, &format!("{work}{WORK}"));
+    let ssh = repository.top.join("home").join(".ssh");
+    fs::create_dir_all(&ssh).unwrap();
+    let socket = ssh.join("s");
+    let _agent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let gh = Path::new("/tmp").join(format!("lira-test-{}", std::process::id()));
+    fs::create_dir_all(gh.join("gh")).unwrap();
+    fs::write(gh.join("gh").join("login"), "secret\n").unwrap();
+    let output = repository
+        .lira()
+        .env("SSH_AUTH_SOCK", &socket)
+        .env("GH_CONFIG_DIR", gh.join("gh"))
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    fs::remove_dir_all(&gh).unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("seen"), "");
 }
 
 // spec(Steps): When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
