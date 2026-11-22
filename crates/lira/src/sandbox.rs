@@ -90,17 +90,26 @@ const SSH_AGENT: &str = "SSH_AUTH_SOCK";
 /// request. A folder of logins is empty in the sandbox, the socket of the
 /// ssh agent is not a socket there, and the variables with a token are not
 /// set. This comes after the other paths, so that it wins over them.
+///
+/// A login in a folder that the sandbox has empty is hidden already. `bwrap`
+/// would make the folders of its path there, so it is left out.
 fn hide_logins(command: &mut Command) {
+    let mut empty = vec![PathBuf::from("/tmp"), PathBuf::from("/run")];
+    let is_hidden =
+        |path: &Path, empty: &[PathBuf]| empty.iter().any(|folder| path.starts_with(folder));
     for folder in login_folders() {
         if let Ok(folder) = folder.canonicalize()
             && folder.is_dir()
+            && !is_hidden(&folder, &empty)
         {
-            command.arg("--tmpfs").arg(folder);
+            command.arg("--tmpfs").arg(&folder);
+            empty.push(folder);
         }
     }
     let socket = std::env::var_os(SSH_AGENT).map(PathBuf::from);
     if let Some(socket) = socket.and_then(|socket| socket.canonicalize().ok())
         && !socket.is_dir()
+        && !is_hidden(&socket, &empty)
     {
         command.arg("--ro-bind").arg("/dev/null").arg(socket);
     }
