@@ -8,6 +8,7 @@ pub mod harness;
 pub mod json;
 pub mod lira_file;
 mod process;
+mod pull_request;
 pub mod run;
 pub mod scores;
 mod toml;

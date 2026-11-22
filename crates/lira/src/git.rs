@@ -92,6 +92,13 @@ pub fn base(folder: &Path, main: &str) -> Result<String, String> {
     })
 }
 
+/// The newest commit that a branch and a commit both have, or `None` when
+/// they have none, or when the repository has no such branch.
+pub fn base_of(folder: &Path, branch: &str, commit: &str) -> Result<Option<String>, String> {
+    let base = git(folder, &["merge-base", branch, commit])?;
+    Ok(base.map(|base| base.trim().to_string()))
+}
+
 /// The Lira file, as the main branch has it.
 pub fn lira_file(folder: &Path, main: &MainBranch) -> Result<LiraFile, String> {
     lira_file_at(folder, main, &main.full)
@@ -252,6 +259,116 @@ pub fn current_branch(folder: &Path) -> Result<Option<String>, String> {
     })?;
     let branch = branch.trim();
     Ok((!branch.is_empty()).then(|| branch.to_string()))
+}
+
+/// The subject of each commit that `to` has and `from` does not have, the
+/// oldest first.
+pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let range = format!("{from}..{to}");
+    let log = run(folder, &["log", "--reverse", "--format=%s", &range, "--"]).map_err(|wrote| {
+        format!(
+            "Lira can't read the commits of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(log.lines().map(str::to_string).collect())
+}
+
+/// The commit that a remote has on this branch now, or `None` when the
+/// remote has no such branch.
+pub fn remote_commit(folder: &Path, remote: &str, branch: &str) -> Result<Option<String>, String> {
+    let full = format!("refs/heads/{branch}");
+    let mut command = Command::new("git");
+    command
+        .args(["ls-remote", "--exit-code", "--heads", "--", remote, &full])
+        .current_dir(folder);
+    let ended = process::run(command, false)
+        .map_err(|e| format!("couldn't run `git`: {e}. Install git, or add it to PATH"))?;
+    let failed = || {
+        format!(
+            "Lira can't ask the remote `{remote}` for the branch `{branch}`. git wrote:\n{}",
+            String::from_utf8_lossy(&ended.errors).trim()
+        )
+    };
+    match ended.status.code() {
+        // A line is the commit, a tab, and the full name of the branch.
+        Some(0) => {
+            let printed = String::from_utf8_lossy(&ended.output);
+            let commit = printed.lines().find_map(|line| {
+                let (commit, name) = line.split_once('\t')?;
+                (name == full).then(|| commit.to_string())
+            });
+            commit.map(Some).ok_or_else(failed)
+        }
+        // With `--exit-code`, this status says that the remote has no such
+        // branch.
+        Some(2) => Ok(None),
+        _ => Err(failed()),
+    }
+}
+
+/// The commit of a branch of the repository, or `None` when the repository
+/// has no such branch.
+pub fn commit_of(folder: &Path, branch: &str) -> Result<Option<String>, String> {
+    let full = format!("refs/heads/{branch}^{{commit}}");
+    let commit = git(folder, &["rev-parse", "--verify", "--quiet", &full])?;
+    Ok(commit.map(|commit| commit.trim().to_string()))
+}
+
+/// The name of each branch of the repository.
+pub fn branches(folder: &Path) -> Result<Vec<String>, String> {
+    // The full name, and not the short one: git prints the short name of a
+    // branch in another form when a tag has the same name.
+    let names = run(
+        folder,
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
+    )
+    .map_err(|wrote| {
+        format!(
+            "Lira can't read the branches of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    let names = names
+        .lines()
+        .filter_map(|name| name.strip_prefix("refs/heads/"));
+    Ok(names.map(str::to_string).collect())
+}
+
+/// Pushes a commit to a branch of a remote. `before` is the commit that
+/// the remote must have on that branch now, or `None` for a branch that
+/// the remote must not have. So Lira replaces only what it pushed itself.
+pub fn push(
+    folder: &Path,
+    remote: &str,
+    commit: &str,
+    branch: &str,
+    before: Option<&str>,
+) -> Result<(), String> {
+    let full = format!("refs/heads/{branch}");
+    let lease = format!("--force-with-lease={full}:{}", before.unwrap_or(""));
+    let what = format!("{commit}:{full}");
+    run(folder, &["push", "--quiet", &lease, "--", remote, &what])
+        .map(|_| ())
+        .map_err(|wrote| {
+            format!("Lira can't push the branch `{branch}` to the remote `{remote}`. git wrote:\n{wrote}")
+        })
+}
+
+/// The path of a file that git keeps for the worktree in a folder, outside
+/// the files of the repository. git removes it with the worktree.
+pub fn own_file(folder: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = run(
+        folder,
+        &["rev-parse", "--path-format=absolute", "--git-path", name],
+    )
+    .map_err(|wrote| {
+        format!(
+            "Lira can't find the folder that git keeps for `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })?;
+    Ok(PathBuf::from(path.trim_end_matches('\n')))
 }
 
 /// If the repository has this branch.

@@ -23,6 +23,17 @@ next() {
   [ -n "$request" ] && id="$request"
 }
 say() { printf '%s\n' "$1"; }
+# Tells Lira that the agent finished a tool call.
+ended() { say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"t-1","status":"completed"}}}'; }
+# Makes a commit with one new file: `commit <file> <subject>`.
+commit() { echo "$1" > "$1.txt"; git add "$1.txt"; git commit --quiet --message "$2"; }
+# Waits until `gh` was called with these words, for 10 seconds at most.
+called() {
+  tries=0
+  until grep -q -- "$1" "$here/../bin/calls" 2>/dev/null; do
+    tries=$((tries + 1)); [ "$tries" -gt 100 ] && return 1; sleep 0.1
+  done
+}
 pwd > "$here/folder"
 git branch --show-current > "$here/branch"
 next; say '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
@@ -43,6 +54,78 @@ printf '%s\n' "$line" > "$here/message"
 const REPLY: &str = r#"say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I made the file."}}}}'
 say '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}'
 "#;
+
+/// The work of an agent that makes one commit, and its reply.
+const WORK: &str = r#"commit greeting 'Add a greeting'
+say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I made the file."}}}}'
+say '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}'
+"#;
+
+/// Stands in for `gh`. It keeps each call, and the description that a call
+/// gives. `gh pr create` prints the address of a pull request.
+const GH: &str = r#"#!/bin/sh
+here="$(dirname "$0")"
+printf '%s\n' "$*" >> "$here/calls"
+if [ "$1 $2" = "auth status" ]; then
+  [ -e "$here/no-login" ] && exit 1
+  exit 0
+fi
+description=""
+before=""
+for argument in "$@"; do
+  [ "$before" = "--body-file" ] && description="$argument"
+  before="$argument"
+done
+if [ "$1 $2" = "pr create" ]; then
+  if [ -e "$here/no-create" ]; then
+    echo "the stand-in for gh makes no pull request" >&2
+    echo refused >> "$here/refused"
+    exit 1
+  fi
+  if [ -e "$here/existing" ]; then
+    echo "a pull request for this branch already exists" >&2
+    exit 1
+  fi
+  # A slow answer of GitHub.
+  [ -e "$here/slow-create" ] && sleep 1.5
+  # An answer of GitHub that waits for the file `go`, for 10 seconds at most.
+  if [ -e "$here/hold-create" ]; then
+    echo started > "$here/create-started"
+    tries=0
+    until [ -e "$here/go" ]; do
+      tries=$((tries + 1))
+      if [ "$tries" -gt 200 ]; then echo "gave up" > "$here/gave-up"; exit 1; fi
+      sleep 0.05
+    done
+  fi
+  cp "$description" "$here/created"
+  pwd > "$here/created-in"
+  if [ -e "$here/lose-create" ]; then
+    # GitHub opens the pull request, and its answer does not arrive.
+    rm "$here/lose-create"
+    echo "https://github.com/owner/name/pull/7" > "$here/existing"
+    echo "the connection was lost" >&2
+    exit 1
+  fi
+  echo "https://github.com/owner/name/pull/7"
+  exit 0
+fi
+if [ "$1 $2" = "pr list" ]; then
+  cat "$here/existing" 2>/dev/null
+  exit 0
+fi
+if [ "$1 $2" = "pr edit" ]; then
+  cp "$description" "$here/edited"
+  # A slow answer of GitHub.
+  [ -e "$here/slow-edit" ] && sleep 1
+  exit 0
+fi
+echo "the stand-in for gh has no answer for: $1 $2" >&2
+exit 1
+"#;
+
+/// The address that the stand-in for `gh` gives a new pull request.
+const ADDRESS: &str = "https://github.com/owner/name/pull/7";
 
 const CHECK: &str = "check = \"true\"\n";
 
@@ -145,11 +228,7 @@ impl Repository {
         git_ok(&top, &["clone", "--quiet", "--bare", "seed", remote]);
         git_ok(&top, &["clone", "--quiet", remote, "repository"]);
         program(&repository.harness.join("agent"), &format!("{START}{work}"));
-        // No test needs GitHub. This `gh` keeps what it is asked, and fails.
-        program(
-            &top.join("bin").join("gh"),
-            "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\nexit 1\n",
-        );
+        program(&top.join("bin").join("gh"), GH);
         repository
     }
 
@@ -231,6 +310,26 @@ impl Repository {
             .to_string()
     }
 
+    /// The calls of `gh` that start with these words, one on each line.
+    fn calls(&self, start: &str) -> Vec<String> {
+        let calls = fs::read_to_string(self.top.join("bin").join("calls")).unwrap_or_default();
+        let calls = calls.lines().filter(|call| call.starts_with(start));
+        calls.map(str::to_string).collect()
+    }
+
+    /// What the stand-in for `gh` kept in a file.
+    fn gh(&self, file: &str) -> String {
+        fs::read_to_string(self.top.join("bin").join(file))
+            .unwrap_or_else(|e| panic!("the stand-in for gh kept no `{file}`: {e}"))
+    }
+
+    /// The commit of a branch of the remote, or `None` when the remote has
+    /// no such branch.
+    fn on_remote(&self, branch: &str) -> Option<String> {
+        let full = format!("refs/heads/{branch}");
+        git(&self.remote, &["rev-parse", "--verify", "--quiet", &full])
+    }
+
     /// The branches of the repository that Lira made for a run.
     fn run_branches(&self) -> String {
         git_ok(&self.root, &["branch", "--list", "lira/run-*"])
@@ -265,7 +364,7 @@ fn failed(output: &Output) -> String {
 // spec(lira run): The request needs no issue.
 #[test]
 fn lira_run_runs_an_agent_on_the_request_in_a_new_worktree() {
-    let repository = Repository::new("request", CHECK, REPLY);
+    let repository = Repository::new("request", CHECK, WORK);
     let newest = repository.push("NEW.md", "newer\n");
     passed(&repository.run());
 
@@ -294,7 +393,8 @@ fn lira_run_runs_an_agent_on_the_request_in_a_new_worktree() {
         folder.canonicalize().unwrap(),
         repository.root.canonicalize().unwrap()
     );
-    assert_eq!(git_ok(&folder, &["rev-parse", "HEAD"]), newest);
+    // The agent made one commit on it.
+    assert_eq!(git_ok(&folder, &["rev-parse", "HEAD~1"]), newest);
 
     // The agent got the request.
     assert!(repository.message().contains(REQUEST));
@@ -307,7 +407,7 @@ fn lira_run_runs_an_agent_on_the_request_in_a_new_worktree() {
 // spec(Server): The data folder is `$XDG_DATA_HOME/lira`.
 #[test]
 fn the_data_folder_is_in_xdg_data_home() {
-    let repository = Repository::new("xdg", CHECK, REPLY);
+    let repository = Repository::new("xdg", CHECK, WORK);
     passed(&repository.run());
     let folder = PathBuf::from(repository.kept("folder"));
     let data = repository.top.join("xdg").join("lira");
@@ -323,7 +423,7 @@ fn the_data_folder_is_in_xdg_data_home() {
 // spec(Server): When `XDG_DATA_HOME` is not set, the data folder is `~/.local/share/lira`.
 #[test]
 fn with_no_xdg_data_home_the_data_folder_is_in_the_home_folder() {
-    let repository = Repository::new("home", CHECK, REPLY);
+    let repository = Repository::new("home", CHECK, WORK);
     let output = repository
         .lira()
         .env_remove("XDG_DATA_HOME")
@@ -343,7 +443,7 @@ fn with_no_xdg_data_home_the_data_folder_is_in_the_home_folder() {
 #[test]
 fn an_xdg_data_home_that_is_empty_or_not_absolute_is_not_used() {
     for (test, value) in [("xdg-empty", ""), ("xdg-relative", "some/folder")] {
-        let repository = Repository::new(test, CHECK, REPLY);
+        let repository = Repository::new(test, CHECK, WORK);
         let output = repository
             .lira()
             .env("XDG_DATA_HOME", value)
@@ -363,7 +463,7 @@ fn an_xdg_data_home_that_is_empty_or_not_absolute_is_not_used() {
 
 #[test]
 fn with_no_folder_for_the_data_it_is_an_error() {
-    let repository = Repository::new("no-data", CHECK, REPLY);
+    let repository = Repository::new("no-data", CHECK, WORK);
     let output = repository
         .lira()
         .env_remove("XDG_DATA_HOME")
@@ -383,9 +483,9 @@ fn with_no_folder_for_the_data_it_is_an_error() {
 fn the_harness_is_the_program_that_lira_harness_names() {
     // The Lira file names a program too, and that one is not there.
     let lira_file = format!("{CHECK}[harness]\nprogram = \"not-there\"\n");
-    let repository = Repository::new("named", &lira_file, REPLY);
+    let repository = Repository::new("named", &lira_file, WORK);
     let other = repository.top.join("other").join("my-harness");
-    program(&other, &format!("{START}touch \"$here/started\"\n{REPLY}"));
+    program(&other, &format!("{START}touch \"$here/started\"\n{WORK}"));
     let output = repository
         .lira()
         .env("LIRA_HARNESS", &other)
@@ -402,14 +502,14 @@ fn the_harness_is_the_program_that_lira_harness_names() {
 #[test]
 fn with_no_lira_harness_the_harness_is_the_program_of_the_lira_file() {
     let lira_file = format!("{CHECK}[harness]\nprogram = \"file-harness\"\n");
-    let repository = Repository::new("file-harness", &lira_file, REPLY);
+    let repository = Repository::new("file-harness", &lira_file, WORK);
     // Two programs in a folder of `PATH`: the one that the Lira file names,
     // and the one that Lira starts when nothing names a program.
     let bin = repository.top.join("bin");
     for name in ["file-harness", "claude-agent-acp"] {
         program(
             &bin.join(name),
-            &format!("{START}touch \"$here/started-{name}\"\n{REPLY}"),
+            &format!("{START}touch \"$here/started-{name}\"\n{WORK}"),
         );
     }
     for set in [false, true] {
@@ -429,13 +529,10 @@ fn with_no_lira_harness_the_harness_is_the_program_of_the_lira_file() {
 // spec(Harnesses): When `LIRA_HARNESS` is not set and the Lira file has no `harness.program`, the harness is the program `claude-agent-acp`.
 #[test]
 fn with_no_lira_harness_and_no_key_the_harness_is_claude_agent_acp() {
-    let repository = Repository::new("default", CHECK, REPLY);
+    let repository = Repository::new("default", CHECK, WORK);
     // A program with that name, in a folder of `PATH`.
     let default = repository.top.join("bin").join("claude-agent-acp");
-    program(
-        &default,
-        &format!("{START}touch \"$here/started\"\n{REPLY}"),
-    );
+    program(&default, &format!("{START}touch \"$here/started\"\n{WORK}"));
     for set in [false, true] {
         let _ = fs::remove_file(repository.top.join("bin").join("started"));
         let mut lira = repository.lira();
@@ -451,7 +548,7 @@ fn with_no_lira_harness_and_no_key_the_harness_is_claude_agent_acp() {
 
 #[test]
 fn a_path_in_lira_harness_starts_at_the_current_folder() {
-    let repository = Repository::new("relative-harness", CHECK, REPLY);
+    let repository = Repository::new("relative-harness", CHECK, WORK);
     // The harness starts in the worktree, and the path does not start
     // there.
     let output = repository
@@ -466,7 +563,7 @@ fn a_path_in_lira_harness_starts_at_the_current_folder() {
 
 #[test]
 fn a_harness_that_is_not_there_is_an_error_and_leaves_no_worktree() {
-    let repository = Repository::new("no-harness", CHECK, REPLY);
+    let repository = Repository::new("no-harness", CHECK, WORK);
     let nothing = repository.top.join("nothing-here");
     let output = repository
         .lira()
@@ -488,7 +585,7 @@ fn a_harness_that_is_not_there_is_an_error_and_leaves_no_worktree() {
 
 #[test]
 fn a_harness_that_ends_before_the_agent_gets_the_message_leaves_no_worktree() {
-    let repository = Repository::new("ends-early", CHECK, REPLY);
+    let repository = Repository::new("ends-early", CHECK, WORK);
     program(
         &repository.harness.join("agent"),
         "#!/bin/sh\necho 'I can not start' >&2\nexit 3\n",
@@ -515,7 +612,7 @@ fn is_for_a_run(branch: &str) -> bool {
 // spec(lira run): The new worktree starts on a branch `lira/run-<8 letters or digits>`.
 #[test]
 fn the_new_worktree_starts_on_a_branch_for_a_run() {
-    let repository = Repository::new("branch", CHECK, REPLY);
+    let repository = Repository::new("branch", CHECK, WORK);
     passed(&repository.run());
     let first = repository.kept("branch");
     assert!(is_for_a_run(&first), "{first}");
@@ -535,7 +632,7 @@ fn the_new_worktree_starts_on_a_branch_for_a_run() {
 // spec(lira run): The instructions tell the agent to give the branch a name that says what the work is, such as `fix/login-timeout`.
 #[test]
 fn the_instructions_tell_the_agent_to_name_the_branch() {
-    let repository = Repository::new("instructions", CHECK, REPLY);
+    let repository = Repository::new("instructions", CHECK, WORK);
     passed(&repository.run());
     let message = repository.message();
     let branch = repository.kept("branch");
@@ -551,7 +648,7 @@ fn the_instructions_tell_the_agent_to_name_the_branch() {
 
 #[test]
 fn a_request_is_given_to_the_agent_as_it_is() {
-    let repository = Repository::new("as-it-is", CHECK, REPLY);
+    let repository = Repository::new("as-it-is", CHECK, WORK);
     let request = "Use {branch} and \"quotes\"\n\nand a second paragraph: é";
     let output = repository.lira().args(["run", request]).output().unwrap();
     passed(&output);
@@ -560,12 +657,8 @@ fn a_request_is_given_to_the_agent_as_it_is() {
 
 #[test]
 fn lira_says_on_which_branch_the_work_is() {
-    let work = r#"git branch -m feat/add-greeting
-echo hello > greeting.txt
-git add greeting.txt
-git commit --quiet --message 'Add a greeting'
-"#;
-    let repository = Repository::new("says-branch", CHECK, &format!("{work}{REPLY}"));
+    let work = "git branch -m feat/add-greeting\n";
+    let repository = Repository::new("says-branch", CHECK, &format!("{work}{WORK}"));
     let output = repository.run();
     passed(&output);
     let wrote = errors(&output);
@@ -575,7 +668,10 @@ git commit --quiet --message 'Add a greeting'
     // What the agent said is there for the person to read.
     assert!(wrote.contains("I made the file."), "{wrote}");
     // The output is for the address of the pull request, and no other thing.
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
     // The repository has the branch with the commit of the agent.
     assert_eq!(
         git_ok(
@@ -591,7 +687,7 @@ git commit --quiet --message 'Add a greeting'
 #[test]
 fn the_agent_gets_the_ai_model_of_the_lira_file() {
     let lira_file = format!("{CHECK}[models]\nagent = \"small-model\"\n");
-    let repository = Repository::new("model", &lira_file, REPLY);
+    let repository = Repository::new("model", &lira_file, WORK);
     passed(&repository.run());
     // The harness had another AI model for the conversation, and Lira
     // chose this one before the agent got the message.
@@ -601,7 +697,7 @@ fn the_agent_gets_the_ai_model_of_the_lira_file() {
     // The AI model is a text. Another kind of value is an error, and no
     // agent starts.
     let lira_file = format!("{CHECK}[models]\nagent = 5\n");
-    let repository = Repository::new("model-number", &lira_file, REPLY);
+    let repository = Repository::new("model-number", &lira_file, WORK);
     let error = failed(&repository.run());
     assert!(error.contains("`models.agent`"), "{error}");
     assert!(!repository.harness.join("folder").exists());
@@ -609,7 +705,7 @@ fn the_agent_gets_the_ai_model_of_the_lira_file() {
 
 #[test]
 fn with_no_ai_model_in_the_lira_file_lira_chooses_none() {
-    let repository = Repository::new("no-model", CHECK, REPLY);
+    let repository = Repository::new("no-model", CHECK, WORK);
     passed(&repository.run());
     assert!(!repository.harness.join("model").exists());
     let text = fs::read_to_string(repository.harness.join("received")).unwrap();
@@ -644,7 +740,7 @@ fn lira_says_yes_when_the_agent_asks_for_permission() {
     let work = r#"say '{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-1","title":"Write a.txt","kind":"edit"},"options":[{"optionId":"no","name":"No","kind":"reject_once"},{"optionId":"yes","name":"Yes","kind":"allow_once"}]}}'
 next
 "#;
-    let repository = Repository::new("permission", CHECK, &format!("{work}{REPLY}"));
+    let repository = Repository::new("permission", CHECK, &format!("{work}{WORK}"));
     passed(&repository.run());
     let answer = repository.received(4);
     let expected =
@@ -684,7 +780,7 @@ fn a_harness_that_ends_while_the_agent_works_is_a_failure_and_the_worktree_stays
 
 #[test]
 fn lira_run_takes_one_request() {
-    let repository = Repository::new("usage", CHECK, REPLY);
+    let repository = Repository::new("usage", CHECK, WORK);
     for args in [
         &["run"][..],
         &["run", "one", "two"],
@@ -705,7 +801,7 @@ fn lira_run_takes_one_request() {
 
 #[test]
 fn a_request_can_start_with_a_dash() {
-    let repository = Repository::new("dash", CHECK, REPLY);
+    let repository = Repository::new("dash", CHECK, WORK);
     let request = "- Add a greeting file\n- Keep it short";
     let output = repository.lira().args(["run", request]).output().unwrap();
     passed(&output);
@@ -714,7 +810,7 @@ fn a_request_can_start_with_a_dash() {
 
 #[test]
 fn a_folder_that_is_no_repository_is_an_error() {
-    let repository = Repository::new("no-repository", CHECK, REPLY);
+    let repository = Repository::new("no-repository", CHECK, WORK);
     let output = repository
         .lira()
         .current_dir(repository.top.join("home"))
@@ -728,7 +824,7 @@ fn a_folder_that_is_no_repository_is_an_error() {
 
 #[test]
 fn lira_run_works_in_a_folder_inside_the_repository() {
-    let repository = Repository::new("inside", CHECK, REPLY);
+    let repository = Repository::new("inside", CHECK, WORK);
     let inside = repository.root.join("some").join("folder");
     fs::create_dir_all(&inside).unwrap();
     let output = repository
@@ -744,6 +840,421 @@ fn lira_run_works_in_a_folder_inside_the_repository() {
         folder.starts_with(Repository::worktrees(&data)),
         "{folder:?}"
     );
+}
+
+// spec(lira run): Lira opens a draft pull request at the first commit of the agent.
+// spec(Pull requests): Lira opens the pull request of an agent as a draft, at the first commit of the agent.
+#[test]
+fn lira_opens_a_draft_pull_request_at_the_first_commit_of_the_agent() {
+    // The agent finishes a tool call with no commit, and then one with a
+    // commit. It ends its reply only after the pull request is there.
+    let work = r#"git branch -m feat/add-greeting
+ended
+sleep 0.3
+cp "$here/../bin/calls" "$here/calls-before-the-commit" 2>/dev/null
+commit greeting 'Add a greeting'
+ended
+called 'pr create' && touch "$here/opened-before-the-end"
+"#;
+    let repository = Repository::new("draft", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    // No pull request before the first commit, and one before the reply
+    // ended.
+    let before = fs::read_to_string(repository.harness.join("calls-before-the-commit"));
+    assert!(!before.unwrap_or_default().contains("pr create"));
+    assert!(repository.harness.join("opened-before-the-end").exists());
+    // It is one pull request, and it is a draft, from the branch of the
+    // agent into the main branch.
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    let start = "pr create --draft --base main --head feat/add-greeting --title Add a greeting ";
+    assert!(created[0].starts_with(start), "{created:?}");
+    // The remote has the branch, with the commit of the agent.
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("feat/add-greeting"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    // `gh` ran in the worktree, so the pull request is in its repository.
+    assert_eq!(
+        Path::new(repository.gh("created-in").trim())
+            .canonicalize()
+            .unwrap(),
+        folder.canonicalize().unwrap()
+    );
+}
+
+// spec(Pull requests): The description of a draft pull request is the progress note.
+// spec(Pull requests): The progress note has the headings `Done`, `Next` and `Decisions`.
+#[test]
+fn the_description_of_the_draft_is_the_progress_note() {
+    let work = "commit greeting 'Add a greeting'\nended\ncalled 'pr create'\n";
+    let repository = Repository::new("note", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    let note = repository.gh("created");
+    let lines: Vec<&str> = note.lines().collect();
+    let place = |heading: &str| {
+        lines
+            .iter()
+            .position(|line| *line == heading)
+            .unwrap_or_else(|| panic!("the note has no `{heading}`:\n{note}"))
+    };
+    let (done, next, decisions) = (place("## Done"), place("## Next"), place("## Decisions"));
+    assert!(done < next && next < decisions, "{note}");
+    // These are all of its headings.
+    assert_eq!(
+        lines.iter().filter(|line| line.starts_with('#')).count(),
+        3,
+        "{note}"
+    );
+    // What is done is the commit of the agent.
+    assert!(lines[done..next].contains(&"- Add a greeting"), "{note}");
+    // It says what is next, and where the decisions of the agent come.
+    assert!(
+        lines[next..decisions].contains(&"The agent works on the request."),
+        "{note}"
+    );
+    assert!(
+        lines[decisions..].contains(&"The agent lists them when its work is complete."),
+        "{note}"
+    );
+}
+
+// spec(lira run): The title of the pull request is the subject of the first commit.
+#[test]
+fn the_title_of_the_pull_request_is_the_subject_of_the_first_commit() {
+    let work = "commit one 'Add the first file'\ncommit two 'Add the second file'\n";
+    let repository = Repository::new("title", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(
+        created[0].contains("--title Add the first file --body-file"),
+        "{created:?}"
+    );
+}
+
+// spec(lira run): It prints the address of the pull request.
+#[test]
+fn lira_run_prints_the_address_of_the_pull_request() {
+    let repository = Repository::new("address", CHECK, WORK);
+    let output = repository.run();
+    passed(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+}
+
+#[test]
+fn lira_pushes_each_later_commit_and_brings_the_progress_note_up_to_date() {
+    let work = r#"git branch -m feat/two
+commit one 'Add the first file'
+ended
+called 'pr create'
+commit two 'Add the second file'
+git rev-parse HEAD > "$here/second"
+ended
+called 'pr edit'
+git rev-parse --verify --quiet refs/heads/feat/two > /dev/null
+(cd "$here/../remote/owner/name.git" && git rev-parse refs/heads/feat/two) > "$here/remote-at-the-edit"
+"#;
+    let repository = Repository::new("later", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    // The remote had the second commit while the agent still worked.
+    assert_eq!(
+        repository.kept("remote-at-the-edit"),
+        repository.kept("second")
+    );
+    assert_eq!(
+        repository.on_remote("feat/two"),
+        Some(repository.kept("second"))
+    );
+    let edited = repository.calls("pr edit");
+    assert!(edited[0].starts_with(&format!("pr edit {ADDRESS} --body-file ")));
+    let note = repository.gh("edited");
+    assert!(
+        note.contains("- Add the first file\n- Add the second file\n"),
+        "{note}"
+    );
+    assert_eq!(repository.calls("pr create").len(), 1);
+}
+
+#[test]
+fn a_commit_with_no_tool_call_is_in_the_pull_request_when_the_reply_ends() {
+    // This harness says nothing about its tool calls.
+    let repository = Repository::new("at-the-end", CHECK, WORK);
+    let output = repository.run();
+    passed(&output);
+    let folder = PathBuf::from(repository.kept("folder"));
+    let branch = repository.kept("branch");
+    // The agent gave the branch no name, so it has the name that it
+    // started with.
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let created = repository.calls("pr create");
+    assert!(
+        created[0].contains(&format!("--head {branch} ")),
+        "{created:?}"
+    );
+}
+
+// spec(lira run): When the agent makes no commit, Lira opens no pull request, and `lira run` fails.
+#[test]
+fn with_no_commit_there_is_no_pull_request() {
+    let work = "echo half > half.txt\nended\n";
+    let repository = Repository::new("no-commit", CHECK, &format!("{work}{REPLY}"));
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("made no commit"), "{error}");
+    assert_eq!(repository.calls("pr "), Vec::<String>::new());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    // Nothing went to the remote.
+    assert_eq!(
+        git_ok(&repository.remote, &["for-each-ref", "--format=%(refname)"]),
+        "refs/heads/main"
+    );
+    // The worktree stays, with what the agent did, and Lira says where.
+    let folder = repository.kept("folder");
+    assert!(error.contains(&format!("`{folder}`")), "{error}");
+    assert!(Path::new(&folder).join("half.txt").exists());
+    assert!(error.contains("I made the file."), "{error}");
+}
+
+#[test]
+fn when_the_work_is_complete_the_progress_note_has_what_the_agent_wrote() {
+    // The draft is there before the reply ends.
+    let work = "commit greeting 'Add a greeting'\nended\ncalled 'pr create'\n";
+    let repository = Repository::new("complete", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    assert!(!repository.gh("created").contains("I made the file."));
+    let note = repository.gh("edited");
+    let decisions = note.split("## Decisions").nth(1).unwrap();
+    assert!(decisions.contains("I made the file."), "{note}");
+    assert!(note.contains("- Add a greeting\n"), "{note}");
+}
+
+/// A repository whose remote has a branch `feat/taken` of another person
+/// already. It returns the commit of that branch too.
+fn with_a_taken_branch(test: &str, work: &str) -> (Repository, Option<String>) {
+    let repository = Repository::new(test, CHECK, work);
+    git_ok(&repository.seed, &["branch", "feat/taken"]);
+    let remote = repository.remote.to_str().unwrap();
+    git_ok(&repository.seed, &["push", "--quiet", remote, "feat/taken"]);
+    let theirs = repository.on_remote("feat/taken");
+    assert!(theirs.is_some());
+    (repository, theirs)
+}
+
+// spec(lira run): When the remote has a branch with the name that the agent chose, Lira tells the agent to give its branch another name.
+#[test]
+fn the_agent_renames_a_branch_that_the_remote_has_already() {
+    // The agent gives its branch another name when a second message comes.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}next\nprintf '%s\\n' \"$line\" > \"$here/second\"\ngit branch -m feat/free\n{REPLY}"
+    );
+    let (repository, theirs) = with_a_taken_branch("taken", &work);
+    let output = repository.run();
+    passed(&output);
+    // Lira told the agent which name the remote has, and how to change it.
+    let second = repository.kept("second");
+    assert!(second.contains("\"method\":\"session/prompt\""), "{second}");
+    assert!(second.contains("`feat/taken`"), "{second}");
+    assert!(second.contains("git branch -m"), "{second}");
+    // The branch of the other person is as it was, and the work is on the
+    // branch with the new name, and on no other branch.
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("feat/free"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(repository.on_remote("feat/taken-2"), None);
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head feat/free "), "{created:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), ADDRESS);
+    // The progress note has what the agent wrote at the end of its work,
+    // and not its answer to the second message.
+    let note = repository.gh("created");
+    assert!(note.contains("- Add a greeting\n"), "{note}");
+}
+
+#[test]
+fn a_new_branch_is_another_name_for_a_taken_one() {
+    // The agent does not give its branch another name. It makes a new
+    // branch for its work, and leaves the one with the taken name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}next\necho asked >> \"$here/asked\"\ngit checkout --quiet -b feat/free\n{REPLY}"
+    );
+    let (repository, theirs) = with_a_taken_branch("taken-new-branch", &work);
+    passed(&repository.run());
+    assert_eq!(repository.kept("asked").lines().count(), 1);
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("feat/free"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head feat/free "), "{created:?}");
+}
+
+#[test]
+fn a_new_branch_with_no_work_is_not_another_name_for_a_taken_one() {
+    // The new branch of the agent starts before its commit, so the work
+    // stays on the branch with the taken name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}while :; do\nnext\necho asked >> \"$here/asked\"\ngit checkout --quiet -B feat/free HEAD~1\n{REPLY}done\n"
+    );
+    let (repository, _) = with_a_taken_branch("taken-empty-branch", &work);
+    let error = failed(&repository.run());
+    assert!(error.contains("`feat/taken`"), "{error}");
+    assert!(error.contains("3 messages"), "{error}");
+    assert!(!error.contains("made no commit"), "{error}");
+    assert_eq!(repository.kept("asked").lines().count(), 3);
+    assert_eq!(repository.on_remote("feat/free"), None);
+}
+
+#[test]
+fn an_agent_that_keeps_a_taken_name_is_a_failure_after_3_messages() {
+    // The agent answers each message, and never changes the name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}while :; do\nnext\necho asked >> \"$here/asked\"\n{REPLY}done\n"
+    );
+    let (repository, theirs) = with_a_taken_branch("never-renamed", &work);
+    let error = failed(&repository.run());
+    assert!(error.contains("`feat/taken`"), "{error}");
+    assert!(error.contains("3 messages"), "{error}");
+    assert_eq!(repository.kept("asked").lines().count(), 3);
+    // Lira pushed nothing, and opened no pull request.
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    assert_eq!(repository.calls("pr create"), Vec::<String>::new());
+    let branches = git_ok(&repository.remote, &["branch", "--list"]);
+    assert_eq!(branches.lines().count(), 2, "{branches}");
+}
+
+#[test]
+fn a_commit_that_the_agent_changed_after_the_push_is_pushed_again() {
+    let work = r#"git branch -m fix/amend
+commit one 'Add a file'
+ended
+called 'pr create'
+echo more >> one.txt
+git commit --quiet --all --amend --message 'Add a better file'
+ended
+"#;
+    let repository = Repository::new("amend", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("fix/amend"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert!(repository.gh("edited").contains("- Add a better file\n"));
+    assert_eq!(repository.calls("pr create").len(), 1);
+}
+
+#[test]
+fn a_new_name_for_the_branch_after_the_push_does_not_move_the_pull_request() {
+    let work = r#"git branch -m fix/first-name
+commit one 'Add a file'
+ended
+called 'pr create'
+git branch -m fix/second-name
+commit two 'Add one more file'
+ended
+"#;
+    let repository = Repository::new("renamed", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("fix/first-name"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(repository.on_remote("fix/second-name"), None);
+    assert_eq!(repository.calls("pr create").len(), 1);
+}
+
+#[test]
+fn lira_tries_again_when_github_did_not_open_the_pull_request() {
+    // `gh` fails the first time, and works when the reply ends.
+    let work = r#"commit one 'Add a file'
+touch "$here/../bin/no-create"
+ended
+# The first try is over when `gh` said no.
+until [ -e "$here/../bin/refused" ]; do sleep 0.05; done
+rm "$here/../bin/no-create"
+"#;
+    let repository = Repository::new("again", CHECK, &format!("{work}{REPLY}"));
+    let output = repository.run();
+    passed(&output);
+    assert_eq!(repository.calls("pr create").len(), 2);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+}
+
+#[test]
+fn a_pull_request_that_github_does_not_open_is_a_failure_that_says_why() {
+    let repository = Repository::new("no-create", CHECK, WORK);
+    fs::write(repository.top.join("bin").join("no-create"), "").unwrap();
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(
+        error.contains("the stand-in for gh makes no pull request"),
+        "{error}"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    // The work is on the remote, and Lira says on which branch, and where
+    // the worktree is.
+    let branch = repository.kept("branch");
+    let folder = repository.kept("folder");
+    assert!(repository.on_remote(&branch).is_some());
+    assert!(error.contains(&format!("`{branch}`")), "{error}");
+    assert!(error.contains(&format!("`{folder}`")), "{error}");
+}
+
+#[test]
+fn a_push_that_the_remote_refuses_is_a_failure_that_shows_what_git_wrote() {
+    let repository = Repository::new("no-push", CHECK, WORK);
+    program(
+        &repository.remote.join("hooks").join("pre-receive"),
+        "#!/bin/sh\necho 'this remote takes no push' >&2\nexit 1\n",
+    );
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("this remote takes no push"), "{error}");
+    assert_eq!(repository.calls("pr "), Vec::<String>::new());
+    let folder = repository.kept("folder");
+    assert!(error.contains(&format!("`{folder}`")), "{error}");
+}
+
+#[test]
+fn with_no_login_lira_run_stops_before_it_makes_a_worktree() {
+    let repository = Repository::new("no-login", CHECK, WORK);
+    fs::write(repository.top.join("bin").join("no-login"), "").unwrap();
+    let error = failed(&repository.run());
+    assert!(error.contains("`gh auth login`"), "{error}");
+    assert!(!repository.harness.join("folder").exists());
+    assert!(Repository::has_no_worktree(
+        &repository.top.join("xdg").join("lira")
+    ));
+    assert_eq!(repository.run_branches(), "");
+}
+
+#[test]
+fn a_harness_that_ends_after_the_first_commit_leaves_the_draft_and_lira_names_it() {
+    let work = "commit one 'Add a file'\nended\ncalled 'pr create'\nexit 9\n";
+    let repository = Repository::new("ends-with-draft", CHECK, work);
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains(ADDRESS), "{error}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
 /// If a process with this number runs. A process that ended, and that its
@@ -805,6 +1316,238 @@ while :; do sleep 1; done
 }
 
 #[test]
+fn the_pull_request_keeps_the_work_of_the_agent_when_the_worktree_goes_to_another_branch() {
+    // After the draft is there, the agent looks at another branch, with a
+    // commit that is not its work for the request.
+    let work = r#"git branch -m fix/mine
+commit one 'Add a file'
+git rev-parse HEAD > "$here/mine"
+ended
+called 'pr create'
+git checkout --quiet -b theirs HEAD~1
+commit other 'A change of another person'
+ended
+sleep 0.5
+"#;
+    let repository = Repository::new("other-branch", CHECK, &format!("{work}{REPLY}"));
+    let output = repository.run();
+    passed(&output);
+    assert_eq!(
+        repository.on_remote("fix/mine"),
+        Some(repository.kept("mine"))
+    );
+    assert_eq!(repository.on_remote("theirs"), None);
+    let calls = repository.calls("pr ");
+    assert_eq!(repository.calls("pr create").len(), 1, "{calls:?}");
+    for file in ["created", "edited"] {
+        let note = fs::read_to_string(repository.top.join("bin").join(file)).unwrap_or_default();
+        assert!(!note.contains("another person"), "{note}");
+    }
+}
+
+#[test]
+fn a_new_branch_that_the_agent_makes_for_its_work_is_the_branch_of_the_pull_request() {
+    // This agent does not give the branch a new name. It makes a new one.
+    let work = "git checkout --quiet -b feat/new-branch\n";
+    let repository = Repository::new("new-branch", CHECK, &format!("{work}{WORK}"));
+    passed(&repository.run());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("feat/new-branch"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let created = repository.calls("pr create");
+    assert!(
+        created[0].contains("--head feat/new-branch "),
+        "{created:?}"
+    );
+    assert_eq!(repository.on_remote(&repository.kept("branch")), None);
+}
+
+#[test]
+fn a_branch_that_was_there_before_the_run_is_not_the_work_of_the_agent() {
+    // The repository has a branch of the person, with a commit. The agent
+    // goes to it, and makes no commit of its own.
+    let work = "git checkout --quiet mine\nended\n";
+    let repository = Repository::new("old-branch", CHECK, &format!("{work}{REPLY}"));
+    git_ok(&repository.root, &["checkout", "--quiet", "-b", "mine"]);
+    fs::write(repository.root.join("mine.txt"), "mine\n").unwrap();
+    git_ok(&repository.root, &["add", "--all"]);
+    git_ok(
+        &repository.root,
+        &["commit", "--quiet", "--message", "My own work"],
+    );
+    git_ok(&repository.root, &["checkout", "--quiet", "--detach"]);
+    // A tag with the same name changes how git prints the short name of
+    // the branch.
+    git_ok(&repository.root, &["tag", "mine", "HEAD~1"]);
+    let error = failed(&repository.run());
+    assert!(error.contains("made no commit"), "{error}");
+    assert_eq!(repository.on_remote("mine"), None);
+    assert_eq!(repository.calls("pr "), Vec::<String>::new());
+}
+
+#[test]
+fn an_agent_that_takes_its_commits_back_after_the_draft_is_a_failure() {
+    let work = r#"git branch -m fix/taken-back
+commit one 'Add a file'
+git rev-parse HEAD > "$here/one"
+ended
+called 'pr create'
+git reset --quiet --hard HEAD~1
+ended
+"#;
+    let repository = Repository::new("taken-back", CHECK, &format!("{work}{REPLY}"));
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("took its commits back"), "{error}");
+    assert!(error.contains(ADDRESS), "{error}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    // Lira removes no work from the remote.
+    assert_eq!(
+        repository.on_remote("fix/taken-back"),
+        Some(repository.kept("one"))
+    );
+}
+
+impl Repository {
+    /// Puts a program before `git` that loses the answer to one push: the
+    /// remote takes the push, and git says that it failed. It does so
+    /// while the file `lose-push` is there, one time.
+    fn git_that_loses_a_push(&self) {
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+        let script = format!(
+            r#"#!/bin/sh
+here="$(dirname "$0")"
+if [ "$1" = push ] && [ -e "$here/lose-push" ]; then
+  # With the file `ask-too`, the next question to the remote fails too.
+  [ -e "$here/ask-too" ] && touch "$here/lose-ask"
+  "{real}" "$@"
+  echo "the connection was lost" >&2
+  rm "$here/lose-push"
+  exit 1
+fi
+if [ "$1" = ls-remote ] && [ -e "$here/lose-ask" ]; then
+  echo "the connection was lost" >&2
+  rm "$here/lose-ask"
+  exit 1
+fi
+exec "{real}" "$@"
+"#
+        );
+        program(&self.top.join("bin").join("git"), &script);
+    }
+}
+
+#[test]
+fn a_push_whose_answer_got_lost_does_not_stop_the_next_push() {
+    let work = r#"git branch -m fix/lost
+commit one 'Add a file'
+ended
+called 'pr create'
+touch "$here/../bin/lose-push"
+commit two 'Add a second file'
+ended
+until [ ! -e "$here/../bin/lose-push" ]; do sleep 0.05; done
+commit three 'Add a third file'
+ended
+"#;
+    let repository = Repository::new("lost-push", CHECK, &format!("{work}{REPLY}"));
+    repository.git_that_loses_a_push();
+    let output = repository.run();
+    passed(&output);
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("fix/lost"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+}
+
+#[test]
+fn a_first_push_whose_answer_got_lost_makes_no_second_branch() {
+    let work = r#"git branch -m fix/lost-first
+touch "$here/../bin/lose-push"
+commit one 'Add a file'
+ended
+until [ ! -e "$here/../bin/lose-push" ]; do sleep 0.05; done
+sleep 0.3
+"#;
+    let repository = Repository::new("lost-first-push", CHECK, &format!("{work}{REPLY}"));
+    repository.git_that_loses_a_push();
+    passed(&repository.run());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("fix/lost-first"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(repository.on_remote("fix/lost-first-2"), None);
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head fix/lost-first "), "{created:?}");
+}
+
+#[test]
+fn a_pull_request_whose_answer_got_lost_is_found_again() {
+    let repository = Repository::new("lost-create", CHECK, WORK);
+    fs::write(repository.top.join("bin").join("lose-create"), "").unwrap();
+    let output = repository.run();
+    passed(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+    // Lira asked GitHub for the pull request of the branch, and opened no
+    // second one.
+    assert_eq!(repository.calls("pr create").len(), 1);
+    let branch = repository.kept("branch");
+    let listed = repository.calls("pr list");
+    assert!(
+        listed[0].contains(&format!("--head {branch} ")),
+        "{listed:?}"
+    );
+    // A pull request from a copy of the repository on GitHub can have a
+    // branch with the same name. Lira asks for one of this repository.
+    assert!(listed[0].contains("isCrossRepository"), "{listed:?}");
+    assert!(
+        listed[0].contains("select(.isCrossRepository | not)"),
+        "{listed:?}"
+    );
+    // Lira does not know which description the pull request got, so it
+    // writes the description again.
+    let edited = repository.calls("pr edit");
+    assert_eq!(edited.len(), 1, "{edited:?}");
+    assert!(repository.gh("edited").contains("- Add a greeting\n"));
+}
+
+#[test]
+fn the_agent_does_not_wait_while_lira_opens_the_pull_request() {
+    // GitHub does not answer until the agent has its permission. The agent
+    // asks for the permission after Lira started to open the pull request.
+    let work = r#"commit one 'Add a file'
+ended
+until [ -e "$here/../bin/create-started" ]; do sleep 0.05; done
+say '{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-2","title":"Write b.txt","kind":"edit"},"options":[{"optionId":"yes","name":"Yes","kind":"allow_once"}]}}'
+next
+touch "$here/../bin/go"
+"#;
+    let repository = Repository::new("slow-github", CHECK, &format!("{work}{REPLY}"));
+    fs::write(repository.top.join("bin").join("hold-create"), "").unwrap();
+    let output = repository.run();
+    passed(&output);
+    // GitHub got its sign from the agent, and did not give up before.
+    assert!(!repository.top.join("bin").join("gave-up").exists());
+    assert_eq!(repository.calls("pr create").len(), 1);
+}
+
+#[test]
 fn a_harness_that_lira_can_not_guard_does_not_start() {
     let repository = Repository::new("no-guard", CHECK, REPLY);
     // This harness needs no other program, and it answers nothing.
@@ -841,4 +1584,88 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
     assert!(Repository::has_no_worktree(
         &repository.top.join("xdg").join("lira")
     ));
+}
+
+#[test]
+fn a_commit_that_comes_after_the_reply_is_in_the_pull_request() {
+    // Lira needs the harness after the reply, to ask for another name of
+    // the branch. So a child of the harness can still make a commit then.
+    // This one makes it while Lira writes the progress note at the end.
+    let work = r#"git branch -m fix/late-commit
+commit one 'Add a file'
+ended
+called 'pr create'
+(until [ -e "$here/../bin/edited" ]; do sleep 0.05; done; commit late 'A late commit'; sleep 30) > /dev/null 2>&1 &
+echo "$!" > "$here/child"
+"#;
+    let repository = Repository::new("late-child", CHECK, &format!("{work}{REPLY}"));
+    fs::write(repository.top.join("bin").join("slow-edit"), "").unwrap();
+    passed(&repository.run());
+    // Lira looked one more time after it stopped the harness.
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        git_ok(&folder, &["log", "-1", "--format=%s"]),
+        "A late commit"
+    );
+    assert_eq!(
+        repository.on_remote("fix/late-commit"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let note = repository.gh("edited");
+    assert!(note.contains("- A late commit\n"), "{note}");
+    // Lira stopped the harness and its child, so nothing changes the work
+    // after that look.
+    assert!(!runs(&repository.kept("child")));
+}
+
+#[test]
+fn a_first_push_that_lira_could_not_ask_about_makes_no_second_branch() {
+    // The remote takes the first push. Its answer gets lost, and so does
+    // the answer when Lira asks the remote for the branch. Then the agent
+    // gives its branch another name.
+    let work = r#"git branch -m fix/first-name
+touch "$here/../bin/lose-push"
+commit one 'Add a file'
+ended
+until [ ! -e "$here/../bin/lose-push" ] && [ ! -e "$here/../bin/lose-ask" ]; do sleep 0.05; done
+sleep 0.3
+git branch -m fix/second-name
+commit two 'Add a second file'
+ended
+"#;
+    let repository = Repository::new("lost-push-and-ask", CHECK, &format!("{work}{REPLY}"));
+    repository.git_that_loses_a_push();
+    fs::write(repository.top.join("bin").join("ask-too"), "").unwrap();
+    passed(&repository.run());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote("fix/first-name"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(repository.on_remote("fix/second-name"), None);
+    let created = repository.calls("pr create");
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head fix/first-name "), "{created:?}");
+}
+
+#[test]
+fn commits_that_the_agent_takes_from_the_main_branch_are_not_its_work() {
+    // While the agent works, the main branch of the remote gets a commit
+    // of another person. The agent puts its work on top of it.
+    let work = r#"git branch -m fix/on-newer-main
+git clone --quiet "$(git remote get-url origin)" "$here/other"
+(cd "$here/other" && commit theirs 'A commit of another person' && git push --quiet origin main)
+git pull --quiet --rebase origin main
+commit mine 'Add my file'
+"#;
+    let repository = Repository::new("newer-main", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    let created = repository.calls("pr create");
+    assert!(
+        created[0].contains("--title Add my file --body-file"),
+        "{created:?}"
+    );
+    let note = repository.gh("created");
+    assert!(note.contains("- Add my file\n"), "{note}");
+    assert!(!note.contains("another person"), "{note}");
 }

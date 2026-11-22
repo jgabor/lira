@@ -85,7 +85,7 @@ branch of a change.
 
 ## Pull requests
 
-- An agent opens a pull request as a draft at its first commit.
+- Lira opens the pull request of an agent as a draft, at the first commit of the agent.
 - The description of a draft pull request is the progress note.
 - The progress note has the headings `Done`, `Next` and `Decisions`.
 - The description of a pull request for an issue ends with the line `Closes #<number>.`.
@@ -210,7 +210,11 @@ is success, 1 is a failure, and 2 is bad usage.
 - The request needs no issue.
 - The new worktree starts on a branch `lira/run-<8 letters or digits>`.
 - The instructions tell the agent to give the branch a name that says what the work is, such as `fix/login-timeout`.
-- The agent opens a draft pull request at its first commit.
+- When the remote has a branch with the name that the agent chose, Lira tells the agent to give its branch another name.
+- *Proposed:* After 3 such messages with no new name, `lira run` fails.
+- Lira opens a draft pull request at the first commit of the agent.
+- The title of the pull request is the subject of the first commit.
+- When the agent makes no commit, Lira opens no pull request, and `lira run` fails.
 - Lira runs the check and a Reviewer on the change, and marks the pull request ready for review.
 - A change from `lira run` always waits for you.
 - It prints the address of the pull request.

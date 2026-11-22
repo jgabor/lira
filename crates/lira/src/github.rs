@@ -2,6 +2,7 @@
 //! token of its own: `gh` uses its login.
 
 use crate::scores::Scores;
+use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -37,7 +38,7 @@ const HISTORY_LINES: &str = r#".data.repository as $r
     | "pull \($place) \(.number) \(.mergedAt // "open") \(.baseRefName)")"#;
 
 /// Stops with an error that names `gh auth login` when `gh` has no login.
-fn require_login(folder: &Path) -> Result<(), String> {
+pub fn require_login(folder: &Path) -> Result<(), String> {
     let status = Command::new("gh")
         .args(["auth", "status"])
         .current_dir(folder)
@@ -74,6 +75,105 @@ fn api(folder: &Path, args: &[&str]) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs `gh pr` in `folder` with these arguments, and returns what it
+/// prints.
+fn pull_request(folder: &Path, args: &[&OsStr]) -> Result<String, String> {
+    let output = Command::new("gh")
+        .arg("pr")
+        .args(args)
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run `gh`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`gh pr {}` failed: {}",
+            args[0].to_string_lossy(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A draft pull request that `open_draft` opened or found.
+pub struct Draft {
+    pub address: String,
+    /// If this call opened it. When it is not new, GitHub opened it in a
+    /// call before whose answer got lost, and its description can be an
+    /// older one.
+    pub new: bool,
+}
+
+/// Opens a draft pull request for the branch `head` of the repository in
+/// `folder`, into the branch `base`. The description is the text of the
+/// file `description`.
+pub fn open_draft(
+    folder: &Path,
+    base: &str,
+    head: &str,
+    title: &str,
+    description: &Path,
+) -> Result<Draft, String> {
+    let args = ["create", "--draft", "--base", base, "--head", head];
+    let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+    args.extend([OsStr::new("--title"), OsStr::new(title)]);
+    args.extend([OsStr::new("--body-file"), description.as_os_str()]);
+    let printed = match pull_request(folder, &args) {
+        Ok(printed) => printed,
+        // GitHub can open the pull request, and its answer can get lost.
+        // The branch is new and Lira's own, so an open pull request for it
+        // is this one.
+        Err(error) => {
+            let found = open_for(folder, head).ok().flatten().ok_or(error)?;
+            return Ok(Draft {
+                address: found,
+                new: false,
+            });
+        }
+    };
+    // `gh` prints the address of the new pull request on the last line.
+    match address_in(&printed) {
+        Some(address) => Ok(Draft { address, new: true }),
+        None => Err(format!(
+            "`gh pr create` did not print the address of the pull request. It printed:\n{}",
+            printed.trim()
+        )),
+    }
+}
+
+/// The last line of what `gh` printed, when it is an address.
+fn address_in(printed: &str) -> Option<String> {
+    let last = printed
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())?;
+    (last.starts_with("https://") || last.starts_with("http://")).then(|| last.to_string())
+}
+
+/// The address of the open pull request for the branch `head`, when there
+/// is one.
+fn open_for(folder: &Path, head: &str) -> Result<Option<String>, String> {
+    let args = ["list", "--head", head, "--state", "open"];
+    let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+    // A copy of the repository on GitHub can have an open pull request from
+    // a branch with the same name. Lira takes only one of this repository.
+    let same = ".[] | select(.isCrossRepository | not) | .url";
+    args.extend(["--json", "url,isCrossRepository", "--jq", same].map(OsStr::new));
+    Ok(address_in(&pull_request(folder, &args)?))
+}
+
+/// Gives the pull request at `address` the text of the file `description`
+/// as its description.
+pub fn describe(folder: &Path, address: &str, description: &Path) -> Result<(), String> {
+    let args = [
+        OsStr::new("edit"),
+        OsStr::new(address),
+        OsStr::new("--body-file"),
+        description.as_os_str(),
+    ];
+    pull_request(folder, &args).map(|_| ())
 }
 
 /// The scores of the main branch: those in the comment on the last merged

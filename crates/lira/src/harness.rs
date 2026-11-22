@@ -251,6 +251,8 @@ struct Work<'a> {
     /// The conversation of the message. A harness can have more than one.
     conversation: &'a str,
     permit: &'a mut dyn FnMut(&Permission) -> bool,
+    /// What Lira does each time the agent finished a tool call.
+    after_tool: &'a mut dyn FnMut(),
     text: String,
     /// The `messageId` of the newest part of the text.
     message: Option<Json>,
@@ -425,6 +427,21 @@ impl Harness {
         message: &str,
         permit: &mut dyn FnMut(&Permission) -> bool,
     ) -> Result<Reply, Error> {
+        self.send_and_watch(conversation, message, permit, &mut || {})
+    }
+
+    /// The same as `send`. Lira also calls `after_tool` each time the agent
+    /// finished a tool call, with success or with a failure. Lira reads
+    /// nothing from the harness while `after_tool` runs, so a permission
+    /// request waits for it. Work that takes long belongs on another
+    /// thread.
+    pub fn send_and_watch(
+        &mut self,
+        conversation: &str,
+        message: &str,
+        permit: &mut dyn FnMut(&Permission) -> bool,
+        after_tool: &mut dyn FnMut(),
+    ) -> Result<Reply, Error> {
         let params = Json::object([
             ("sessionId", Json::text(conversation)),
             (
@@ -438,6 +455,7 @@ impl Harness {
         let mut work = Work {
             conversation,
             permit,
+            after_tool,
             text: String::new(),
             message: None,
         };
@@ -513,8 +531,8 @@ impl Harness {
                         &Json::object([("jsonrpc", Json::text("2.0")), ("id", id.clone()), answer]),
                     )?;
                 }
-                // A note of the harness. Lira reads the text of the agent,
-                // and nothing else yet.
+                // A note of the harness. Lira reads the text of the agent
+                // and the end of each tool call, and nothing else yet.
                 (Some(theirs), None) => {
                     if let (Some(work), "session/update") = (work.as_deref_mut(), theirs)
                         && work.is_about(&message)
@@ -827,7 +845,8 @@ impl Work<'_> {
             == Some(self.conversation)
     }
 
-    /// Keeps the text of an update that is a part of what the agent says.
+    /// Keeps the text of an update that is a part of what the agent says,
+    /// and calls `after_tool` for an update that ends a tool call.
     fn update(&mut self, message: &Json) {
         let Some(update) = message
             .get("params")
@@ -835,7 +854,17 @@ impl Work<'_> {
         else {
             return;
         };
-        if update.get("sessionUpdate").and_then(Json::as_text) != Some("agent_message_chunk") {
+        let kind = update.get("sessionUpdate").and_then(Json::as_text);
+        if matches!(kind, Some("tool_call" | "tool_call_update")) {
+            // A tool call ends with one of these two. The harness can name
+            // a tool call for the first time when it has ended already.
+            let status = update.get("status").and_then(Json::as_text);
+            if matches!(status, Some("completed" | "failed")) {
+                (self.after_tool)();
+            }
+            return;
+        }
+        if kind != Some("agent_message_chunk") {
             return;
         }
         let content = update.get("content");

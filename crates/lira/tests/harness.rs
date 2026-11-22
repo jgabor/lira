@@ -226,6 +226,44 @@ say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"totalTo
 }
 
 #[test]
+fn lira_learns_of_each_tool_call_that_the_agent_finished() {
+    let update = |conversation: &str, kind: &str, status: &str| {
+        format!(
+            "say '{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"{conversation}\",\"update\":{{\"sessionUpdate\":\"{kind}\",\"toolCallId\":\"t-1\"{status}}}}}}}'\n"
+        )
+    };
+    let status = |status: &str| format!(",\"status\":\"{status}\"");
+    let script = [
+        "next\n".to_string(),
+        // A tool call that starts, runs, and ends.
+        update("c-1", "tool_call", &status("pending")),
+        update("c-1", "tool_call_update", &status("in_progress")),
+        update("c-1", "tool_call_update", ""),
+        update("c-1", "tool_call_update", &status("completed")),
+        // One that fails has ended too.
+        update("c-1", "tool_call_update", &status("failed")),
+        // One that is complete when the harness first names it.
+        update("c-1", "tool_call", &status("completed")),
+        // One of a conversation that Lira does not wait for.
+        update("c-2", "tool_call_update", &status("completed")),
+        // A status that this version of Lira does not know.
+        update("c-1", "tool_call_update", &status("a_new_status")),
+        "say '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"stopReason\":\"end_turn\"}}'\n"
+            .to_string(),
+    ]
+    .concat();
+    let stand_in = StandIn::new("tool-calls", &format!("{HELLO}{CONVERSATION}{script}"));
+    let mut harness = stand_in.start();
+    let conversation = harness.converse(&stand_in.folder, None).unwrap();
+    let mut ended = 0;
+    let reply = harness
+        .send_and_watch(&conversation, "Go.", &mut yes, &mut || ended += 1)
+        .unwrap();
+    assert_eq!(reply.stop, Stop::End);
+    assert_eq!(ended, 3);
+}
+
+#[test]
 fn the_reply_says_why_the_agent_stopped() {
     let reasons = [
         ("end_turn", Stop::End),
