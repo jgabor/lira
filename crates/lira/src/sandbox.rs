@@ -60,6 +60,13 @@ impl Sandbox {
 /// its own `/dev` and `/proc`; and an empty `/tmp` and `/run` of its own,
 /// which go away with the sandbox. The sandbox ends when Lira stops `bwrap`.
 ///
+/// What runs in the sandbox has no terminal: `--new-session` calls
+/// `setsid`. Otherwise, on a host that allows `TIOCSTI`, it could type a
+/// command into the terminal of Lira. `setsid` also takes it out of the
+/// process group of `bwrap`, which is the one that Lira stops. So the
+/// sandbox has its own processes too, with `--unshare-pid`: when `bwrap`
+/// ends, the system stops each process in the sandbox.
+///
 /// A program can talk to a socket on a read-only folder, and the sockets of
 /// the services of the host are in `/run`, such as the one of
 /// `systemd-run --user`. A service could change a file for the agent, so the
@@ -80,6 +87,8 @@ fn base() -> Command {
         "--tmpfs",
         "/run",
         "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
     ]);
     if let Ok(names) = Path::new("/etc/resolv.conf").canonicalize()
         && names.starts_with("/run")

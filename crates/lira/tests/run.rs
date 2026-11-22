@@ -1026,6 +1026,100 @@ git -C sub config remote.origin.receivepack "touch '$HOME/escaped-push'; git-rec
     );
 }
 
+#[test]
+fn git_in_the_main_worktree_reads_no_git_folder_of_the_agent() {
+    // git in the main worktree reads `commondir` and `config.worktree` in
+    // its git folder when they are there. Before the run, neither is
+    // there, and the repository has a configuration for each worktree.
+    // The agent makes them, and they name a configuration of the agent.
+    let work = r#"common="$(git rev-parse --path-format=absolute --git-common-dir)"
+cp -R "$common" "$here/../fake"
+git config --file "$here/../fake/config" core.fsmonitor "touch '$here/../escaped'"
+echo "$here/../fake" > "$common/commondir"
+git config --file "$common/config.worktree" core.fsmonitor "touch '$here/../escaped'"
+"#;
+    let repository = Repository::new("main-worktree", CHECK, &format!("{work}{WORK}"));
+    git_ok(
+        &repository.root,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    let common = repository.root.join(".git");
+    assert!(!common.join("commondir").exists());
+    assert!(!common.join("config.worktree").exists());
+    passed(&repository.run());
+    // git outside the sandbox, in the main worktree, reads the git folder
+    // of the repository, and runs no command of the agent.
+    git_ok(&repository.root, &["status", "--short"]);
+    assert!(!repository.shared.join("escaped").exists());
+    let found = git_ok(
+        &repository.root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    assert_eq!(
+        Path::new(&found).canonicalize().unwrap(),
+        common.canonicalize().unwrap()
+    );
+}
+
+/// The command lines of the processes of the host that have this text.
+fn processes_with(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(line) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let line = String::from_utf8_lossy(&line).replace('\0', " ");
+        if line.contains(text) {
+            found.push(line);
+        }
+    }
+    found
+}
+
+#[test]
+fn the_harness_has_no_terminal_of_lira_and_lira_still_stops_its_children() {
+    // `setsid` gives a process a terminal group of its own, with no
+    // terminal, and the process leads it. The sixth field of `stat` is the
+    // number of the process that leads the group of the harness. In the
+    // sandbox, it is 0 when that process is outside the sandbox.
+    //
+    // Then the harness starts two children that run until something stops
+    // them: one stays in the process group of the harness, and one leaves
+    // it. The harness itself does not end when Lira closes its input.
+    let work = r#"cut -d ' ' -f 6 "/proc/$$/stat" > "$here/leader"
+sh -c 'while :; do sleep 0.1; done' "$here/child" &
+first=$!
+setsid sh -c 'while :; do sleep 0.1; done' "$here/child" &
+second=$!
+sleep 0.2
+kill -0 "$first" && kill -0 "$second" && echo yes > "$here/children"
+"#;
+    let wait = r#"while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),"method".*/\1/p')
+  [ -n "$id" ] && reply 'Done.'
+done
+while :; do sleep 0.1; done
+"#;
+    let repository = Repository::new("terminal", CHECK, &format!("{work}{WORK}{wait}"));
+    passed(&repository.run());
+    // The process that leads the group of the harness is in the sandbox,
+    // and it is not the one that leads the group of this test.
+    let leader = repository.kept("leader");
+    assert_ne!(leader, "0");
+    let own = fs::read_to_string("/proc/self/stat").unwrap();
+    let own = own.rsplit(')').next().unwrap().split(' ').nth(4).unwrap();
+    assert_ne!(leader, own);
+    assert_eq!(repository.kept("children"), "yes");
+    let child = repository.harness.join("child");
+    let child = child.to_str().unwrap();
+    let mut tries = 0;
+    while !processes_with(child).is_empty() && tries < 100 {
+        tries += 1;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(processes_with(child), Vec::<String>::new());
+}
+
 // spec(Check): Lira runs the check of an agent in the sandbox of the agent.
 #[test]
 fn the_check_of_an_agent_can_not_change_a_file_outside_the_worktree() {
@@ -2392,17 +2486,6 @@ fn a_pull_request_that_github_does_not_mark_ready_is_a_failure() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
-/// If a process with this number runs. A process that ended, and that its
-/// parent did not ask about yet, does not run.
-fn runs(process: &str) -> bool {
-    let state = Command::new("ps")
-        .args(["-o", "stat=", "-p", process.trim()])
-        .output()
-        .unwrap();
-    let state = String::from_utf8_lossy(&state.stdout);
-    !state.trim().is_empty() && !state.trim().starts_with('Z')
-}
-
 /// Waits until `done` is true, for 10 seconds at most.
 fn wait_for(what: &str, done: impl Fn() -> bool) {
     let start = std::time::Instant::now();
@@ -2418,22 +2501,24 @@ fn wait_for(what: &str, done: impl Fn() -> bool) {
 #[test]
 fn a_run_that_is_interrupted_leaves_no_harness_behind() {
     // This agent starts a process of its own, and never ends its reply.
-    let work = r#"sleep 300 &
-echo "$!" > "$here/child"
-echo "$$" > "$here/harness"
+    // The numbers of processes in the sandbox are not the ones of the
+    // host, so the test finds the harness and its child on the host by
+    // their command lines.
+    let work = r#"sh -c 'while :; do sleep 1; done' "$here/child" &
+echo started > "$here/started"
 while :; do sleep 1; done
 "#;
     let repository = Repository::new("interrupted", CHECK, work);
     let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
-    // The file is there before the number is in it.
-    let written = |file: &str| {
-        fs::read_to_string(repository.harness.join(file)).is_ok_and(|text| text.ends_with('\n'))
-    };
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    let child = repository.harness.join("child");
+    let child = child.to_str().unwrap();
     wait_for("the start of the agent", || {
-        written("harness") && written("child")
+        repository.harness.join("started").exists()
+            && !processes_with(harness).is_empty()
+            && !processes_with(child).is_empty()
     });
-    let (harness, child) = (repository.kept("harness"), repository.kept("child"));
-    assert!(runs(&harness) && runs(&child));
 
     // The signal of Ctrl-C. Lira has no time to stop the harness.
     let lira_process = lira.id().to_string();
@@ -2446,7 +2531,7 @@ while :; do sleep 1; done
     );
     assert!(!lira.wait().unwrap().success());
     wait_for("the end of the harness and of its child", || {
-        !runs(&harness) && !runs(&child)
+        processes_with(harness).is_empty() && processes_with(child).is_empty()
     });
 }
 
@@ -2739,7 +2824,7 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
     // This harness needs no other program, and it answers nothing.
     program(
         &repository.harness.join("agent"),
-        "#!/bin/sh\necho \"$$\" > \"${0%/*}/process\"\nexec /bin/sleep 20\n",
+        "#!/bin/sh\nwhile :; do /bin/sleep 1; done\n",
     );
     // A `PATH` with git and `gh`, and with no `sh` for the guard.
     let only = repository.top.join("only");
@@ -2770,9 +2855,13 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
     let error = failed(&output);
     assert!(error.contains("`sh`"), "{error}");
     // The harness does not stay, and the worktree is gone.
-    if let Ok(process) = fs::read_to_string(repository.harness.join("process")) {
-        wait_for("the end of the harness", || !runs(&process));
-    }
+    // The numbers of processes in the sandbox are not the ones of the host,
+    // so the test finds the harness on the host by its command line.
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    wait_for("the end of the harness", || {
+        processes_with(harness).is_empty()
+    });
     assert!(Repository::has_no_worktree(
         &repository.top.join("xdg").join("lira")
     ));
