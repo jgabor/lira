@@ -146,13 +146,15 @@ impl<'a> PullRequest<'a> {
             None => {
                 let main = &self.worktree.main;
                 github::open_draft(folder, main, branch, &subjects[0], &file).and_then(|draft| {
+                    // A pull request that is not new got its description
+                    // in a call before, and that can be an older one.
+                    let described = if draft.new {
+                        Ok(())
+                    } else {
+                        github::describe(folder, &draft.address, &file)
+                    };
                     self.address = Some(draft.address);
-                    match (&self.address, draft.new) {
-                        // GitHub opened this pull request before, with a
-                        // description that can be older than this one.
-                        (Some(address), false) => github::describe(folder, address, &file),
-                        _ => Ok(()),
-                    }
+                    described
                 })
             }
         };
@@ -256,16 +258,13 @@ impl<'a> PullRequest<'a> {
             .into_iter()
             .chain((2..=NAMES).map(|number| format!("{name}-{number}")));
         for other in names {
-            match git::remote_commit(folder, remote, &other)? {
-                None => {
-                    if other != name {
-                        eprintln!(
-                            "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
-                        );
-                    }
-                    return Ok(other);
+            if git::remote_commit(folder, remote, &other)?.is_none() {
+                if other != name {
+                    eprintln!(
+                        "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
+                    );
                 }
-                Some(_) => {}
+                return Ok(other);
             }
         }
         Err(format!(
