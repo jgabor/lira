@@ -1,7 +1,6 @@
 //! `lira run`: an agent works on one request, in a new worktree.
 
 use crate::harness::{Harness, Stop};
-use crate::json::Json;
 use crate::worktree::{self, Worktree};
 use crate::{data, git};
 use std::ffi::OsString;
@@ -88,12 +87,7 @@ fn start(folder: &Path, made: &Worktree) -> Result<(Harness, String), String> {
     let mut harness = Harness::start(command).map_err(|error| {
         format!("{error}. `LIRA_HARNESS` names the program of the harness, and with no value it is `{HARNESS}`")
     })?;
-    // The protocol has no place for the AI model. This is where the harness
-    // of Claude Code reads it.
-    let model = made.file.models.agent.as_deref().map(|model| {
-        let options = Json::object([("model", Json::text(model))]);
-        Json::object([("claudeCode", Json::object([("options", options)]))])
-    });
+    let model = made.file.models.agent.as_deref();
     let conversation = harness
         .converse(&made.folder, model)
         .map_err(|error| error.to_string())?;
