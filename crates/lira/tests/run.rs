@@ -479,7 +479,9 @@ fn with_no_folder_for_the_data_it_is_an_error() {
 // spec(Harnesses): The harness is the program that `LIRA_HARNESS` names.
 #[test]
 fn the_harness_is_the_program_that_lira_harness_names() {
-    let repository = Repository::new("named", CHECK, WORK);
+    // The Lira file names a program too, and that one is not there.
+    let lira_file = format!("{CHECK}[harness]\nprogram = \"not-there\"\n");
+    let repository = Repository::new("named", &lira_file, WORK);
     let other = repository.top.join("other").join("my-harness");
     program(&other, &format!("{START}touch \"$here/started\"\n{WORK}"));
     let output = repository
@@ -493,9 +495,38 @@ fn the_harness_is_the_program_that_lira_harness_names() {
     assert!(!repository.harness.join("folder").exists());
 }
 
-// spec(Harnesses): When `LIRA_HARNESS` is not set, the harness is the program `claude-agent-acp`.
+// spec(Format of the Lira file): | `harness.program` | Text | The program of the harness. |
+// spec(Harnesses): When `LIRA_HARNESS` is not set, the harness is the program that `harness.program` in the Lira file names.
 #[test]
-fn with_no_lira_harness_the_harness_is_claude_agent_acp() {
+fn with_no_lira_harness_the_harness_is_the_program_of_the_lira_file() {
+    let lira_file = format!("{CHECK}[harness]\nprogram = \"file-harness\"\n");
+    let repository = Repository::new("file-harness", &lira_file, WORK);
+    // Two programs in a folder of `PATH`: the one that the Lira file names,
+    // and the one that Lira starts when nothing names a program.
+    let bin = repository.top.join("bin");
+    for name in ["file-harness", "claude-agent-acp"] {
+        program(
+            &bin.join(name),
+            &format!("{START}touch \"$here/started-{name}\"\n{WORK}"),
+        );
+    }
+    for set in [false, true] {
+        let _ = fs::remove_file(bin.join("started-file-harness"));
+        let mut lira = repository.lira();
+        lira.env_remove("LIRA_HARNESS");
+        if set {
+            // An empty value is the same as no value.
+            lira.env("LIRA_HARNESS", "");
+        }
+        passed(&lira.args(["run", REQUEST]).output().unwrap());
+        assert!(bin.join("started-file-harness").exists());
+        assert!(!bin.join("started-claude-agent-acp").exists());
+    }
+}
+
+// spec(Harnesses): When `LIRA_HARNESS` is not set and the Lira file has no `harness.program`, the harness is the program `claude-agent-acp`.
+#[test]
+fn with_no_lira_harness_and_no_key_the_harness_is_claude_agent_acp() {
     let repository = Repository::new("default", CHECK, WORK);
     // A program with that name, in a folder of `PATH`.
     let default = repository.top.join("bin").join("claude-agent-acp");
@@ -541,6 +572,7 @@ fn a_harness_that_is_not_there_is_an_error_and_leaves_no_worktree() {
     let error = failed(&output);
     assert!(error.contains("nothing-here"), "{error}");
     assert!(error.contains("`LIRA_HARNESS`"), "{error}");
+    assert!(error.contains("`harness.program`"), "{error}");
     assert!(Repository::has_no_worktree(
         &repository.top.join("xdg").join("lira")
     ));

@@ -5,7 +5,6 @@ use crate::harness::{Harness, Stop};
 use crate::pull_request::PullRequest;
 use crate::worktree::{self, Worktree};
 use crate::{data, github};
-use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,8 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The instructions for the agent. The request follows them.
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
-/// The program of the harness when `LIRA_HARNESS` names none. It is the
-/// program that lets Claude Code speak the Agent Client Protocol.
+/// The program of the harness when `LIRA_HARNESS` names none, and the Lira
+/// file names none. It is the program that lets Claude Code speak the Agent
+/// Client Protocol.
 const HARNESS: &str = "claude-agent-acp";
 
 /// `lira run "<request>"`: makes a new worktree of the repository in
@@ -128,20 +128,28 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
 /// `folder` is the folder that `lira run` started in.
 fn start(folder: &Path, made: &Worktree) -> Result<(Harness, String), String> {
     let named = std::env::var_os("LIRA_HARNESS").filter(|program| !program.is_empty());
-    let program = PathBuf::from(named.unwrap_or_else(|| OsString::from(HARNESS)));
-    // A name with no folder is a program of `PATH`. A path starts at the
-    // folder that `lira run` started in, and not at the worktree, where
-    // the harness starts.
-    let is_path = program.components().count() > 1;
-    let program = if is_path {
-        folder.join(program)
-    } else {
-        program
+    let program = match named {
+        Some(named) => {
+            let program = PathBuf::from(named);
+            // A name with no folder is a program of `PATH`. A path starts
+            // at the folder that `lira run` started in, and not at the
+            // worktree, where the harness starts.
+            let is_path = program.components().count() > 1;
+            if is_path {
+                folder.join(program)
+            } else {
+                program
+            }
+        }
+        // The Lira file has a name, or a path from the root of the host.
+        None => PathBuf::from(made.file.harness.program.as_deref().unwrap_or(HARNESS)),
     };
     let mut command = Command::new(&program);
     command.current_dir(&made.folder);
     let mut harness = Harness::start(command).map_err(|error| {
-        format!("{error}. `LIRA_HARNESS` names the program of the harness, and with no value it is `{HARNESS}`")
+        format!(
+            "{error}. `LIRA_HARNESS` names the program of the harness. With no value, it is `harness.program` in `lira.toml`, and with no such key it is `{HARNESS}`"
+        )
     })?;
     let model = made.file.models.agent.as_deref();
     let conversation = harness
