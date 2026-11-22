@@ -23,6 +23,7 @@ pub struct LiraFile {
     /// The agent limit for this repository.
     pub agents: Option<u32>,
     pub models: Models,
+    pub harness: Harness,
     pub reviewer: Reviewer,
     /// The scores, in the order of the file.
     pub scores: Vec<Score>,
@@ -35,6 +36,12 @@ pub struct Models {
     pub agent: Option<String>,
     pub planner: Option<String>,
     pub reviewer: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Harness {
+    /// The program of the harness: a name, or an absolute path.
+    pub program: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -95,6 +102,7 @@ impl LiraFile {
                 "protected" => file.protected = protected(entry)?,
                 "agents" => file.agents = Some(agents(entry)?),
                 "models" => file.models = models(entry)?,
+                "harness" => file.harness = harness(entry)?,
                 "reviewer" => file.reviewer = reviewer(entry)?,
                 "score" => file.scores = scores(entry)?,
                 "planner" => file.planner = planner(entry)?,
@@ -102,7 +110,7 @@ impl LiraFile {
                     return Err(unknown(
                         entry,
                         key,
-                        "check, setup, protected, agents, models, reviewer, score and planner",
+                        "check, setup, protected, agents, models, harness, reviewer, score and planner",
                     ));
                 }
             }
@@ -231,6 +239,28 @@ fn models(entry: &Entry) -> Result<Models, Error> {
         }
     }
     Ok(models)
+}
+
+fn harness(entry: &Entry) -> Result<Harness, Error> {
+    let mut harness = Harness::default();
+    for entry in &table_of(entry, "harness")?.entries {
+        match entry.key.as_str() {
+            "program" => {
+                let program = text_of(entry, "harness.program")?;
+                // A relative path with a folder would name another file in
+                // each worktree, and an agent can change that file.
+                let fits =
+                    !program.is_empty() && (program.starts_with('/') || !program.contains('/'));
+                if !fits {
+                    let message = "`harness.program` must be the name of a program, such as `claude-agent-acp`, or a path that starts with `/`";
+                    return Err(error(entry, message.to_string()));
+                }
+                harness.program = Some(program);
+            }
+            key => return Err(unknown(entry, &format!("harness.{key}"), "program")),
+        }
+    }
+    Ok(harness)
 }
 
 fn reviewer(entry: &Entry) -> Result<Reviewer, Error> {
@@ -392,6 +422,7 @@ mod tests {
         for (text, key) in [
             ("models.agnt = \"a\"\n", "models.agnt"),
             ("[reviewer]\nharness = [\"a\"]\n", "reviewer.harness"),
+            ("[harness]\nname = \"a\"\n", "harness.name"),
             ("[planner]\noff = true\n", "planner.off"),
             (
                 "[[score]]\nname = \"a\"\nbetter = \"lower\"\nunit = \"ms\"\n",
@@ -503,6 +534,34 @@ mod tests {
             error.contains("`reviewer.harnesses` must be a list of texts"),
             "{error}"
         );
+    }
+
+    // spec(Format of the Lira file): The value of `harness.program` is the name of a program, or an absolute path.
+    #[test]
+    fn the_program_of_the_harness_is_a_name_or_an_absolute_path() {
+        assert_eq!(read(CHECK).harness.program, None);
+        for program in ["claude-agent-acp", "/opt/acp/harness"] {
+            let file = read(&format!("{CHECK}harness.program = \"{program}\"\n"));
+            assert_eq!(file.harness.program.as_deref(), Some(program));
+        }
+        let with_header = read(&format!("{CHECK}[harness]\nprogram = \"my-acp\"\n"));
+        assert_eq!(with_header.harness.program.as_deref(), Some("my-acp"));
+        // A path with a folder that does not start at the root of the host
+        // would name another file in each folder.
+        for wrong in ["", "bin/harness", "./harness", "../harness"] {
+            let error = error_of(&format!("{CHECK}harness.program = \"{wrong}\"\n"));
+            assert!(
+                error.starts_with("lira.toml:2: `harness.program` must be the name of a program"),
+                "{error}"
+            );
+        }
+        let error = error_of(&format!("{CHECK}harness.program = 5\n"));
+        assert!(
+            error.contains("`harness.program` must be a text"),
+            "{error}"
+        );
+        let error = error_of(&format!("{CHECK}harness = \"my-acp\"\n"));
+        assert!(error.contains("`harness` must be a table"), "{error}");
     }
 
     // spec(Format of the Lira file): | `score` | List of tables | The scores. Each has a `name` and a `better`. |
