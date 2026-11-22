@@ -7,7 +7,7 @@ use crate::harness::Harness;
 use crate::pull_request::PullRequest;
 use crate::worktree::{self, Worktree};
 use crate::{agent, data, git, github, review};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 use std::process;
@@ -24,6 +24,10 @@ const TRIES: usize = 3;
 
 /// After this many rounds of review that end with findings, Lira stops.
 const ROUNDS: usize = 3;
+
+/// The file with all that a failed check wrote, when the output is too
+/// long for the message to the agent.
+const OUTPUT: &str = "lira-check-output.txt";
 
 /// How much of the output of a failed check the agent gets, in bytes. It
 /// is the end of the output, where a check says what is wrong.
@@ -263,16 +267,45 @@ impl Run<'_> {
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
         let base = git::base(folder, &main)?;
         let outcome = check::run(&self.made.file, folder, &base, Output::Kept)?;
-        if outcome.passed {
-            return Ok(None);
-        }
         let command = &self.made.file.check;
+        if outcome.passed {
+            // A check can change files, as a command that formats them
+            // does. Then it passed its own files, and not the commits.
+            let changes = git::changes(folder)?;
+            if changes.trim().is_empty() {
+                return Ok(None);
+            }
+            let changes = changes.trim_end();
+            return Ok(Some(Failure {
+                for_the_agent: format!(
+                    "The check of the repository, `{command}`, passed, and it left changes in your worktree that are in no commit. So it did not pass what is in your commits. Commit what belongs to the change, and make git ignore what the check only makes for itself. These are the changes, as `git status --short` prints them:\n\n{changes}\n"
+                ),
+                for_you: format!(
+                    "the check, `{command}`, passed, and it left changes that are in no commit:\n\n{changes}\n"
+                ),
+            }));
+        }
         let status = &outcome.status;
         let wrote = match end_of(&outcome.wrote, KEPT) {
             "" => "The check wrote nothing.\n".to_string(),
-            end if end.len() < outcome.wrote.trim_end().len() => format!(
-                "This is the end of what the check wrote. The start is left out.\n\n{end}\n"
-            ),
+            end if end.len() < outcome.wrote.trim_end().len() => {
+                // The start of a long output can say what is wrong. The
+                // agent reads all of it in a file that git keeps for the
+                // worktree, outside the files of the repository.
+                let whole = git::own_file(folder, OUTPUT).and_then(|file| {
+                    fs::write(&file, &outcome.wrote)
+                        .map(|()| file)
+                        .map_err(|error| error.to_string())
+                });
+                let start = match whole {
+                    Ok(file) => format!(
+                        "The start is left out here, and the file `{}` has all of it",
+                        file.display()
+                    ),
+                    Err(_) => "The start is left out".to_string(),
+                };
+                format!("This is the end of what the check wrote. {start}.\n\n{end}\n")
+            }
             end => format!("This is what the check wrote:\n\n{end}\n"),
         };
         Ok(Some(Failure {
