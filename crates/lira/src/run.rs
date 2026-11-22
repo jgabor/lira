@@ -133,8 +133,8 @@ impl Run<'_> {
                             failure.for_you
                         ),
                         question: format!(
-                            "The agent stops and asks: the change did not pass the check {TRIES} times, one after the other. The work waits for your answer.\n\nThis is what Lira found the last time:\n\n{}",
-                            fenced(&failure.for_you)
+                            "The agent stops and asks: the change did not pass the check {TRIES} times, one after the other. The work waits for your answer.\n\nThe last time, {}",
+                            failure.on_github
                         ),
                     });
                 }
@@ -374,6 +374,10 @@ impl Run<'_> {
                 for_you: format!(
                     "the worktree had changes that are in no commit, so the check did not run:\n\n{changes}\n"
                 ),
+                on_github: format!(
+                    "the worktree had changes that are in no commit, so the check did not run:\n\n{}",
+                    fenced(changes)
+                ),
             }));
         }
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
@@ -404,10 +408,24 @@ impl Run<'_> {
                 for_you: format!(
                     "the check, `{command}`, passed, and it left changes that are in no commit:\n\n{changes}\n"
                 ),
+                on_github: format!(
+                    "the check, `{command}`, passed, and it left changes that are in no commit:\n\n{}",
+                    fenced(changes)
+                ),
             }));
         }
         let status = &outcome.status;
-        let wrote = match end_of(&outcome.wrote, KEPT) {
+        let end = end_of(&outcome.wrote, KEPT);
+        // The comment on GitHub names no file of the host.
+        let on_github = match end {
+            "" => "The check wrote nothing.\n".to_string(),
+            end if end.len() < outcome.wrote.trim_end().len() => format!(
+                "This is the end of what the check wrote. The start is left out.\n\n{}",
+                fenced(end)
+            ),
+            end => format!("This is what the check wrote:\n\n{}", fenced(end)),
+        };
+        let wrote = match end {
             "" => "The check wrote nothing.\n".to_string(),
             end if end.len() < outcome.wrote.trim_end().len() => {
                 // The start of a long output can say what is wrong. The
@@ -436,6 +454,7 @@ impl Run<'_> {
                 "The check of the repository failed. Lira ran `{command}` in your worktree, and it ended with {status}. Repair the change, and commit the repair.\n\n{wrote}"
             ),
             for_you: format!("the check, `{command}`, ended with {status}. {wrote}"),
+            on_github: format!("the check, `{command}`, ended with {status}. {on_github}"),
         }))
     }
 
@@ -455,6 +474,9 @@ impl Run<'_> {
             ),
             for_you: format!(
                 "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}\n"
+            ),
+            on_github: format!(
+                "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}.\n"
             ),
         }))
     }
@@ -612,6 +634,9 @@ struct Failure {
     for_the_agent: String,
     /// The end of the error for the person, when Lira stops.
     for_you: String,
+    /// The end of the comment on the pull request, when Lira stops. It is
+    /// Markdown, and it names no file of the host.
+    on_github: String,
 }
 
 /// The message for an agent whose branch has a name that the remote has

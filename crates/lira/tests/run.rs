@@ -1514,6 +1514,35 @@ echo "the last line says what is wrong"
 }
 
 #[test]
+fn the_comment_has_the_output_of_the_check_in_a_block_and_no_folder_of_the_host() {
+    let check = r#"i=0
+while [ "$i" -lt 3000 ]; do echo "line $i of the output of the check"; i=$((i + 1)); done
+echo "the last line says what is wrong"
+exit 1
+"#;
+    let work =
+        "commit greeting 'Add a greeting'\nreply 'Done.'\nwhile :; do next; reply 'No.'; done\n";
+    let repository = Repository::checked("check-long-stops", check, work);
+    failed(&repository.run());
+    let comment = repository.gh("commented");
+    assert!(
+        comment.contains("the last line says what is wrong"),
+        "{comment}"
+    );
+    assert!(comment.contains("The start is left out."), "{comment}");
+    // A folder of the host is no business of GitHub.
+    assert!(!comment.contains("lira-check-output"), "{comment}");
+    assert!(
+        !comment.contains(repository.top.to_str().unwrap()),
+        "{comment}"
+    );
+    // The sentence is text, and only the output is in the block.
+    let (before, block) = comment.split_once("\n```\n").unwrap();
+    assert!(before.contains("ended with"), "{comment}");
+    assert!(block.starts_with("line "), "{comment}");
+}
+
+#[test]
 fn changes_that_are_in_no_commit_go_back_to_the_agent_before_the_check() {
     // The check would pass with the file that the agent did not commit.
     let work = r#"commit greeting 'Add a greeting'
