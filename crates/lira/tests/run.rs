@@ -1091,8 +1091,8 @@ fn the_harness_has_no_terminal_of_lira_and_lira_still_stops_its_children() {
     // one stays in the terminal group and the process group of the
     // harness, and one leaves them. The harness waits for the test before
     // it works. It does not end when Lira closes its input.
-    let work = r#"sh -c 'while :; do sleep 0.1; done' "$here/child-stays" &
-setsid sh -c 'while :; do sleep 0.1; done' "$here/child-leaves" &
+    let work = r#"sh -c 'sleep 300; :' "$here/child-stays" &
+setsid sh -c 'sleep 300; :' "$here/child-leaves" &
 echo started > "$here/started"
 tries=0
 until [ -e "$here/go" ]; do
@@ -1124,10 +1124,12 @@ while :; do sleep 0.1; done
     // The process that leads the terminal group of the harness is not the
     // one that leads the group of this test. The test reads both numbers
     // on the host.
-    let stays = processes_with(&stays);
-    assert_eq!(stays.len(), 1, "{stays:?}");
+    // Right after a fork, a new process has the command line of the child
+    // too, and it is in the same group.
     let own = leader_of("self");
-    assert_ne!(leader_of(&stays[0]), own);
+    for process in processes_with(&stays) {
+        assert_ne!(leader_of(&process), own);
+    }
     fs::write(repository.harness.join("go"), "").unwrap();
     passed(&lira.wait_with_output().unwrap());
     wait_for("the end of the harness and of its children", || {

@@ -12,6 +12,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -164,11 +165,13 @@ fn make_whole(file: &Path, content: &str) -> std::io::Result<()> {
     }
     // The name is new each time, and Lira makes the file new, so it writes
     // no file that another made, and through no link.
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let count = MADE.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let mut name = file.as_os_str().to_owned();
-    name.push(format!(".lira-{}-{nanos}", process::id()));
+    name.push(format!(".lira-{}-{nanos}-{count}", process::id()));
     let written = Path::new(&name);
     let mut new = fs::OpenOptions::new()
         .write(true)
