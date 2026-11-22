@@ -143,14 +143,16 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
                 .map(|agent| (agent, sandbox))
         })
         .map_err(|error| format!("{error}\nThe worktree {place} stays"))?;
-    // The pull request leaves the Inbox only when an agent works on it.
-    if view.labels.iter().any(|label| label == NEEDS_ANSWER) {
-        github::remove_label(folder, address, NEEDS_ANSWER)
-            .map_err(|error| format!("Lira could not remove `{NEEDS_ANSWER}`: {error}"))?;
-    }
+    // The pull request leaves the Inbox only when an agent works on it. So
+    // `needs:answer` goes last, when all else worked.
     if !view.draft {
         github::mark_draft(folder, address).map_err(|error| {
-            format!("Lira could not make the pull request a draft again: {error}")
+            format!("Lira could not make the pull request a draft again: {error}\nThe worktree {place} stays")
+        })?;
+    }
+    if view.labels.iter().any(|label| label == NEEDS_ANSWER) {
+        github::remove_label(folder, address, NEEDS_ANSWER).map_err(|error| {
+            format!("Lira could not remove `{NEEDS_ANSWER}`: {error}\nThe worktree {place} stays")
         })?;
     }
     // A Reviewer reads the change for the request and your answer.

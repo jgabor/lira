@@ -464,11 +464,38 @@ pub fn check_out(folder: &Path, branch: &str) -> Result<(), String> {
         })
 }
 
-/// Removes what git keeps for each worktree whose folder is gone.
-pub fn prune_worktrees(folder: &Path) -> Result<(), String> {
-    run(folder, &["worktree", "prune"])
-        .map(|_| ())
-        .map_err(|wrote| format!("Lira can't prune the worktrees. git wrote:\n{wrote}"))
+/// Removes what git keeps for each worktree whose folder is gone, when the
+/// folder was in one of the folders `inside`.
+pub fn prune_worktrees(folder: &Path, inside: &[&Path]) -> Result<(), String> {
+    for worktree in worktrees(folder)? {
+        let ours = inside.iter().any(|inside| worktree.starts_with(inside));
+        if !ours || worktree.exists() {
+            continue;
+        }
+        let args = [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+            worktree.as_os_str(),
+        ];
+        run(folder, &args).map_err(|wrote| {
+            format!(
+                "Lira can't remove the record of the worktree `{}`, whose folder is gone. git wrote:\n{wrote}",
+                worktree.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The folder of each worktree of the repository in `folder`.
+fn worktrees(folder: &Path) -> Result<Vec<PathBuf>, String> {
+    let listed = worktree_list(folder)?;
+    let folders = listed.split(|byte| *byte == 0).filter_map(|part| {
+        part.strip_prefix(b"worktree ")
+            .map(|path| PathBuf::from(OsStr::from_bytes(path)))
+    });
+    Ok(folders.collect())
 }
 
 /// The commit of a branch of the repository, or `None` when the repository
@@ -676,6 +703,12 @@ fn remove(folder: &Path, worktree: &Path, branch: &str, with_branch: bool) -> Re
 
 /// The folder of the worktree that has this branch, as git has it now.
 pub fn worktree_of(folder: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+    Ok(worktree_with(&worktree_list(folder)?, branch))
+}
+
+/// What `git worktree list --porcelain -z` prints for the repository in
+/// `folder`.
+fn worktree_list(folder: &Path) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command
         .args(["worktree", "list", "--porcelain", "-z"])
@@ -685,7 +718,7 @@ pub fn worktree_of(folder: &Path, branch: &str) -> Result<Option<PathBuf>, Strin
     if !ended.status.success() {
         return Err(String::from_utf8_lossy(&ended.errors).trim().to_string());
     }
-    Ok(worktree_with(&ended.output, branch))
+    Ok(ended.output)
 }
 
 /// Finds the worktree of a branch in what `git worktree list --porcelain

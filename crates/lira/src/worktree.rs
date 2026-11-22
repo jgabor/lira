@@ -131,7 +131,14 @@ pub fn continued(
             // git keeps a record of a worktree whose folder is gone, and
             // makes no other worktree in that folder, or of its branch,
             // while it has it.
-            git::prune_worktrees(repository)?;
+            // Lira removes only the records of its own worktrees, and not
+            // one of yours whose folder is on a drive that is not there.
+            let real = ours.canonicalize().ok();
+            let inside: Vec<&Path> = [Some(ours.as_path()), real.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+            git::prune_worktrees(repository, &inside)?;
             // The old worktree can be in the folder of the branch, and on
             // another branch or on no branch. Then it goes back to the
             // branch. The repository can have no such branch any more,
