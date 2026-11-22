@@ -85,7 +85,7 @@ can't continue, stop and ask as AGENTS.md says.
    A Reviewer does not work when it can't start, or when it stops before its
    review, for example at its usage limit. Then start the next one with the
    same `task`. When none of them works, stop and ask. When the wait ends
-   and the Reviewer still works, it works: wait for its result as
+   while the Reviewer still runs, it has not failed: wait for its result as
    `delegate_task` says.
 
    Give the Reviewer the goal of the issue and the command
