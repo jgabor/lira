@@ -10,6 +10,13 @@ use std::fs;
 /// the worktree, outside the files of the repository.
 const DESCRIPTION: &str = "lira-description.md";
 
+/// The file that holds a comment on its way to GitHub. git keeps it for the
+/// worktree, outside the files of the repository.
+const COMMENT: &str = "lira-comment.md";
+
+/// The label of a pull request whose agent stopped and asks.
+const NEEDS_ANSWER: &str = "needs:answer";
+
 /// What the progress note says under `Next` while the agent works.
 const WORKS: &str = "The agent works on the request.";
 
@@ -130,6 +137,43 @@ impl<'a> PullRequest<'a> {
         }
         self.describe(&address, description)?;
         github::mark_ready(&self.worktree.folder, &address)
+    }
+
+    /// The agent stops and asks: Lira writes the question as a comment on
+    /// the pull request, and then adds `needs:answer`. It tries both, and
+    /// returns what went wrong.
+    pub fn ask(&self, question: &str) -> Result<(), String> {
+        let Some(address) = &self.address else {
+            return Err("there is no pull request to write the question on".to_string());
+        };
+        let folder = &self.worktree.folder;
+        let commented = git::own_file(folder, COMMENT).and_then(|file| {
+            fs::write(&file, question).map_err(|error| {
+                format!(
+                    "Lira can't write the comment to `{}`: {error}",
+                    file.display()
+                )
+            })?;
+            let sent = github::comment(folder, address, &file);
+            let _ = fs::remove_file(&file);
+            sent
+        });
+        let labeled = github::add_label(folder, address, NEEDS_ANSWER);
+        let mut problems = Vec::new();
+        if let Err(error) = commented {
+            problems.push(format!(
+                "Lira could not write the question as a comment on the pull request: {error}"
+            ));
+        }
+        if let Err(error) = labeled {
+            problems.push(format!(
+                "Lira could not add `{NEEDS_ANSWER}` to the pull request: {error}"
+            ));
+        }
+        match problems.is_empty() {
+            true => Ok(()),
+            false => Err(problems.join("\n")),
+        }
     }
 
     /// Gives the pull request at `address` this description.

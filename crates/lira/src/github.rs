@@ -176,6 +176,31 @@ pub fn describe(folder: &Path, address: &str, description: &Path) -> Result<(), 
     pull_request(folder, &args).map(|_| ())
 }
 
+/// Writes the text of the file `text` as a comment on the pull request at
+/// `address`.
+pub fn comment(folder: &Path, address: &str, text: &Path) -> Result<(), String> {
+    let args = [
+        OsStr::new("comment"),
+        OsStr::new(address),
+        OsStr::new("--body-file"),
+        text.as_os_str(),
+    ];
+    pull_request(folder, &args).map(|_| ())
+}
+
+/// Adds the label `label` to the pull request at `address`. GitHub makes
+/// the label when the repository does not have it yet.
+pub fn add_label(folder: &Path, address: &str, label: &str) -> Result<(), String> {
+    let number = address
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let labels = format!("repos/{{owner}}/{{repo}}/issues/{number}/labels");
+    let label = format!("labels[]={label}");
+    api(folder, &[&labels, "--method", "POST", "-f", &label]).map(|_| ())
+}
+
 /// Marks the pull request at `address` ready for review.
 pub fn mark_ready(folder: &Path, address: &str) -> Result<(), String> {
     pull_request(folder, &[OsStr::new("ready"), OsStr::new(address)]).map(|_| ())

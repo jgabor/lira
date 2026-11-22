@@ -22,11 +22,12 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 /// request.
 const DESCRIBE: &str = include_str!("description.md");
 
-/// After this many failed tries at the check, one after the other, Lira
-/// stops.
+/// After this many failed tries at the check, one after the other, the
+/// agent stops and asks.
 const TRIES: usize = 3;
 
-/// After this many rounds of review that end with findings, Lira stops.
+/// After this many rounds of review that end with findings, the agent stops
+/// and asks.
 const ROUNDS: usize = 3;
 
 /// How much of the output of a failed check the agent gets, in bytes. It
@@ -78,8 +79,8 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     };
     let address = match run.steps() {
         Ok(address) => address,
-        Err(error) => {
-            run.stop(&error);
+        Err(stopped) => {
+            let error = run.stop(stopped);
             return Err(format!("{error}\n{}", run.left()));
         }
     };
@@ -116,7 +117,7 @@ impl Run<'_> {
     /// The steps after the start: the work of the agent, the check and the
     /// review, until the check and a Reviewer pass the change. It returns
     /// the address of the pull request.
-    fn steps(&mut self) -> Result<String, String> {
+    fn steps(&mut self) -> Result<String, Stopped> {
         self.work(&message(&self.made.branch, self.request))?;
         let mut tries = 0;
         let mut rounds = 0;
@@ -126,10 +127,16 @@ impl Run<'_> {
             if let Some(failure) = self.check()? {
                 tries += 1;
                 if tries == TRIES {
-                    return Err(format!(
-                        "the change did not pass the check {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
-                        failure.for_you
-                    ));
+                    return Err(Stopped::Asks {
+                        error: format!(
+                            "the change did not pass the check {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
+                            failure.for_you
+                        ),
+                        question: format!(
+                            "The agent stops and asks: the change did not pass the check {TRIES} times, one after the other. The work waits for your answer.\n\nThe last time, {}",
+                            failure.on_github
+                        ),
+                    });
                 }
                 self.note("The agent repairs what the check found.")?;
                 self.work(&failure.for_the_agent)?;
@@ -161,14 +168,27 @@ impl Run<'_> {
                     continue;
                 }
                 self.pull_request.ready(&description)?;
-                return self.address();
+                return Ok(self.address()?);
             }
             rounds += 1;
             if rounds == ROUNDS {
-                return Err(format!(
-                    "{ROUNDS} rounds of review ended with findings, so Lira stops here\nThe last Reviewer wrote:\n\n{}\n",
-                    review.text.trim()
-                ));
+                // A comment on GitHub has a largest size, so a long review
+                // is cut.
+                let text = review.text.trim();
+                let start = start_of(text, KEPT);
+                let mut quoted: String = start.lines().map(|line| format!("> {line}\n")).collect();
+                if start.len() < text.len() {
+                    quoted.push_str("\nThe rest is left out.\n");
+                }
+                return Err(Stopped::Asks {
+                    error: format!(
+                        "{ROUNDS} rounds of review ended with findings, so Lira stops here\nThe last Reviewer wrote:\n\n{}\n",
+                        review.text.trim()
+                    ),
+                    question: format!(
+                        "The agent stops and asks: {ROUNDS} rounds of review ended with findings. The work waits for your answer.\n\nThe last Reviewer wrote:\n\n{quoted}"
+                    ),
+                });
             }
             self.note("The agent repairs what a Reviewer found.")?;
             self.work(&format!(
@@ -301,14 +321,26 @@ impl Run<'_> {
     }
 
     /// Says in the progress note that Lira stopped, and why. GitHub is
-    /// where the person reads how far the work is. The run failed already,
-    /// so a failure here changes nothing.
-    fn stop(&mut self, error: &str) {
-        if self.pull_request.address().is_some() {
-            let why = error.lines().next().unwrap_or_default();
-            let _ = self.note(&format!(
-                "Nothing. Lira stopped, and the pull request waits for you: {why}."
-            ));
+    /// where the person reads how far the work is. When the agent stops and
+    /// asks, Lira also writes the question as a comment, and adds
+    /// `needs:answer`. It returns the error of the run, with what went
+    /// wrong here. The run failed already, so a failure of the progress
+    /// note changes nothing.
+    fn stop(&mut self, stopped: Stopped) -> String {
+        let (error, question) = match stopped {
+            Stopped::Failed(error) => (error, None),
+            Stopped::Asks { error, question } => (error, Some(question)),
+        };
+        if self.pull_request.address().is_none() {
+            return error;
+        }
+        let why = error.lines().next().unwrap_or_default();
+        let _ = self.note(&format!(
+            "Nothing. Lira stopped, and the pull request waits for you: {why}."
+        ));
+        match question.map(|question| self.pull_request.ask(&question)) {
+            Some(Err(problem)) => format!("{error}\n{problem}"),
+            _ => error,
         }
     }
 
@@ -342,6 +374,10 @@ impl Run<'_> {
                 for_you: format!(
                     "the worktree had changes that are in no commit, so the check did not run:\n\n{changes}\n"
                 ),
+                on_github: format!(
+                    "the worktree had changes that are in no commit, so the check did not run:\n\n{}",
+                    fenced(changes)
+                ),
             }));
         }
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
@@ -372,10 +408,24 @@ impl Run<'_> {
                 for_you: format!(
                     "the check, `{command}`, passed, and it left changes that are in no commit:\n\n{changes}\n"
                 ),
+                on_github: format!(
+                    "the check, `{command}`, passed, and it left changes that are in no commit:\n\n{}",
+                    fenced(changes)
+                ),
             }));
         }
         let status = &outcome.status;
-        let wrote = match end_of(&outcome.wrote, KEPT) {
+        let end = end_of(&outcome.wrote, KEPT);
+        // The comment on GitHub names no file of the host.
+        let on_github = match end {
+            "" => "The check wrote nothing.\n".to_string(),
+            end if end.len() < outcome.wrote.trim_end().len() => format!(
+                "This is the end of what the check wrote. The start is left out.\n\n{}",
+                fenced(end)
+            ),
+            end => format!("This is what the check wrote:\n\n{}", fenced(end)),
+        };
+        let wrote = match end {
             "" => "The check wrote nothing.\n".to_string(),
             end if end.len() < outcome.wrote.trim_end().len() => {
                 // The start of a long output can say what is wrong. The
@@ -404,6 +454,7 @@ impl Run<'_> {
                 "The check of the repository failed. Lira ran `{command}` in your worktree, and it ended with {status}. Repair the change, and commit the repair.\n\n{wrote}"
             ),
             for_you: format!("the check, `{command}`, ended with {status}. {wrote}"),
+            on_github: format!("the check, `{command}`, ended with {status}. {on_github}"),
         }))
     }
 
@@ -423,6 +474,9 @@ impl Run<'_> {
             ),
             for_you: format!(
                 "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}\n"
+            ),
+            on_github: format!(
+                "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}.\n"
             ),
         }))
     }
@@ -546,12 +600,43 @@ fn own_description(request: &str, subjects: &[String], said: &str) -> String {
     )
 }
 
+/// Why the steps ended before the pull request was ready for review.
+enum Stopped {
+    /// Something went wrong. The text is the error.
+    Failed(String),
+    /// The agent stops and asks. `error` is the error of the run, and
+    /// `question` is the comment that says what stops the work.
+    Asks { error: String, question: String },
+}
+
+impl From<String> for Stopped {
+    fn from(error: String) -> Stopped {
+        Stopped::Failed(error)
+    }
+}
+
+/// A text in a block of code, whose fence is longer than each row of
+/// backticks in the text.
+fn fenced(text: &str) -> String {
+    let mut longest = 0;
+    let mut row = 0;
+    for c in text.chars() {
+        row = if c == '`' { row + 1 } else { 0 };
+        longest = longest.max(row);
+    }
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}\n{}\n{fence}\n", text.trim_end())
+}
+
 /// A check that did not pass.
 struct Failure {
     /// The message that tells the agent to repair the change.
     for_the_agent: String,
     /// The end of the error for the person, when Lira stops.
     for_you: String,
+    /// The end of the comment on the pull request, when Lira stops. It is
+    /// Markdown, and it names no file of the host.
+    on_github: String,
 }
 
 /// The message for an agent whose branch has a name that the remote has
@@ -586,6 +671,15 @@ fn end_of(text: &str, most: usize) -> &str {
         Some(line) if line + 1 < end.len() => &end[line + 1..],
         _ => end,
     }
+}
+
+/// The start of a text: at most `most` bytes, cut between two characters.
+fn start_of(text: &str, most: usize) -> &str {
+    let mut end = most.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// The message for the agent: the instructions, then the request as it is.
@@ -684,6 +778,19 @@ mod tests {
         assert_eq!(headings, ["## Problem", "## Change", "## Decisions"]);
         assert!(with_heading.contains("> ## Summary\n"));
         assert!(own_description("Do it.", &subjects, "").ends_with("\n\nThe agent named none.\n"));
+    }
+
+    #[test]
+    fn the_start_of_a_text_is_cut_between_two_characters() {
+        assert_eq!(start_of("abc", 10), "abc");
+        assert_eq!(start_of("abc", 2), "ab");
+        assert_eq!(start_of("éé", 3), "é");
+    }
+
+    #[test]
+    fn a_fence_is_longer_than_each_row_of_backticks_in_the_text() {
+        assert_eq!(fenced("one\ntwo\n"), "```\none\ntwo\n```\n");
+        assert_eq!(fenced("a ```` b"), "`````\na ```` b\n`````\n");
     }
 
     #[test]

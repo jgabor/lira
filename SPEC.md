@@ -125,11 +125,11 @@ Lira does these steps for each issue, in this order.
 - A new worktree starts from the newest main branch.
 - A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder.
 - When the check fails, Lira gives the output of the check to the agent.
-- *Proposed:* After 3 failed tries at the same check, the agent stops and asks.
+- After 3 failed tries at the same check, the agent stops and asks.
 - A Reviewer reads the change after the check passes.
 - A Reviewer can't change a file.
 - A Reviewer uses a different harness from the agent when the Lira file names one that is available.
-- *Proposed:* After 3 rounds of review with open findings, the agent stops and asks.
+- After 3 rounds of review with open findings, the agent stops and asks.
 - When an agent stops and asks, Lira adds `needs:answer` to the pull request, or to the issue if there is no pull request.
 - When you answer, Lira removes `needs:answer` and the work continues.
 - With `auto:merge`, a change that is ready enters the merge queue.
@@ -216,6 +216,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - The title of the pull request is the subject of the first commit.
 - When the agent makes no commit, Lira opens no pull request, and `lira run` fails.
 - Lira runs the check and a Reviewer on the change, and marks the pull request ready for review.
+- When the agent stops and asks, Lira writes what stops the work as a comment on the pull request: what the last check wrote, or what the last Reviewer wrote.
+- Then `lira run` fails, and says why Lira stopped.
 - A change from `lira run` always waits for you.
 - It prints the address of the pull request.
 
