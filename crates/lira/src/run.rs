@@ -9,7 +9,7 @@ use crate::sandbox::{self, Sandbox};
 use crate::worktree::{self, Worktree};
 use crate::{agent, data, git, github, review};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process;
 use std::sync::mpsc;
@@ -162,11 +162,21 @@ fn make_whole(file: &Path, content: &str) -> std::io::Result<()> {
     if file.symlink_metadata().is_ok() {
         return Ok(());
     }
+    // The name is new each time, and Lira makes the file new, so it writes
+    // no file that another made, and through no link.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let mut name = file.as_os_str().to_owned();
-    name.push(format!(".lira-{}", process::id()));
+    name.push(format!(".lira-{}-{nanos}", process::id()));
     let written = Path::new(&name);
-    fs::write(written, content)?;
-    let made = fs::hard_link(written, file);
+    let mut new = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(written)?;
+    let made = new
+        .write_all(content.as_bytes())
+        .and_then(|()| fs::hard_link(written, file));
     let _ = fs::remove_file(written);
     match made {
         Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),

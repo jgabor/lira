@@ -1114,9 +1114,12 @@ while :; do sleep 0.1; done
         .spawn()
         .unwrap();
     let path = |name: &str| repository.harness.join(name).to_str().unwrap().to_string();
-    let (stays, child, harness) = (path("child-stays"), path("child"), path("agent"));
+    let (stays, leaves) = (path("child-stays"), path("child-leaves"));
+    let (child, harness) = (path("child"), path("agent"));
     wait_for("the start of the children", || {
-        repository.harness.join("started").exists() && processes_with(&child).len() >= 2
+        repository.harness.join("started").exists()
+            && !processes_with(&stays).is_empty()
+            && !processes_with(&leaves).is_empty()
     });
     // The process that leads the terminal group of the harness is not the
     // one that leads the group of this test. The test reads both numbers
