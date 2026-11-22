@@ -460,12 +460,12 @@ pub fn push(
     })
 }
 
-/// The path of a file that git keeps for the worktree in a folder, outside
-/// the files of the repository. git removes it with the worktree.
-pub fn own_file(folder: &Path, name: &str) -> Result<PathBuf, String> {
+/// The folder that git keeps for the worktree in a folder, outside the
+/// files of the repository. git removes it with the worktree.
+pub fn own_folder(folder: &Path) -> Result<PathBuf, String> {
     let path = run(
         folder,
-        &["rev-parse", "--path-format=absolute", "--git-path", name],
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
     )
     .map_err(|wrote| {
         format!(
@@ -474,6 +474,28 @@ pub fn own_file(folder: &Path, name: &str) -> Result<PathBuf, String> {
         )
     })?;
     Ok(PathBuf::from(path.trim_end_matches('\n')))
+}
+
+/// The path of a file in the folder that git keeps for the worktree in a
+/// folder. The agent can change that folder, and put a link there. So the
+/// path is the name in the folder, and not the file that a link names.
+pub fn own_file(folder: &Path, name: &str) -> Result<PathBuf, String> {
+    Ok(own_folder(folder)?.join(name))
+}
+
+/// Writes `text` to a new file at `file`. The agent can have put a link or
+/// another file with the name there. Lira removes what has the name, and
+/// makes the file new, so that it writes through no link.
+pub fn write_new(file: &Path, text: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(file) {
+        Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut new = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)?;
+    std::io::Write::write_all(&mut new, text.as_bytes())
 }
 
 /// The git folder that the worktree in `folder` shares with the

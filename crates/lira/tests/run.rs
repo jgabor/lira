@@ -1926,6 +1926,68 @@ exit 1
     assert!(block.starts_with("line "), "{comment}");
 }
 
+// spec(Steps): An agent works only in its own worktree.
+#[test]
+fn lira_writes_through_no_link_that_the_agent_put_in_its_git_folder() {
+    // Lira writes these files in the git folder of the worktree, which the
+    // agent can change. The agent puts a link with each name there, to a
+    // file of the host that it can't change.
+    let names = [
+        "lira-check-output-1.txt",
+        "lira-comment.md",
+        "lira-description.md",
+    ];
+    let check = r#"i=0
+while [ "$i" -lt 3000 ]; do echo "line $i of the output of the check"; i=$((i + 1)); done
+echo "the last line says what is wrong"
+exit 1
+"#;
+    let work = format!(
+        r#"own="$(git rev-parse --absolute-git-dir)"
+top="$(cd "$here/../../.." && pwd)"
+for name in {}; do ln -s "$top/$name" "$own/$name"; done
+commit greeting 'Add a greeting'
+reply 'Done.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+reply 'No.'
+while :; do next; reply 'No.'; done
+"#,
+        names.join(" ")
+    );
+    let repository = Repository::checked("no-write-through-link", check, &work);
+    for name in names {
+        fs::write(repository.top.join(name), "the file of the host\n").unwrap();
+    }
+    failed(&repository.run());
+    let changed: Vec<&str> = names
+        .into_iter()
+        .filter(|name| {
+            fs::read_to_string(repository.top.join(name)).unwrap() != "the file of the host\n"
+        })
+        .collect();
+    assert_eq!(changed, Vec::<&str>::new());
+    // Lira wrote each file all the same, and in the git folder.
+    let second = kept_message(&repository, "second-message");
+    let file = second
+        .split('`')
+        .find(|part| part.contains("lira-check-output-1.txt"))
+        .unwrap_or_else(|| panic!("the message names no file:\n{second}"));
+    let file = Path::new(file);
+    assert!(!file.symlink_metadata().unwrap().is_symlink(), "{second}");
+    assert!(
+        fs::read_to_string(file)
+            .unwrap()
+            .contains("line 0 of the output")
+    );
+    assert!(repository.gh("created").contains("## Done"));
+    assert!(
+        repository
+            .gh("commented")
+            .contains("the last line says what is wrong")
+    );
+}
+
 #[test]
 fn changes_that_are_in_no_commit_go_back_to_the_agent_before_the_check() {
     // The check would pass with the file that the agent did not commit.

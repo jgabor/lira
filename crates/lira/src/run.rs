@@ -132,7 +132,7 @@ fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
         make_whole(file, content)
             .map_err(|error| format!("Lira can't make the file `{}`: {error}", file.display()))?;
     }
-    let own_folder = git::own_file(folder, "")?;
+    let own_folder = git::own_folder(folder)?;
     let mut sandbox = Sandbox::new();
     sandbox
         .writable(folder)
@@ -537,7 +537,7 @@ impl Run<'_> {
                 self.outputs += 1;
                 let name = format!("lira-check-output-{}.txt", self.outputs);
                 let whole = git::own_file(folder, &name).and_then(|file| {
-                    fs::write(&file, &outcome.wrote)
+                    git::write_new(&file, &outcome.wrote)
                         .map(|()| file)
                         .map_err(|error| error.to_string())
                 });
