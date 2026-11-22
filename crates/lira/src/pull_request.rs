@@ -70,6 +70,17 @@ impl<'a> PullRequest<'a> {
         self.address.as_deref()
     }
 
+    /// The newest commit that the remote has of the work, when Lira pushed
+    /// one.
+    pub fn commit(&self) -> Option<&str> {
+        self.pushed.as_deref()
+    }
+
+    /// The name that the branch of the agent has in the repository.
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+
     /// The name of the branch on the remote, when Lira pushed one.
     pub fn branch(&self) -> Option<&str> {
         self.branch.as_deref()
@@ -88,20 +99,16 @@ impl<'a> PullRequest<'a> {
         }
     }
 
-    /// Looks one more time when the work of the agent is complete, and
-    /// writes what the agent said at the end in the progress note. It
-    /// returns the address of the pull request. `said` is the end of the
-    /// reply of the agent.
-    pub fn complete(&mut self, said: &str) -> Result<String, String> {
-        let said = match said.trim() {
-            "" => "The agent wrote nothing at the end of its work.",
-            said => said,
-        };
-        let done = "Nothing. The work of the agent is complete.";
-        self.bring_up_to_date(done, said)?;
-        self.address
-            .clone()
-            .ok_or_else(|| "the agent made no commit, so Lira opened no pull request".to_string())
+    /// Brings the remote and the pull request up to date, with these texts
+    /// under `Next` and `Decisions` in the progress note. With no commit of
+    /// the agent, there is nothing to bring up to date, and no pull request.
+    pub fn update(&mut self, next: &str, decisions: &str) -> Result<(), String> {
+        let opened = self.address.is_some();
+        self.bring_up_to_date(next, decisions)?;
+        if let (false, Some(address)) = (opened, &self.address) {
+            eprintln!("lira: the draft pull request is {address}");
+        }
+        Ok(())
     }
 
     /// What went wrong at the last look, if something did.

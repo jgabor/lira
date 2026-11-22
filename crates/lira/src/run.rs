@@ -1,14 +1,16 @@
-//! `lira run`: an agent works on one request, in a new worktree, and Lira
-//! opens the pull request for its work.
+//! `lira run`: an agent works on one request, in a new worktree. Lira opens
+//! the pull request for its work, and runs the check and a Reviewer on the
+//! change.
 
-use crate::harness::{self, Harness, Reply, Stop};
+use crate::check::{self, Output};
+use crate::harness::{Harness, Reply};
 use crate::pull_request::PullRequest;
 use crate::worktree::{self, Worktree};
-use crate::{data, github};
-use std::fs::File;
+use crate::{agent, data, git, github, review};
+use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::path::Path;
+use std::process;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,10 +18,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The instructions for the agent. The request follows them.
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
-/// The program of the harness when `LIRA_HARNESS` names none, and the Lira
-/// file names none. It is the program that lets Claude Code speak the Agent
-/// Client Protocol.
-const HARNESS: &str = "claude-agent-acp";
+/// After this many failed tries at the check, one after the other, Lira
+/// stops.
+const TRIES: usize = 3;
+
+/// After this many rounds of review that end with findings, Lira stops.
+const ROUNDS: usize = 3;
+
+/// How much of the output of a failed check the agent gets, in bytes. It
+/// is the end of the output, where a check says what is wrong.
+const KEPT: usize = 20_000;
 
 /// How many times Lira tells the agent to give its branch another name,
 /// when the remote has a branch with the name of the agent already.
@@ -27,8 +35,9 @@ const NAMES: usize = 3;
 
 /// `lira run "<request>"`: makes a new worktree of the repository in
 /// `folder`, and runs an agent on the request in it. It opens a draft pull
-/// request at the first commit of the agent, and prints the address of the
-/// pull request when the reply of the agent ends.
+/// request at the first commit of the agent. When the reply of the agent
+/// ends, it runs the check and a Reviewer on the change, and prints the
+/// address of the pull request when both pass.
 pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     // A missing login stops the run here, before an agent works.
     github::require_login(folder)?;
@@ -37,7 +46,8 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
 
-    let (harness, conversation) = match start(folder, &made) {
+    let model = made.file.models.agent.as_deref();
+    let (harness, conversation) = match agent::start(folder, &made.folder, &made.file, model) {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -51,123 +61,366 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
             });
         }
     };
-
-    let mut harness = harness;
-    let mut pull_request = PullRequest::new(&made)?;
-    let worked = work(
-        &mut harness,
-        &conversation,
-        &made,
+    let mut run = Run {
+        started: folder,
+        made: &made,
         request,
-        &mut pull_request,
-    );
-    // The harness stops here, so that the agent changes nothing after this.
-    drop(harness);
-    // A process of the harness can make a commit until the harness stops.
-    // So Lira looks one more time, and the pull request has all the work.
-    let worked = worked.and_then(|text| match pull_request.complete(&text) {
-        Ok(address) => Ok((address, text)),
-        Err(error) => Err(Failure {
-            error,
-            said: Some(text),
-        }),
-    });
-    let (address, text) = match worked {
-        Ok(worked) => worked,
-        Err(failure) => {
-            // Where the work is.
-            let mut left = format!("What the agent did is in {place}");
-            if let Some(branch) = pull_request.branch() {
-                left.push_str(&format!(
-                    ", and on the branch `{branch}` of the remote `{}`",
-                    made.remote
-                ));
-            }
-            if let Some(address) = pull_request.address() {
-                left.push_str(&format!("\nThe pull request is a draft: {address}"));
-            }
-            let said = failure
-                .said
-                .map_or(String::new(), |text| format!("\n{}", wrote(&text)));
-            return Err(format!("{}\n{left}{said}", failure.error));
+        harness,
+        conversation,
+        pull_request: PullRequest::new(&made)?,
+        said: String::new(),
+        outputs: 0,
+    };
+    let address = match run.steps() {
+        Ok(address) => address,
+        Err(error) => {
+            run.stop(&error);
+            return Err(format!("{error}\n{}", run.left()));
         }
     };
-    let branch = pull_request.branch().unwrap_or(&made.branch);
+    let branch = run.pull_request.branch().unwrap_or(&made.branch);
     eprintln!(
-        "lira: the work of the agent is complete. It is on the branch `{branch}`, and its worktree is {place}"
+        "lira: the check and a Reviewer passed the change. It is on the branch `{branch}`, and its worktree is {place}"
     );
-    eprintln!("{}", wrote(&text));
+    eprintln!("{}", wrote(&run.said));
     println!("{address}");
     Ok(())
 }
 
-/// What went wrong after the agent started. `said` is what the agent wrote
-/// at the end of its work, when its reply ended.
-struct Failure {
-    error: String,
-    said: Option<String>,
+/// One run of `lira run`, after the agent started.
+struct Run<'a> {
+    /// The folder that `lira run` started in.
+    started: &'a Path,
+    made: &'a Worktree,
+    request: &'a str,
+    /// The harness of the agent. It runs until the run ends, so that the
+    /// agent knows what it did when Lira gives it the output of the check or
+    /// the findings of a Reviewer.
+    harness: Harness,
+    conversation: String,
+    pull_request: PullRequest<'a>,
+    /// The newest reply of the agent.
+    said: String,
+    /// How many files Lira wrote with the whole output of a failed check.
+    /// Each file has a name of its own, so a message of before still names
+    /// the output that it is about.
+    outputs: usize,
 }
 
-/// What the agent wrote, for the output of `lira run`.
-fn wrote(text: &str) -> String {
-    match text.trim() {
-        "" => "The agent wrote nothing".to_string(),
-        text => format!("The agent wrote:\n\n{text}\n"),
+impl Run<'_> {
+    /// The steps after the start: the work of the agent, the check and the
+    /// review, until the check and a Reviewer pass the change. It returns
+    /// the address of the pull request.
+    fn steps(&mut self) -> Result<String, String> {
+        self.work(&message(&self.made.branch, self.request))?;
+        let mut tries = 0;
+        let mut rounds = 0;
+        loop {
+            // Check.
+            if let Some(failure) = self.check()? {
+                tries += 1;
+                if tries == TRIES {
+                    return Err(format!(
+                        "the change did not pass the check {TRIES} times, one after the other, so Lira stops here\nThe last time, {}",
+                        failure.for_you
+                    ));
+                }
+                self.note("The agent repairs what the check found.")?;
+                self.work(&failure.for_the_agent)?;
+                continue;
+            }
+            tries = 0;
+            // Review. The check passed one commit. Each time that Lira
+            // brings the pull request up to date, it can push a newer
+            // commit of the agent. Then the check reads the change again.
+            let checked = self.pull_request.commit().map(str::to_string);
+            self.note("A Reviewer reads the change.")?;
+            if self.pull_request.commit() != checked.as_deref() {
+                continue;
+            }
+            let review = self.review()?;
+            if review.passed {
+                self.note("Nothing. The check and a Reviewer passed the change.")?;
+                if self.pull_request.commit() != checked.as_deref() {
+                    continue;
+                }
+                return self.address();
+            }
+            rounds += 1;
+            if rounds == ROUNDS {
+                return Err(format!(
+                    "{ROUNDS} rounds of review ended with findings, so Lira stops here\nThe last Reviewer wrote:\n\n{}\n",
+                    review.text.trim()
+                ));
+            }
+            self.note("The agent repairs what a Reviewer found.")?;
+            self.work(&format!(
+                "A Reviewer read your change, and it has findings. Test each finding against the code. Repair the real ones with the smallest change, and commit the repair. For each finding that you do not repair, say why at the end of your reply.\n\nThis is what the Reviewer wrote:\n\n{}\n",
+                review.text.trim()
+            ))?;
+        }
     }
-}
 
-/// The agent works on the request, and Lira brings the pull request up to
-/// date. When the remote has a branch with the name of the agent already,
-/// the agent gives its branch another name. It returns what the agent wrote
-/// at the end of its work.
-fn work(
-    harness: &mut Harness,
-    conversation: &str,
-    made: &Worktree,
-    request: &str,
-    pull_request: &mut PullRequest,
-) -> Result<String, Failure> {
-    let first = message(&made.branch, request);
-    let reply = give(harness, conversation, &first, pull_request).map_err(|error| Failure {
-        error: match pull_request.problem() {
+    /// The agent works on a message, and Lira brings the pull request up to
+    /// date. After this, all commits of the agent are in the pull request.
+    /// When the remote has a branch with the name of the agent already, the
+    /// agent gives its branch another name first.
+    fn work(&mut self, message: &str) -> Result<(), String> {
+        let reply = self.give(message)?;
+        self.said = reply.text;
+        if let Some(why) = agent::stopped(&reply.stop) {
+            return Err(format!(
+                "the agent stopped before the end of its work: {why}\n{}",
+                wrote(&self.said)
+            ));
+        }
+        let mut asked = 0;
+        loop {
+            let noted = self.note("Lira runs the check.");
+            let Some(name) = self.pull_request.taken().map(str::to_string) else {
+                return noted
+                    .and_then(|()| self.address())
+                    .map(|_| ())
+                    .map_err(|error| format!("{error}\n{}", wrote(&self.said)));
+            };
+            let remote = &self.made.remote;
+            if asked == NAMES {
+                return Err(format!(
+                    "the remote `{remote}` has a branch `{name}` already, and the agent gave its branch no other name after {NAMES} messages, so Lira pushed nothing\n{}",
+                    wrote(&self.said)
+                ));
+            }
+            asked += 1;
+            eprintln!(
+                "lira: the remote `{remote}` has a branch `{name}` already, so the agent gives its branch another name"
+            );
+            // What the agent wrote at the end of its work stays. Its answer
+            // here is only the new name.
+            let renamed = self.give(&rename(remote, &name))?;
+            if let Some(why) = agent::stopped(&renamed.stop) {
+                return Err(format!(
+                    "the agent stopped before it gave its branch another name: {why}\n{}",
+                    wrote(&self.said)
+                ));
+            }
+        }
+    }
+
+    /// Gives a message to the agent, and waits for its reply. While the
+    /// agent works, Lira looks for a new commit each time a tool call ends.
+    fn give(&mut self, message: &str) -> Result<Reply, String> {
+        let Run {
+            harness,
+            pull_request,
+            conversation,
+            ..
+        } = self;
+        // Lira looks for a new commit on a thread of its own. So the agent
+        // does not wait for a permission while Lira talks to the remote or
+        // to GitHub.
+        let reply = thread::scope(|scope| {
+            let (look, looks) = mpsc::channel();
+            scope.spawn(move || {
+                while looks.recv().is_ok() {
+                    // One look is enough for all tool calls that ended
+                    // since the look before.
+                    while looks.try_recv().is_ok() {}
+                    pull_request.look();
+                }
+            });
+            harness.send_and_watch(
+                conversation,
+                message,
+                // Nobody is there to answer, and the agent works in a
+                // worktree of its own. So the answer to each permission
+                // request is yes.
+                &mut |_| true,
+                // A tool call can be the first commit, or a later one.
+                &mut || {
+                    let _ = look.send(());
+                },
+            )
+            // The thread ends here: nothing can ask for a look any more.
+        });
+        reply.map_err(|error| match self.pull_request.problem() {
             Some(problem) => format!("{error}\n{problem}"),
             None => error.to_string(),
-        },
-        said: None,
-    })?;
-    let fail = |error: String| Failure {
-        error,
-        said: Some(reply.text.clone()),
-    };
-    if let Some(why) = stopped(&reply.stop) {
-        return Err(fail(format!(
-            "the agent stopped before the end of its work: {why}"
-        )));
+        })
     }
-    let remote = &made.remote;
-    let mut asked = 0;
-    loop {
-        let complete = pull_request.complete(&reply.text);
-        let Some(name) = pull_request.taken().map(str::to_string) else {
-            return complete.map(|_| reply.text.clone()).map_err(fail);
+
+    /// Brings the pull request up to date, with this text under `Next` in
+    /// its progress note. Under `Decisions` is the newest reply of the
+    /// agent.
+    fn note(&mut self, next: &str) -> Result<(), String> {
+        let decisions = match self.said.trim() {
+            "" => "The agent wrote nothing at the end of its work.",
+            said => said,
         };
-        if asked == NAMES {
-            return Err(fail(format!(
-                "the remote `{remote}` has a branch `{name}` already, and the agent gave its branch no other name after {NAMES} messages, so Lira pushed nothing"
-            )));
-        }
-        asked += 1;
-        eprintln!(
-            "lira: the remote `{remote}` has a branch `{name}` already, so the agent gives its branch another name"
-        );
-        let renamed = give(harness, conversation, &rename(remote, &name), pull_request)
-            .map_err(|error| fail(error.to_string()))?;
-        if let Some(why) = stopped(&renamed.stop) {
-            return Err(fail(format!(
-                "the agent stopped before it gave its branch another name: {why}"
-            )));
+        self.pull_request.update(next, decisions)
+    }
+
+    /// Says in the progress note that Lira stopped, and why. GitHub is
+    /// where the person reads how far the work is. The run failed already,
+    /// so a failure here changes nothing.
+    fn stop(&mut self, error: &str) {
+        if self.pull_request.address().is_some() {
+            let why = error.lines().next().unwrap_or_default();
+            let _ = self.note(&format!(
+                "Nothing. Lira stopped, and the pull request waits for you: {why}."
+            ));
         }
     }
+
+    /// The address of the pull request. It is an error when the agent made
+    /// no commit, so that there is none.
+    fn address(&self) -> Result<String, String> {
+        self.pull_request
+            .address()
+            .map(str::to_string)
+            .ok_or_else(|| "the agent made no commit, so Lira opened no pull request".to_string())
+    }
+
+    /// Runs the check on the change. It returns `None` when the check
+    /// passes, and what to say about the failure when it does not.
+    fn check(&mut self) -> Result<Option<Failure>, String> {
+        let folder = &self.made.folder;
+        // The check reads the files of the worktree, and the pull request
+        // has the commits of the branch of the agent. So the two must be
+        // the same: the worktree is at the newest commit of the pull
+        // request, and all in it is in a commit.
+        if let Some(failure) = self.moved("so the check waits", "so the check did not run")? {
+            return Ok(Some(failure));
+        }
+        let changes = git::changes(folder)?;
+        if !changes.trim().is_empty() {
+            let changes = changes.trim_end();
+            return Ok(Some(Failure {
+                for_the_agent: format!(
+                    "Your worktree has changes that are in no commit. Lira takes only what is in a commit, so the check waits. Commit what belongs to the change, and remove what does not. These are the changes, as `git status --short` prints them:\n\n{changes}\n"
+                ),
+                for_you: format!(
+                    "the worktree had changes that are in no commit, so the check did not run:\n\n{changes}\n"
+                ),
+            }));
+        }
+        let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
+        let base = git::base(folder, &main)?;
+        let outcome = check::run(&self.made.file, folder, &base, Output::Kept)?;
+        let command = &self.made.file.check;
+        if outcome.passed {
+            // A check can also go to another commit. Then it passed that
+            // commit.
+            let moved = self.moved(
+                "after the check ran, so the check did not pass your commits",
+                "after the check, so the check did not pass the commits of the pull request",
+            )?;
+            if moved.is_some() {
+                return Ok(moved);
+            }
+            // A check can change files, as a command that formats them
+            // does. Then it passed its own files, and not the commits.
+            let changes = git::changes(folder)?;
+            if changes.trim().is_empty() {
+                return Ok(None);
+            }
+            let changes = changes.trim_end();
+            return Ok(Some(Failure {
+                for_the_agent: format!(
+                    "The check of the repository, `{command}`, passed, and it left changes in your worktree that are in no commit. So it did not pass what is in your commits. Commit what belongs to the change, and make git ignore what the check only makes for itself. These are the changes, as `git status --short` prints them:\n\n{changes}\n"
+                ),
+                for_you: format!(
+                    "the check, `{command}`, passed, and it left changes that are in no commit:\n\n{changes}\n"
+                ),
+            }));
+        }
+        let status = &outcome.status;
+        let wrote = match end_of(&outcome.wrote, KEPT) {
+            "" => "The check wrote nothing.\n".to_string(),
+            end if end.len() < outcome.wrote.trim_end().len() => {
+                // The start of a long output can say what is wrong. The
+                // agent reads all of it in a file that git keeps for the
+                // worktree, outside the files of the repository.
+                self.outputs += 1;
+                let name = format!("lira-check-output-{}.txt", self.outputs);
+                let whole = git::own_file(folder, &name).and_then(|file| {
+                    fs::write(&file, &outcome.wrote)
+                        .map(|()| file)
+                        .map_err(|error| error.to_string())
+                });
+                let start = match whole {
+                    Ok(file) => format!(
+                        "The start is left out here, and the file `{}` has all of it",
+                        file.display()
+                    ),
+                    Err(_) => "The start is left out".to_string(),
+                };
+                format!("This is the end of what the check wrote. {start}.\n\n{end}\n")
+            }
+            end => format!("This is what the check wrote:\n\n{end}\n"),
+        };
+        Ok(Some(Failure {
+            for_the_agent: format!(
+                "The check of the repository failed. Lira ran `{command}` in your worktree, and it ended with {status}. Repair the change, and commit the repair.\n\n{wrote}"
+            ),
+            for_you: format!("the check, `{command}`, ended with {status}. {wrote}"),
+        }))
+    }
+
+    /// Looks if the worktree is at the commit that Lira pushed for the pull
+    /// request. The check reads the files of the worktree, and the pull
+    /// request has the commits of the branch of the agent, so the two must
+    /// be the same. When they are not, it returns what to say: `agent` and
+    /// `you` end the sentences for the agent and for the person.
+    fn moved(&self, agent: &str, you: &str) -> Result<Option<Failure>, String> {
+        if self.pull_request.commit() == Some(git::head(&self.made.folder)?.as_str()) {
+            return Ok(None);
+        }
+        let branch = self.pull_request.local();
+        Ok(Some(Failure {
+            for_the_agent: format!(
+                "Your worktree is not at the newest commit of your branch, `{branch}`, {agent}. Lira takes the commits of that branch for the pull request. Check out `{branch}`, and put on it what belongs to the change.\n"
+            ),
+            for_you: format!(
+                "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}\n"
+            ),
+        }))
+    }
+
+    /// A new Reviewer reads the change as the pull request has it now.
+    fn review(&mut self) -> Result<review::Review, String> {
+        let folder = &self.made.folder;
+        let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
+        let from = git::base(folder, &main)?;
+        // The check passed this commit just now: the one that Lira pushed
+        // for the pull request.
+        let Some(to) = self.pull_request.commit() else {
+            return Err("the agent made no commit, so there is no change to review".to_string());
+        };
+        review::run(self.started, self.made, self.request, &from, to)
+    }
+
+    /// Where the work is, for an error.
+    fn left(&self) -> String {
+        let mut left = format!("What the agent did is in `{}`", self.made.folder.display());
+        if let Some(branch) = self.pull_request.branch() {
+            left.push_str(&format!(
+                ", and on the branch `{branch}` of the remote `{}`",
+                self.made.remote
+            ));
+        }
+        if let Some(address) = self.pull_request.address() {
+            left.push_str(&format!("\nThe pull request is a draft: {address}"));
+        }
+        left
+    }
+}
+
+/// A check that did not pass.
+struct Failure {
+    /// The message that tells the agent to repair the change.
+    for_the_agent: String,
+    /// The end of the error for the person, when Lira stops.
+    for_you: String,
 }
 
 /// The message for an agent whose branch has a name that the remote has
@@ -178,91 +431,35 @@ fn rename(remote: &str, name: &str) -> String {
     )
 }
 
-/// Gives a message to the agent, and waits for its reply. While the agent
-/// works, Lira looks for a new commit each time a tool call ends.
-fn give(
-    harness: &mut Harness,
-    conversation: &str,
-    message: &str,
-    pull_request: &mut PullRequest,
-) -> Result<Reply, harness::Error> {
-    // Lira looks for a new commit on a thread of its own. So the agent does
-    // not wait for a permission while Lira talks to the remote or to
-    // GitHub.
-    thread::scope(|scope| {
-        let (look, looks) = mpsc::channel();
-        scope.spawn(move || {
-            while looks.recv().is_ok() {
-                // One look is enough for all tool calls that ended since
-                // the look before.
-                while looks.try_recv().is_ok() {}
-                pull_request.look();
-            }
-        });
-        harness.send_and_watch(
-            conversation,
-            message,
-            // Nobody is there to answer, and the agent works in a worktree
-            // of its own. So the answer to each permission request is yes.
-            &mut |_| true,
-            // A tool call can be the first commit, or a later one.
-            &mut || {
-                let _ = look.send(());
-            },
-        )
-        // The thread ends here: nothing can ask for a look any more.
-    })
+/// What the agent wrote in a reply, for the person to read.
+fn wrote(said: &str) -> String {
+    match said.trim() {
+        "" => "The agent wrote nothing".to_string(),
+        text => format!("The agent wrote:\n\n{text}\n"),
+    }
 }
 
-/// Starts the harness in the worktree, and a conversation with the agent.
-/// `folder` is the folder that `lira run` started in.
-fn start(folder: &Path, made: &Worktree) -> Result<(Harness, String), String> {
-    let named = std::env::var_os("LIRA_HARNESS").filter(|program| !program.is_empty());
-    let program = match named {
-        Some(named) => {
-            let program = PathBuf::from(named);
-            // A name with no folder is a program of `PATH`. A path starts
-            // at the folder that `lira run` started in, and not at the
-            // worktree, where the harness starts.
-            let is_path = program.components().count() > 1;
-            if is_path {
-                folder.join(program)
-            } else {
-                program
-            }
-        }
-        // The Lira file has a name, or a path from the root of the host.
-        None => PathBuf::from(made.file.harness.program.as_deref().unwrap_or(HARNESS)),
-    };
-    let mut command = Command::new(&program);
-    command.current_dir(&made.folder);
-    let mut harness = Harness::start(command).map_err(|error| {
-        format!(
-            "{error}. `LIRA_HARNESS` names the program of the harness. With no value, it is `harness.program` in `lira.toml`, and with no such key it is `{HARNESS}`"
-        )
-    })?;
-    let model = made.file.models.agent.as_deref();
-    let conversation = harness
-        .converse(&made.folder, model)
-        .map_err(|error| error.to_string())?;
-    Ok((harness, conversation))
+/// The end of a text: at most `most` bytes, from the start of a line when
+/// the text has one there, and with no white space at its end.
+fn end_of(text: &str, most: usize) -> &str {
+    let text = text.trim_end();
+    if text.len() <= most {
+        return text;
+    }
+    let mut start = text.len() - most;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let end = &text[start..];
+    match end.find('\n') {
+        Some(line) if line + 1 < end.len() => &end[line + 1..],
+        _ => end,
+    }
 }
 
 /// The message for the agent: the instructions, then the request as it is.
 fn message(branch: &str, request: &str) -> String {
     format!("{}{request}", INSTRUCTIONS.replace("{branch}", branch))
-}
-
-/// Why the agent did not end its work, or `None` when it did.
-fn stopped(stop: &Stop) -> Option<String> {
-    Some(match stop {
-        Stop::End => return None,
-        Stop::MaxTokens => "the AI model reached its limit of tokens".to_string(),
-        Stop::MaxRequests => "the agent reached its limit of requests to the AI model".to_string(),
-        Stop::Refusal => "the AI model refused to continue".to_string(),
-        Stop::Cancelled => "the message was stopped".to_string(),
-        Stop::Other(reason) => format!("the harness gave the reason `{reason}`"),
-    })
 }
 
 /// A new name for the branch that a worktree of a request starts on:
@@ -294,6 +491,18 @@ mod tests {
         let text = message("lira/run-0a1b2c3d", "Do {branch}\n");
         assert!(text.contains("The branch is `lira/run-0a1b2c3d` now."));
         assert!(text.ends_with("The request of the user:\n\nDo {branch}\n"));
+    }
+
+    #[test]
+    fn the_end_of_a_text_starts_at_a_line() {
+        assert_eq!(end_of("one\ntwo\n\n", 100), "one\ntwo");
+        assert_eq!(end_of("one\ntwo\nthree\n", 9), "three");
+        assert_eq!(end_of("one\ntwo\nthree\n", 10), "two\nthree");
+        // One long line has no start of a line in its end.
+        assert_eq!(end_of("abcdefghij", 4), "ghij");
+        // A cut does not go through a character.
+        assert_eq!(end_of("aééé", 3), "é");
+        assert_eq!(end_of("", 3), "");
     }
 
     #[test]

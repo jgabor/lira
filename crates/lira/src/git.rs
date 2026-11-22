@@ -261,6 +261,18 @@ pub fn current_branch(folder: &Path) -> Result<Option<String>, String> {
     Ok((!branch.is_empty()).then(|| branch.to_string()))
 }
 
+/// The commit that the worktree in a folder is at.
+pub fn head(folder: &Path) -> Result<String, String> {
+    run(folder, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map(|commit| commit.trim().to_string())
+        .map_err(|wrote| {
+            format!(
+                "Lira can't read the newest commit of `{}`. git wrote:\n{wrote}",
+                folder.display()
+            )
+        })
+}
+
 /// The subject of each commit that `to` has and `from` does not have, the
 /// oldest first.
 pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
@@ -272,6 +284,64 @@ pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, Stri
         )
     })?;
     Ok(log.lines().map(str::to_string).collect())
+}
+
+/// The changes of the worktree in a folder that are in no commit, one file
+/// on each line, as `git status --short` prints them. It is empty when all
+/// is in a commit.
+pub fn changes(folder: &Path) -> Result<String, String> {
+    // A setting of git can hide new files. Lira asks for them.
+    run(folder, &["status", "--short", "--untracked-files=all"]).map_err(|wrote| {
+        format!(
+            "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })
+}
+
+/// The change from the commit `from` to the commit `to`: all that `to` has
+/// and that the newest commit of both does not have. With `names`, it is
+/// the name of each file and how much of it changed, and not the lines.
+pub fn diff(folder: &Path, from: &str, to: &str, names: bool) -> Result<String, String> {
+    let range = format!("{from}...{to}");
+    let form = if names { "--stat=200" } else { "--patch" };
+    let args = ["diff", "--no-color", "--no-ext-diff", form, &range, "--"];
+    run(folder, &args).map_err(|wrote| {
+        format!(
+            "Lira can't read the change in `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })
+}
+
+/// Makes a copy of the repository in the new folder `copy`, with the files
+/// of a commit. The copy is a repository of its own: it shares no branch
+/// with the repository in `folder`, and it knows no remote. So what git
+/// does in the copy changes nothing outside it.
+pub fn add_copy(folder: &Path, copy: &Path, commit: &str) -> Result<(), String> {
+    let failed = |wrote: String| {
+        format!(
+            "Lira can't make a copy of the repository in `{}`. git wrote:\n{wrote}",
+            copy.display()
+        )
+    };
+    // `folder` is the top folder of a worktree, and git can copy from it.
+    // The name of the remote is fixed here: a setting of git can give the
+    // remote of a new copy another name, and Lira removes it by its name.
+    let clone = [
+        OsStr::new("clone"),
+        OsStr::new("--quiet"),
+        OsStr::new("--no-checkout"),
+        OsStr::new("--origin"),
+        OsStr::new("origin"),
+        OsStr::new("--"),
+        folder.as_os_str(),
+        copy.as_os_str(),
+    ];
+    run(folder, &clone).map_err(failed)?;
+    run(copy, &["checkout", "--quiet", "--detach", commit]).map_err(failed)?;
+    run(copy, &["remote", "remove", "origin"]).map_err(failed)?;
+    Ok(())
 }
 
 /// The commit that a remote has on this branch now, or `None` when the
