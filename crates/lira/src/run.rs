@@ -172,12 +172,14 @@ impl Run<'_> {
             }
             rounds += 1;
             if rounds == ROUNDS {
-                let quoted: String = review
-                    .text
-                    .trim()
-                    .lines()
-                    .map(|line| format!("> {line}\n"))
-                    .collect();
+                // A comment on GitHub has a largest size, so a long review
+                // is cut.
+                let text = review.text.trim();
+                let start = start_of(text, KEPT);
+                let mut quoted: String = start.lines().map(|line| format!("> {line}\n")).collect();
+                if start.len() < text.len() {
+                    quoted.push_str("\nThe rest is left out.\n");
+                }
                 return Err(Stopped::Asks {
                     error: format!(
                         "{ROUNDS} rounds of review ended with findings, so Lira stops here\nThe last Reviewer wrote:\n\n{}\n",
@@ -646,6 +648,15 @@ fn end_of(text: &str, most: usize) -> &str {
     }
 }
 
+/// The start of a text: at most `most` bytes, cut between two characters.
+fn start_of(text: &str, most: usize) -> &str {
+    let mut end = most.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// The message for the agent: the instructions, then the request as it is.
 fn message(branch: &str, request: &str) -> String {
     format!("{}{request}", INSTRUCTIONS.replace("{branch}", branch))
@@ -742,6 +753,13 @@ mod tests {
         assert_eq!(headings, ["## Problem", "## Change", "## Decisions"]);
         assert!(with_heading.contains("> ## Summary\n"));
         assert!(own_description("Do it.", &subjects, "").ends_with("\n\nThe agent named none.\n"));
+    }
+
+    #[test]
+    fn the_start_of_a_text_is_cut_between_two_characters() {
+        assert_eq!(start_of("abc", 10), "abc");
+        assert_eq!(start_of("abc", 2), "ab");
+        assert_eq!(start_of("éé", 3), "é");
     }
 
     #[test]

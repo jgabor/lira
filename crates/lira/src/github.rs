@@ -198,7 +198,7 @@ pub fn add_label(folder: &Path, address: &str, label: &str) -> Result<(), String
         .unwrap_or_default();
     let labels = format!("repos/{{owner}}/{{repo}}/issues/{number}/labels");
     let label = format!("labels[]={label}");
-    api(folder, &["--method", "POST", &labels, "-f", &label]).map(|_| ())
+    api(folder, &[&labels, "--method", "POST", "-f", &label]).map(|_| ())
 }
 
 /// Marks the pull request at `address` ready for review.

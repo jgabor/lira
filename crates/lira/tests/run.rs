@@ -1469,7 +1469,7 @@ done
     assert!(comment.contains("and fixed.txt is not there"), "{comment}");
     assert_eq!(
         repository.calls("api"),
-        ["api --method POST repos/{owner}/{repo}/issues/7/labels -f labels[]=needs:answer"]
+        ["api repos/{owner}/{repo}/issues/7/labels --method POST -f labels[]=needs:answer"]
     );
     assert_eq!(repository.kept("more-messages"), "message\nmessage");
     // The progress note says that Lira stopped, and why.
