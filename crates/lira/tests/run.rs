@@ -2162,6 +2162,13 @@ fn a_pull_request_whose_answer_got_lost_is_found_again() {
         listed[0].contains(&format!("--head {branch} ")),
         "{listed:?}"
     );
+    // A pull request from a copy of the repository on GitHub can have a
+    // branch with the same name. Lira asks for one of this repository.
+    assert!(listed[0].contains("isCrossRepository"), "{listed:?}");
+    assert!(
+        listed[0].contains("select(.isCrossRepository | not)"),
+        "{listed:?}"
+    );
     // Lira does not know which description the pull request got, so it
     // writes the description again.
     let edited = repository.calls("pr edit");
@@ -2460,4 +2467,26 @@ exec "{real}" "$@"
     // change, and the Reviewer read the change with it.
     assert_eq!(repository.order(), "check check review ready");
     assert!(repository.first_message(2).contains("+++ b/late.txt"));
+}
+
+#[test]
+fn commits_that_the_agent_takes_from_the_main_branch_are_not_its_work() {
+    // While the agent works, the main branch of the remote gets a commit
+    // of another person. The agent puts its work on top of it.
+    let work = r#"git branch -m fix/on-newer-main
+git clone --quiet "$(git remote get-url origin)" "$here/other"
+(cd "$here/other" && commit theirs 'A commit of another person' && git push --quiet origin main)
+git pull --quiet --rebase origin main
+commit mine 'Add my file'
+"#;
+    let repository = Repository::new("newer-main", CHECK, &format!("{work}{REPLY}"));
+    passed(&repository.run());
+    let created = repository.calls("pr create");
+    assert!(
+        created[0].contains("--title Add my file --body-file"),
+        "{created:?}"
+    );
+    let note = repository.gh("created");
+    assert!(note.contains("- Add my file\n"), "{note}");
+    assert!(!note.contains("another person"), "{note}");
 }

@@ -157,7 +157,10 @@ fn address_in(printed: &str) -> Option<String> {
 fn open_for(folder: &Path, head: &str) -> Result<Option<String>, String> {
     let args = ["list", "--head", head, "--state", "open"];
     let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-    args.extend(["--json", "url", "--jq", ".[].url"].map(OsStr::new));
+    // A copy of the repository on GitHub can have an open pull request from
+    // a branch with the same name. Lira takes only one of this repository.
+    let same = ".[] | select(.isCrossRepository | not) | .url";
+    args.extend(["--json", "url,isCrossRepository", "--jq", same].map(OsStr::new));
     Ok(address_in(&pull_request(folder, &args)?))
 }
 
