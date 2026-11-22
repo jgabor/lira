@@ -447,6 +447,23 @@ pub fn fast_forward(folder: &Path, commit: &str) -> Result<(), String> {
         })
 }
 
+/// Puts the worktree in `folder` on the branch `branch`.
+pub fn check_out(folder: &Path, branch: &str) -> Result<(), String> {
+    if current_branch(folder)?.as_deref() == Some(branch) {
+        return Ok(());
+    }
+    // A name of a branch does not start with `-`, and after `--` git takes
+    // no name of a file.
+    run(folder, &["checkout", "--quiet", branch, "--"])
+        .map(|_| ())
+        .map_err(|wrote| {
+            format!(
+                "Lira can't put the worktree `{}` on the branch `{branch}`. git wrote:\n{wrote}",
+                folder.display()
+            )
+        })
+}
+
 /// Removes what git keeps for each worktree whose folder is gone.
 pub fn prune_worktrees(folder: &Path) -> Result<(), String> {
     run(folder, &["worktree", "prune"])

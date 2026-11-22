@@ -128,6 +128,14 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
     let (made, on_remote) = worktree::continued(folder, &data, &view.branch)?;
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
+    let model = made.file.models.agent.as_deref();
+    let (agent, sandbox) = sandbox_of(&made.folder)
+        .and_then(|mut sandbox| {
+            agent::start(folder, &made.folder, &mut sandbox, &made.file, model)
+                .map(|agent| (agent, sandbox))
+        })
+        .map_err(|error| format!("{error}\nThe worktree {place} stays"))?;
+    // The pull request leaves the Inbox only when an agent works on it.
     if view.labels.iter().any(|label| label == NEEDS_ANSWER) {
         github::remove_label(folder, address, NEEDS_ANSWER)
             .map_err(|error| format!("Lira could not remove `{NEEDS_ANSWER}`: {error}"))?;
@@ -137,17 +145,23 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
             format!("Lira could not make the pull request a draft again: {error}")
         })?;
     }
-    let model = made.file.models.agent.as_deref();
-    let (agent, sandbox) = sandbox_of(&made.folder)
-        .and_then(|mut sandbox| {
-            agent::start(folder, &made.folder, &mut sandbox, &made.file, model)
-                .map(|agent| (agent, sandbox))
-        })
-        .map_err(|error| format!("{error}\nThe worktree {place} stays"))?;
+    // A Reviewer reads the change for the request and your answer.
+    let request = match read.answer.is_empty() {
+        true => read.request.clone(),
+        false => format!(
+            "{}\n\nThe user answered on the pull request:\n\n{}",
+            read.request,
+            read.answer
+                .iter()
+                .map(|answer| quote(answer))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    };
     let run = Run {
         started: folder,
         made: &made,
-        request: &read.request,
+        request: &request,
         agent,
         sandbox,
         pull_request: PullRequest::continued(&made, address, &view.branch, &on_remote)?,

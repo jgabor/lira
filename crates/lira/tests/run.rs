@@ -3739,11 +3739,11 @@ fn lira_continue_starts_a_new_agent_with_the_request_the_stop_and_your_answer() 
     assert!(message.contains(ANSWER), "{message}");
     // The check and a Reviewer passed the new commit, and the pull request
     // is ready for review.
-    assert!(
-        repository
-            .first_message(starts + 2)
-            .contains("+++ b/answer.txt")
-    );
+    let review = repository.first_message(starts + 2);
+    assert!(review.contains("+++ b/answer.txt"), "{review}");
+    // The Reviewer reads the change for the request and your answer.
+    assert!(review.contains(REQUEST), "{review}");
+    assert!(review.contains(ANSWER), "{review}");
     assert_eq!(
         repository.calls("pr ready"),
         [format!("pr ready {ADDRESS}")]
@@ -3919,13 +3919,16 @@ done
     let repository = Repository::checked("continue-check", NEEDS_FIXED, work);
     failed(&repository.run_in_order());
     repository.view(true, &[]);
-    // The new agent makes the file only after one more failed check.
+    // The new agent makes the file only after two more failed checks.
     program(
         &repository.harness.join("agent"),
         &format!(
             "{START}{}",
             r#"commit other 'Add another file'
 reply 'I made another file.'
+next
+commit more 'Add one more file'
+reply 'I made one more file.'
 next
 printf '%s\n' "$line" > "$here/second-message"
 commit fixed 'Add the fixed file'
@@ -3936,7 +3939,7 @@ reply 'I repaired it.'
     repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
     fs::remove_file(repository.shared.join("order")).unwrap();
     passed(&repository.continue_work());
-    assert_eq!(repository.order(), "check check review ready");
+    assert_eq!(repository.order(), "check check check review ready");
     assert!(
         repository
             .kept("second-message")
@@ -3945,6 +3948,41 @@ reply 'I repaired it.'
 }
 
 // spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
+#[test]
+fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
+    let repository = Repository::stopped("continue-no-harness");
+    repository.view(false, &["needs:answer"]);
+    let nothing = repository.top.join("nothing-here");
+    let output = repository
+        .lira()
+        .env("LIRA_HARNESS", &nothing)
+        .args(["continue", "7"])
+        .output()
+        .unwrap();
+    let error = failed(&output);
+    assert!(error.contains("nothing-here"), "{error}");
+    assert_eq!(
+        repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
+        Vec::<String>::new()
+    );
+    assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+}
+
+#[test]
+fn an_old_worktree_on_no_branch_goes_back_to_the_branch() {
+    let repository = Repository::stopped("continue-detached");
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+    passed(&repository.continue_work());
+    assert_eq!(PathBuf::from(repository.kept("folder")), old);
+    assert_eq!(repository.kept("branch"), branch);
+    assert_eq!(
+        repository.kept("log-at-start").lines().next(),
+        Some("Add a greeting")
+    );
+}
+
 // spec(lira continue): The work can stop and ask again.
 #[test]
 fn the_work_can_stop_and_ask_again() {
