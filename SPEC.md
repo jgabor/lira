@@ -141,6 +141,7 @@ Lira does these steps for each issue, in this order.
 
 - Lira runs the check command in the worktree of the change.
 - Lira runs the check command with `sh -c`.
+- Lira runs the check of an agent in the sandbox of the agent.
 - The check passes when its exit status is 0.
 - The check fails when its exit status is not 0.
 - Lira sets `LIRA_SCORES` to the path of an empty file before it runs the check.

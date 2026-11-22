@@ -56,9 +56,11 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     eprintln!("lira: the agent works in {place}");
 
     let model = made.file.models.agent.as_deref();
-    let started = sandbox_of(&made.folder)
-        .and_then(|sandbox| agent::start(folder, &made.folder, sandbox, &made.file, model));
-    let (harness, conversation) = match started {
+    let started = sandbox_of(&made.folder).and_then(|mut sandbox| {
+        agent::start(folder, &made.folder, &mut sandbox, &made.file, model)
+            .map(|(harness, conversation)| (harness, conversation, sandbox))
+    });
+    let (harness, conversation, sandbox) = match started {
         Ok(started) => started,
         // No agent worked in the worktree, so nothing in it is worth keeping.
         Err(error) => {
@@ -78,6 +80,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         request,
         harness,
         conversation,
+        sandbox,
         pull_request: PullRequest::new(&made)?,
         said: String::new(),
         outputs: 0,
@@ -106,19 +109,25 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
 fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
     let common = git::common_folder(folder)?;
     let hooks = common.join("hooks");
-    // An agent could make the folder of the hooks when it is not there.
-    fs::create_dir_all(&hooks)
-        .map_err(|error| format!("Lira can't make the folder `{}`: {error}", hooks.display()))?;
+    // The git folders of the submodules of the repository. Each has a
+    // configuration, which git reads when it goes into the submodule.
+    let modules = common.join("modules");
+    // An agent could make these folders when they are not there.
+    for made in [&hooks, &modules] {
+        fs::create_dir_all(made)
+            .map_err(|error| format!("Lira can't make the folder `{}`: {error}", made.display()))?;
+    }
     // A worktree has its own configuration of git when the repository says
     // so. The agent could make it when it is not there.
+    // The main worktree has one too, in the shared git folder.
     let own_config = git::own_file(folder, "config.worktree")?;
-    if !own_config.exists() {
-        fs::write(&own_config, "").map_err(|error| {
-            format!(
-                "Lira can't make the file `{}`: {error}",
-                own_config.display()
-            )
-        })?;
+    let main_config = common.join("config.worktree");
+    for config in [&own_config, &main_config] {
+        if !config.exists() {
+            fs::write(config, "").map_err(|error| {
+                format!("Lira can't make the file `{}`: {error}", config.display())
+            })?;
+        }
     }
     let own_folder = git::own_file(folder, "")?;
     let mut sandbox = Sandbox::new();
@@ -127,6 +136,8 @@ fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
         .writable(&common)
         .read_only(&hooks)
         .read_only(&common.join("config"))
+        .read_only(&main_config)
+        .read_only(&modules)
         // The git folders of the other worktrees say where git finds their
         // configuration, as the files below do for this one.
         .read_only(&common.join("worktrees"))
@@ -151,6 +162,9 @@ struct Run<'a> {
     /// the findings of a Reviewer.
     harness: Harness,
     conversation: String,
+    /// The sandbox of the agent. The check runs in it too: the check runs
+    /// the code of the change, and that is code of the agent.
+    sandbox: Sandbox,
     pull_request: PullRequest<'a>,
     /// The newest reply of the agent.
     said: String,
@@ -429,7 +443,13 @@ impl Run<'_> {
         }
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
         let base = git::base(folder, &main)?;
-        let outcome = check::run(&self.made.file, folder, &base, Output::Kept)?;
+        let outcome = check::run(
+            &self.made.file,
+            folder,
+            &base,
+            Output::Kept,
+            Some(&self.sandbox),
+        )?;
         let command = &self.made.file.check;
         if outcome.passed {
             // A check can also go to another commit. Then it passed that

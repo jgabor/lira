@@ -16,11 +16,12 @@ const HARNESS: &str = "claude-agent-acp";
 /// `from` is the folder that Lira started in. `file` is the Lira file, and
 /// `model` is the AI model for the agent, when the Lira file names one.
 ///
-/// The harness runs in `sandbox`. It can change its own data there too.
+/// The harness runs in `sandbox`. It can change its own data there too, and
+/// `sandbox` has that data afterwards: it is then the sandbox of the agent.
 pub fn start(
     from: &Path,
     folder: &Path,
-    mut sandbox: Sandbox,
+    sandbox: &mut Sandbox,
     file: &LiraFile,
     model: Option<&str>,
 ) -> Result<(Harness, String), String> {

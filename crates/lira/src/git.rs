@@ -289,9 +289,20 @@ pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, Stri
 /// The changes of the worktree in a folder that are in no commit, one file
 /// on each line, as `git status --short` prints them. It is empty when all
 /// is in a commit.
+///
+/// A submodule counts as changed when it is at another commit. git does not
+/// go into the submodule for that. Lira runs this outside the sandbox of the
+/// agent, and the agent can write the configuration of a submodule, so git
+/// in the submodule would run what the agent wrote there.
 pub fn changes(folder: &Path) -> Result<String, String> {
     // A setting of git can hide new files. Lira asks for them.
-    run(folder, &["status", "--short", "--untracked-files=all"]).map_err(|wrote| {
+    let args = [
+        "status",
+        "--short",
+        "--untracked-files=all",
+        "--ignore-submodules=dirty",
+    ];
+    run(folder, &args).map_err(|wrote| {
         format!(
             "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
             folder.display()
@@ -302,10 +313,22 @@ pub fn changes(folder: &Path) -> Result<String, String> {
 /// The change from the commit `from` to the commit `to`: all that `to` has
 /// and that the newest commit of both does not have. With `names`, it is
 /// the name of each file and how much of it changed, and not the lines.
+///
+/// A submodule shows as the commits that it moved between. git does not go
+/// into the submodule for that, so it runs nothing that the agent wrote in
+/// the configuration of the submodule.
 pub fn diff(folder: &Path, from: &str, to: &str, names: bool) -> Result<String, String> {
     let range = format!("{from}...{to}");
     let form = if names { "--stat=200" } else { "--patch" };
-    let args = ["diff", "--no-color", "--no-ext-diff", form, &range, "--"];
+    let args = [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--submodule=short",
+        form,
+        &range,
+        "--",
+    ];
     run(folder, &args).map_err(|wrote| {
         format!(
             "Lira can't read the change in `{}`. git wrote:\n{wrote}",
@@ -418,11 +441,23 @@ pub fn push(
     let full = format!("refs/heads/{branch}");
     let lease = format!("--force-with-lease={full}:{}", before.unwrap_or(""));
     let what = format!("{commit}:{full}");
-    run(folder, &["push", "--quiet", &lease, "--", remote, &what])
-        .map(|_| ())
-        .map_err(|wrote| {
-            format!("Lira can't push the branch `{branch}` to the remote `{remote}`. git wrote:\n{wrote}")
-        })
+    // A setting of git can push the submodules first. git goes into a
+    // submodule for that, and runs what the agent wrote in its
+    // configuration.
+    let args = [
+        "push",
+        "--quiet",
+        "--recurse-submodules=no",
+        &lease,
+        "--",
+        remote,
+        &what,
+    ];
+    run(folder, &args).map(|_| ()).map_err(|wrote| {
+        format!(
+            "Lira can't push the branch `{branch}` to the remote `{remote}`. git wrote:\n{wrote}"
+        )
+    })
 }
 
 /// The path of a file that git keeps for the worktree in a folder, outside
