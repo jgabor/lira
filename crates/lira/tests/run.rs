@@ -147,6 +147,19 @@ if [ "$1 $2" = "pr edit" ]; then
   [ -e "$here/slow-edit" ] && sleep 1
   exit 0
 fi
+if [ "$1 $2" = "pr comment" ]; then
+  [ -n "$ORDER" ] && echo comment >> "$ORDER"
+  cp "$description" "$here/commented"
+  exit 0
+fi
+if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/labels$'; then
+  [ -n "$ORDER" ] && echo label >> "$ORDER"
+  if [ -e "$here/no-label" ]; then
+    echo "the stand-in for gh adds no label" >&2
+    exit 1
+  fi
+  exit 0
+fi
 if [ "$1 $2" = "pr ready" ]; then
   [ -n "$ORDER" ] && echo ready >> "$ORDER"
   cp "$here/edited" "$here/description-when-ready" 2>/dev/null || cp "$here/created" "$here/description-when-ready"
@@ -1422,8 +1435,12 @@ fn when_the_check_fails_lira_gives_its_output_to_the_agent() {
     );
 }
 
+// spec(Steps): After 3 failed tries at the same check, the agent stops and asks.
+// spec(Steps): When an agent stops and asks, Lira adds `needs:answer` to the pull request, or to the issue if there is no pull request.
+// spec(lira run): When the agent stops and asks, Lira writes what stops the work as a comment on the pull request: what the last check wrote, or what the last Reviewer wrote.
+// spec(lira run): Then `lira run` fails, and says why Lira stopped.
 #[test]
-fn a_check_that_fails_three_times_ends_the_run_with_a_failure() {
+fn a_check_that_fails_three_times_stops_and_asks() {
     // This agent never makes the file that the check looks for.
     let work = r#"commit greeting 'Add a greeting'
 reply 'I made the file.'
@@ -1439,8 +1456,21 @@ done
     assert!(error.contains("did not pass the check 3 times"), "{error}");
     assert!(error.contains("and fixed.txt is not there"), "{error}");
     // Lira asked the agent to repair the change after the first and after
-    // the second failure.
-    assert_eq!(repository.order(), "check check check");
+    // the second failure. Then it wrote the comment, and added the label.
+    assert_eq!(repository.order(), "check check check comment label");
+    let comments = repository.calls("pr comment");
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert!(comments[0].starts_with(&format!("pr comment {ADDRESS} ")));
+    let comment = repository.gh("commented");
+    assert!(
+        comment.contains("did not pass the check 3 times"),
+        "{comment}"
+    );
+    assert!(comment.contains("and fixed.txt is not there"), "{comment}");
+    assert_eq!(
+        repository.calls("api"),
+        ["api --method POST repos/{owner}/{repo}/issues/7/labels -f labels[]=needs:answer"]
+    );
     assert_eq!(repository.kept("more-messages"), "message\nmessage");
     // The progress note says that Lira stopped, and why.
     let note = repository.gh("edited");
@@ -1536,7 +1566,7 @@ fn with_a_check_that_fails_no_reviewer_reads_the_change() {
     let repository = Repository::checked("no-review", NEEDS_FIXED, work);
     repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
     failed(&repository.run_in_order());
-    assert_eq!(repository.order(), "check check check");
+    assert_eq!(repository.order(), "check check check comment label");
 }
 
 // SPEC.md says: "A Reviewer can't change a file." This test shows that
@@ -1647,8 +1677,9 @@ fi
     );
 }
 
+// spec(Steps): After 3 rounds of review with open findings, the agent stops and asks.
 #[test]
-fn three_rounds_of_review_with_findings_end_the_run_with_a_failure() {
+fn three_rounds_of_review_with_findings_stop_and_ask() {
     let work = r#"commit greeting 'Add a greeting'
 reply 'I made the file.'
 while :; do
@@ -1659,7 +1690,7 @@ done
 "#;
     let repository = Repository::new("findings-always", CHECK, work);
     repository.reviewer("reply 'It is still wrong.\\n\\nReview: findings'\n");
-    let output = repository.run();
+    let output = repository.run_in_order();
     let error = failed(&output);
     assert!(error.contains("3 rounds"), "{error}");
     assert!(error.contains("It is still wrong."), "{error}");
@@ -1672,8 +1703,39 @@ done
     let next = next.split("## Decisions").next().unwrap();
     assert!(next.contains("Lira stopped"), "{note}");
     assert!(next.contains("3 rounds of review"), "{note}");
+    // The comment has the findings of the last Reviewer, and the pull
+    // request has the label.
+    let comment = repository.gh("commented");
+    assert!(comment.contains("3 rounds of review"), "{comment}");
+    assert!(comment.contains("It is still wrong."), "{comment}");
+    assert_eq!(repository.order(), "comment label");
+    assert_eq!(repository.calls("api").len(), 1);
     assert!(error.contains(ADDRESS), "{error}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn a_label_that_github_does_not_add_is_named_in_the_error() {
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+while :; do
+  next
+  reply 'I do not agree.'
+done
+"#;
+    let repository = Repository::new("no-label", CHECK, work);
+    repository.reviewer("reply 'It is still wrong.\\n\\nReview: findings'\n");
+    fs::write(repository.top.join("bin").join("no-label"), "").unwrap();
+    let error = failed(&repository.run());
+    assert!(error.contains("3 rounds"), "{error}");
+    assert!(
+        error.contains("Lira could not add `needs:answer`"),
+        "{error}"
+    );
+    assert!(
+        error.contains("the stand-in for gh adds no label"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -2537,7 +2599,7 @@ while :; do next; reply 'I stay here.'; done
     let error = failed(&repository.run_in_order());
     assert!(error.contains("did not pass the check 3 times"), "{error}");
     assert!(error.contains("the check did not run"), "{error}");
-    assert_eq!(repository.order(), "");
+    assert_eq!(repository.order(), "comment label");
     assert_eq!(repository.starts(), 1);
 }
 
