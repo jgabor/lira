@@ -210,6 +210,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - The request needs no issue.
 - The new worktree starts on a branch `lira/run-<8 letters or digits>`.
 - The instructions tell the agent to give the branch a name that says what the work is, such as `fix/login-timeout`.
+- When the remote has a branch with the name that the agent chose, Lira tells the agent to give its branch another name.
+- *Proposed:* After 3 such messages with no new name, `lira run` fails.
 - Lira opens a draft pull request at the first commit of the agent.
 - The title of the pull request is the subject of the first commit.
 - When the agent makes no commit, Lira opens no pull request, and `lira run` fails.

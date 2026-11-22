@@ -116,6 +116,8 @@ if [ "$1 $2" = "pr list" ]; then
 fi
 if [ "$1 $2" = "pr edit" ]; then
   cp "$description" "$here/edited"
+  # A slow answer of GitHub.
+  [ -e "$here/slow-edit" ] && sleep 1
   exit 0
 fi
 echo "the stand-in for gh has no answer for: $1 $2" >&2
@@ -1034,31 +1036,68 @@ fn when_the_work_is_complete_the_progress_note_has_what_the_agent_wrote() {
     assert!(note.contains("- Add a greeting\n"), "{note}");
 }
 
-#[test]
-fn a_branch_that_the_remote_has_already_gets_another_name_there() {
-    let work = "git branch -m feat/taken\n";
-    let repository = Repository::new("taken", CHECK, &format!("{work}{WORK}"));
-    // Another person pushed a branch with this name.
+/// A repository whose remote has a branch `feat/taken` of another person
+/// already. It returns the commit of that branch too.
+fn with_a_taken_branch(test: &str, work: &str) -> (Repository, Option<String>) {
+    let repository = Repository::new(test, CHECK, work);
     git_ok(&repository.seed, &["branch", "feat/taken"]);
     let remote = repository.remote.to_str().unwrap();
     git_ok(&repository.seed, &["push", "--quiet", remote, "feat/taken"]);
     let theirs = repository.on_remote("feat/taken");
+    assert!(theirs.is_some());
+    (repository, theirs)
+}
 
+// spec(lira run): When the remote has a branch with the name that the agent chose, Lira tells the agent to give its branch another name.
+#[test]
+fn the_agent_renames_a_branch_that_the_remote_has_already() {
+    // The agent gives its branch another name when a second message comes.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}next\nprintf '%s\\n' \"$line\" > \"$here/second\"\ngit branch -m feat/free\n{REPLY}"
+    );
+    let (repository, theirs) = with_a_taken_branch("taken", &work);
     let output = repository.run();
     passed(&output);
+    // Lira told the agent which name the remote has, and how to change it.
+    let second = repository.kept("second");
+    assert!(second.contains("\"method\":\"session/prompt\""), "{second}");
+    assert!(second.contains("`feat/taken`"), "{second}");
+    assert!(second.contains("git branch -m"), "{second}");
+    // The branch of the other person is as it was, and the work is on the
+    // branch with the new name, and on no other branch.
     assert_eq!(repository.on_remote("feat/taken"), theirs);
     let folder = PathBuf::from(repository.kept("folder"));
     assert_eq!(
-        repository.on_remote("feat/taken-2"),
+        repository.on_remote("feat/free"),
         Some(git_ok(&folder, &["rev-parse", "HEAD"]))
     );
+    assert_eq!(repository.on_remote("feat/taken-2"), None);
     let created = repository.calls("pr create");
-    assert!(created[0].contains("--head feat/taken-2 "), "{created:?}");
-    assert!(
-        errors(&output).contains("`feat/taken-2`"),
-        "{}",
-        errors(&output)
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].contains("--head feat/free "), "{created:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), ADDRESS);
+    // The progress note has what the agent wrote at the end of its work,
+    // and not its answer to the second message.
+    let note = repository.gh("created");
+    assert!(note.contains("- Add a greeting\n"), "{note}");
+}
+
+#[test]
+fn an_agent_that_keeps_a_taken_name_is_a_failure_after_3_messages() {
+    // The agent answers each message, and never changes the name.
+    let work = format!(
+        "git branch -m feat/taken\n{WORK}while :; do\nnext\necho asked >> \"$here/asked\"\n{REPLY}done\n"
     );
+    let (repository, theirs) = with_a_taken_branch("never-renamed", &work);
+    let error = failed(&repository.run());
+    assert!(error.contains("`feat/taken`"), "{error}");
+    assert!(error.contains("3 messages"), "{error}");
+    assert_eq!(repository.kept("asked").lines().count(), 3);
+    // Lira pushed nothing, and opened no pull request.
+    assert_eq!(repository.on_remote("feat/taken"), theirs);
+    assert_eq!(repository.calls("pr create"), Vec::<String>::new());
+    let branches = git_ok(&repository.remote, &["branch", "--list"]);
+    assert_eq!(branches.lines().count(), 2, "{branches}");
 }
 
 #[test]
@@ -1511,43 +1550,31 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
 }
 
 #[test]
-fn a_child_of_the_harness_does_not_change_the_work_after_the_reply() {
-    // GitHub does not answer yet. The harness leaves a child that makes a
-    // commit as soon as the pull request is there, which is after the reply
-    // ended.
-    let work = r#"git branch -m fix/no-late-commit
+fn a_commit_that_comes_after_the_reply_is_in_the_pull_request() {
+    // Lira needs the harness after the reply, to ask for another name of
+    // the branch. So a child of the harness can still make a commit then.
+    // This one makes it while Lira writes the progress note at the end.
+    let work = r#"git branch -m fix/late-commit
 commit one 'Add a file'
-git rev-parse HEAD > "$here/one"
 ended
-until [ -e "$here/../bin/create-started" ]; do sleep 0.05; done
-(until [ -e "$here/../bin/created" ]; do sleep 0.05; done; commit late 'A late commit') > /dev/null 2>&1 &
-echo "$!" > "$here/child"
+called 'pr create'
+(until [ -e "$here/../bin/edited" ]; do sleep 0.05; done; commit late 'A late commit') > /dev/null 2>&1 &
 "#;
     let repository = Repository::new("late-child", CHECK, &format!("{work}{REPLY}"));
-    let bin = repository.top.join("bin");
-    fs::write(bin.join("hold-create"), "").unwrap();
-    let lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
-    // Lira stops the harness and its child when the reply ends, while
-    // GitHub still does not answer.
-    let child = repository.harness.join("child");
-    wait_for("the start of the child", || {
-        fs::read_to_string(&child).is_ok_and(|text| text.ends_with('\n'))
-    });
-    let child = repository.kept("child");
-    wait_for("the end of the child", || !runs(&child));
-    assert!(!bin.join("created").exists());
-    // Now GitHub answers.
-    fs::write(bin.join("go"), "").unwrap();
-    passed(&lira.wait_with_output().unwrap());
-    assert_eq!(
-        repository.on_remote("fix/no-late-commit"),
-        Some(repository.kept("one"))
-    );
+    fs::write(repository.top.join("bin").join("slow-edit"), "").unwrap();
+    passed(&repository.run());
+    // Lira looked one more time after it stopped the harness.
     let folder = PathBuf::from(repository.kept("folder"));
     assert_eq!(
-        git_ok(&folder, &["rev-parse", "HEAD"]),
-        repository.kept("one")
+        git_ok(&folder, &["log", "-1", "--format=%s"]),
+        "A late commit"
     );
+    assert_eq!(
+        repository.on_remote("fix/late-commit"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    let note = repository.gh("edited");
+    assert!(note.contains("- A late commit\n"), "{note}");
 }
 
 #[test]
