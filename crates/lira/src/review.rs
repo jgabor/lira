@@ -127,7 +127,7 @@ fn message(worktree: &Worktree, request: &str, from: &str, to: &str) -> Result<S
 
 /// Puts each value in the place of its name in braces. A value is not read
 /// again, so braces in a request or in a change stay as they are.
-fn fill(text: &str, values: &[(&str, &str)]) -> String {
+pub fn fill(text: &str, values: &[(&str, &str)]) -> String {
     let mut filled = String::new();
     let mut rest = text;
     while let Some(open) = rest.find('{') {

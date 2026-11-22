@@ -400,6 +400,60 @@ pub fn remote_commit(folder: &Path, remote: &str, branch: &str) -> Result<Option
     }
 }
 
+/// Gets the newest commit of the branch `branch` of a remote, and returns
+/// it. The remote must have the branch.
+pub fn fetch_branch(folder: &Path, remote: &str, branch: &str) -> Result<String, String> {
+    let failed = |wrote: String| {
+        format!(
+            "Lira can't get the branch `{branch}` from the remote `{remote}`. git wrote:\n{wrote}"
+        )
+    };
+    let full = format!("refs/remotes/{remote}/{branch}");
+    let what = format!("+refs/heads/{branch}:{full}");
+    run(
+        folder,
+        &["fetch", "--quiet", "--no-tags", "--", remote, &what],
+    )
+    .map_err(failed)?;
+    let commit = run(
+        folder,
+        &["rev-parse", "--verify", &format!("{full}^{{commit}}")],
+    )
+    .map_err(failed)?;
+    Ok(commit.trim().to_string())
+}
+
+/// If the commit `older` is in the history of the commit `newer`.
+pub fn is_in(folder: &Path, older: &str, newer: &str) -> Result<bool, String> {
+    match ask(folder, &["merge-base", "--is-ancestor", older, newer])? {
+        Ok(_) => Ok(true),
+        Err(wrote) if wrote.is_empty() => Ok(false),
+        Err(wrote) => Err(format!(
+            "Lira can't compare the commits `{older}` and `{newer}`. git wrote:\n{wrote}"
+        )),
+    }
+}
+
+/// Moves the branch of the worktree in `folder` forward to `commit`, and
+/// its files with it.
+pub fn fast_forward(folder: &Path, commit: &str) -> Result<(), String> {
+    run(folder, &["merge", "--quiet", "--ff-only", commit])
+        .map(|_| ())
+        .map_err(|wrote| {
+            format!(
+                "Lira can't move the worktree `{}` to the commit `{commit}`. git wrote:\n{wrote}",
+                folder.display()
+            )
+        })
+}
+
+/// Removes what git keeps for each worktree whose folder is gone.
+pub fn prune_worktrees(folder: &Path) -> Result<(), String> {
+    run(folder, &["worktree", "prune"])
+        .map(|_| ())
+        .map_err(|wrote| format!("Lira can't prune the worktrees. git wrote:\n{wrote}"))
+}
+
 /// The commit of a branch of the repository, or `None` when the repository
 /// has no such branch.
 pub fn commit_of(folder: &Path, branch: &str) -> Result<Option<String>, String> {
@@ -554,6 +608,18 @@ pub fn add_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), 
 /// The branch says which worktree it is, and the folder does not: a
 /// command can move a worktree, and put another one in its place.
 pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), String> {
+    remove(folder, worktree, branch, true)
+}
+
+/// Removes the worktree of a branch, as `remove_worktree` does, and keeps
+/// the branch. It is for a branch that was there before Lira made the
+/// worktree.
+pub fn remove_only_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(), String> {
+    remove(folder, worktree, branch, false)
+}
+
+/// Removes the worktree of a branch, and with `with_branch` the branch.
+fn remove(folder: &Path, worktree: &Path, branch: &str, with_branch: bool) -> Result<(), String> {
     let mut wrote = Vec::new();
     if let Some(now) = worktree_of(folder, branch)? {
         // git removes its record of the worktree, also when the folder is
@@ -578,7 +644,8 @@ pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(
             worktree.display()
         )),
     }
-    if has_branch(folder, branch)?
+    if with_branch
+        && has_branch(folder, branch)?
         && let Err(error) = run(folder, &["branch", "--quiet", "-D", branch])
     {
         wrote.push(error);
@@ -591,7 +658,7 @@ pub fn remove_worktree(folder: &Path, worktree: &Path, branch: &str) -> Result<(
 }
 
 /// The folder of the worktree that has this branch, as git has it now.
-fn worktree_of(folder: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+pub fn worktree_of(folder: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
     let mut command = Command::new("git");
     command
         .args(["worktree", "list", "--porcelain", "-z"])
