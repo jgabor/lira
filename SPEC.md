@@ -70,6 +70,7 @@ branch of a change.
 
 - Lira uses the token of the GitHub command line, `gh`.
 - Lira stops with an error that names `gh auth login` when `gh` has no login.
+- An agent and a Reviewer have no login for GitHub.
 - Lira asks GitHub for changes at a fixed interval, and after each of its own writes.
 - Lira writes nothing to a repository that has no Lira file on its main branch, except the setup pull request.
 

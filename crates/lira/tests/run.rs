@@ -1396,6 +1396,95 @@ reply 'Review: pass'
     assert!(!Path::new(&own).exists(), "{own}");
 }
 
+/// Writes each login for GitHub that a program in the sandbox sees, to the
+/// file that follows it. `socket` is the socket of the ssh agent.
+const LOGINS: &str = r#"logins() {
+  for folder in "$GH_CONFIG_DIR" "$XDG_CONFIG_HOME/gh" "$HOME/.config/gh" "$HOME/.ssh"; do
+    echo "$folder: $(ls -A "$folder" 2>&1)"
+  done
+  [ -S "$HOME/s" ] && echo "the socket of the ssh agent is there"
+  env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|SSH_AUTH_SOCK)=' || true
+}
+"#;
+
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_have_no_login_for_github() {
+    let work = format!("{LOGINS}logins > \"$here/agent-logins\"\n{WORK}");
+    let check = format!(
+        "{LOGINS}root=\"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")\"\nlogins > \"$root/../stand-in/check-logins\"\n"
+    );
+    let repository = Repository::checked("logins", &check, &work);
+    repository.reviewer(&format!(
+        "{LOGINS}logins > \"$here/reviewer-logins\"\nreply 'Review: pass'\n"
+    ));
+    // The host keeps a login in each place where `gh` and ssh look for one.
+    let home = repository.top.join("home");
+    let folders = [
+        repository.top.join("gh-config"),
+        repository.top.join("xdg-config").join("gh"),
+        home.join(".config").join("gh"),
+        home.join(".ssh"),
+    ];
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    let socket = home.join("s");
+    let _agent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let output = repository
+        .lira()
+        .env("GH_CONFIG_DIR", &folders[0])
+        .env("XDG_CONFIG_HOME", repository.top.join("xdg-config"))
+        .env("SSH_AUTH_SOCK", &socket)
+        .env("GH_TOKEN", "secret")
+        .env("GITHUB_TOKEN", "secret")
+        .env("GH_ENTERPRISE_TOKEN", "secret")
+        .env("GITHUB_ENTERPRISE_TOKEN", "secret")
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    // Each folder is empty, the socket is not there, and no variable has a
+    // token.
+    let empty: String = folders
+        .iter()
+        .map(|folder| format!("{}: \n", folder.display()))
+        .collect();
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("agent-logins")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("reviewer-logins")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.shared.join("check-logins")).unwrap(),
+        empty
+    );
+    // Lira keeps the login: it pushed the branch, opened the pull request,
+    // and marked it ready for review.
+    passed(&output);
+    let branch = repository.kept("branch");
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(repository.calls("pr create").len(), 1);
+    assert_eq!(
+        repository.calls("pr ready"),
+        [format!("pr ready {ADDRESS}")]
+    );
+    // The logins of the host are as they were.
+    for folder in &folders {
+        assert_eq!(
+            fs::read_to_string(folder.join("login")).unwrap(),
+            "secret\n"
+        );
+    }
+}
+
 // spec(Steps): When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
 #[test]
 fn with_no_bwrap_lira_runs_no_agent() {
@@ -2758,6 +2847,10 @@ reply '## Problem\n\nNo greeting.\n\n## Change\n\nA greeting.\n\n## Decisions\n\
 // SPEC.md says: "A change from `lira run` always waits for you." This test
 // shows that `lira run` stops at the pull request that is ready. It is no
 // quote: the merge queue is not there yet, so no test can show "always".
+// The agent has no login for GitHub in the places that Lira knows of, so it
+// can't merge with those. A login that the harness keeps in another place
+// stays in reach of the agent, so no test can show "always" for the agent
+// either.
 #[test]
 fn lira_run_stops_at_the_pull_request_that_is_ready() {
     let repository = Repository::new("waits", CHECK, &work_and_describe(DESCRIPTION));

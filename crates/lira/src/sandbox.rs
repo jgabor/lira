@@ -1,6 +1,7 @@
 //! The sandbox of an agent. The harness runs in it, and so does the check of
 //! the change of the agent. What runs in it can change files only in the
-//! folders that Lira names. It can read all files of the host.
+//! folders that Lira names. It can read all files of the host, except the
+//! logins for GitHub.
 //!
 //! This is the one place that knows how the sandbox works. Lira makes it
 //! with the program `bwrap` (bubblewrap), so it runs on Linux only.
@@ -67,9 +68,67 @@ impl Sandbox {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
+        hide_logins(&mut command);
         command.arg("--").arg(program);
         command
     }
+}
+
+/// The variables that can hold a token for GitHub, for `gh` and for git.
+const TOKENS: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// The variable that names the socket of the ssh agent.
+const SSH_AGENT: &str = "SSH_AUTH_SOCK";
+
+/// Hides the logins for GitHub that the host keeps in the known places.
+/// Lira keeps them, because Lira pushes the branch and opens the pull
+/// request. A folder of logins is empty in the sandbox, the socket of the
+/// ssh agent is not a socket there, and the variables with a token are not
+/// set. This comes after the other paths, so that it wins over them.
+fn hide_logins(command: &mut Command) {
+    for folder in login_folders() {
+        if let Ok(folder) = folder.canonicalize()
+            && folder.is_dir()
+        {
+            command.arg("--tmpfs").arg(folder);
+        }
+    }
+    let socket = std::env::var_os(SSH_AGENT).map(PathBuf::from);
+    if let Some(socket) = socket.and_then(|socket| socket.canonicalize().ok())
+        && !socket.is_dir()
+    {
+        command.arg("--ro-bind").arg("/dev/null").arg(socket);
+    }
+    for name in TOKENS.iter().chain([&SSH_AGENT]) {
+        command.env_remove(name);
+    }
+}
+
+/// The folders where `gh` and ssh keep logins for GitHub. `gh` keeps its
+/// login in `GH_CONFIG_DIR`, or in `gh` in `XDG_CONFIG_HOME`, or in
+/// `~/.config/gh`. Each of them is here, so that the agent finds no login
+/// when it sets the variables in another way. `git push` gets its password
+/// from `gh` too. ssh keeps its keys in `~/.ssh`.
+fn login_folders() -> Vec<PathBuf> {
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let mut folders = Vec::new();
+    if let Some(folder) = set("GH_CONFIG_DIR") {
+        folders.push(PathBuf::from(folder));
+    }
+    if let Some(folder) = set("XDG_CONFIG_HOME") {
+        folders.push(Path::new(&folder).join("gh"));
+    }
+    if let Some(home) = set("HOME") {
+        let home = Path::new(&home);
+        folders.push(home.join(".config").join("gh"));
+        folders.push(home.join(".ssh"));
+    }
+    folders
 }
 
 /// `bwrap` with what each sandbox has: all files of the host, read-only;
