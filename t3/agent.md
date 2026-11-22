@@ -57,7 +57,7 @@ can't continue, stop and ask as AGENTS.md says.
 
 7. Load `mcp__t3-code__delegate_task` with ToolSearch. Start a Reviewer with
    `role` set to `review`, `mode` set to `wait`, and `timeoutMs` set to
-   600000. Use the first `target` of these that works, in this order, so
+   45000, the most that `delegate_task` allows. Use the first `target` of these that works, in this order, so
    that the Reviewer has a different harness from yours when one is
    available:
 
