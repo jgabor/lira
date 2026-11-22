@@ -1344,7 +1344,15 @@ echo "the last line says what is wrong"
         "{second}"
     );
     assert!(second.contains("line 2999 of the output"), "{second}");
-    assert!(second.contains("The start is left out."), "{second}");
+    // The message names a file with all that the check wrote.
+    assert!(second.contains("The start is left out"), "{second}");
+    let file = second
+        .split('`')
+        .find(|part| part.ends_with("lira-check-output.txt"))
+        .unwrap_or_else(|| panic!("the message names no file:\n{second}"));
+    let whole = fs::read_to_string(file).unwrap();
+    assert!(whole.contains("line 0 of the output"), "{file}");
+    assert!(whole.contains("the last line says what is wrong"), "{file}");
     assert!(!second.contains("line 0 of the output"), "{second}");
     assert!(second.len() < 30_000, "{}", second.len());
 }
@@ -1362,6 +1370,11 @@ git commit --quiet --message 'Add the fixed file'
 reply 'I committed it.'
 "#;
     let repository = Repository::checked("not-in-a-commit", NEEDS_FIXED, work);
+    // A setting of git that hides new files changes nothing.
+    git_ok(
+        &repository.root,
+        &["config", "status.showUntrackedFiles", "no"],
+    );
     passed(&repository.run_in_order());
     let second = kept_message(&repository, "second-message");
     assert!(second.contains("in no commit"), "{second}");
@@ -1417,6 +1430,10 @@ echo changed > greeting.txt
 echo new > new.txt
 git add --all
 git commit --quiet --message 'A commit of the Reviewer'
+git update-ref refs/heads/feat/reviewed HEAD
+git branch --force feat/reviewed HEAD 2> /dev/null
+git push --quiet --force origin HEAD:refs/heads/feat/reviewed 2> /dev/null
+git remote > "$here/review-remotes"
 reply 'I changed it.\n\nReview: pass'
 "#,
     );
@@ -1447,6 +1464,8 @@ reply 'I changed it.\n\nReview: pass'
         repository.on_remote("feat/reviewed"),
         Some(git_ok(&folder, &["rev-parse", "HEAD"]))
     );
+    // The copy of the Reviewer knew no remote to push to.
+    assert_eq!(repository.kept("review-remotes"), "");
     // The folder of the Reviewer is gone, and git has no record of it.
     assert!(!review.exists());
     let worktrees = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
@@ -2068,4 +2087,46 @@ next
     passed(&output);
     assert!(repository.harness.join("answered-first").exists());
     assert_eq!(repository.calls("pr create").len(), 1);
+}
+
+#[test]
+fn a_check_that_changes_a_file_and_passes_did_not_pass_the_change() {
+    // This check repairs a file, as a command that formats files does, and
+    // passes. The commit of the agent does not have the repair.
+    let check = "echo check >> \"$ORDER\"\necho formatted > greeting.txt\n";
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+git commit --quiet --all --message 'Format the greeting'
+reply 'I committed it.'
+"#;
+    let repository = Repository::checked("check-changes", check, work);
+    repository.reviewer("cat greeting.txt > \"$here/review-greeting\"\nreply 'Review: pass'\n");
+    passed(&repository.run_in_order());
+    let second = kept_message(&repository, "second-message");
+    assert!(second.contains("greeting.txt"), "{second}");
+    assert!(second.contains("the check"), "{second}");
+    // The check ran again on the commit with the repair, and the Reviewer
+    // read that commit.
+    assert_eq!(repository.order(), "check check");
+    assert_eq!(repository.kept("review-greeting"), "formatted");
+}
+
+#[test]
+fn a_failed_check_with_scores_that_lira_can_not_read_still_goes_to_the_agent() {
+    let check = r#"if [ ! -e fixed.txt ]; then
+  echo "assertion failed: fixed.txt is not there" >&2
+  echo "this is no score line" > "$LIRA_SCORES"
+  exit 1
+fi
+"#;
+    let repository = Repository::checked("check-scores", check, WORK_THEN_REPAIR);
+    passed(&repository.run_in_order());
+    let second = kept_message(&repository, "second-message");
+    assert!(
+        second.contains("assertion failed: fixed.txt is not there"),
+        "{second}"
+    );
+    assert!(second.contains("score"), "{second}");
 }

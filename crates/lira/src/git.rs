@@ -283,7 +283,8 @@ pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, Stri
 /// on each line, as `git status --short` prints them. It is empty when all
 /// is in a commit.
 pub fn changes(folder: &Path) -> Result<String, String> {
-    run(folder, &["status", "--short"]).map_err(|wrote| {
+    // A setting of git can hide new files. Lira asks for them.
+    run(folder, &["status", "--short", "--untracked-files=all"]).map_err(|wrote| {
         format!(
             "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
             folder.display()
@@ -306,39 +307,30 @@ pub fn diff(folder: &Path, from: &str, to: &str, names: bool) -> Result<String, 
     })
 }
 
-/// Makes a worktree in the new folder `copy`, with the files of a commit
-/// and on no branch. What is done in it changes no branch.
+/// Makes a copy of the repository in the new folder `copy`, with the files
+/// of a commit. The copy is a repository of its own: it shares no branch
+/// with the repository in `folder`, and it knows no remote. So what git
+/// does in the copy changes nothing outside it.
 pub fn add_copy(folder: &Path, copy: &Path, commit: &str) -> Result<(), String> {
-    let args = [
-        OsStr::new("worktree"),
-        OsStr::new("add"),
+    let failed = |wrote: String| {
+        format!(
+            "Lira can't make a copy of the repository in `{}`. git wrote:\n{wrote}",
+            copy.display()
+        )
+    };
+    let top = run(folder, &["rev-parse", "--show-toplevel"]).map_err(failed)?;
+    let clone = [
+        OsStr::new("clone"),
         OsStr::new("--quiet"),
-        OsStr::new("--detach"),
-        copy.as_os_str(),
-        OsStr::new(commit),
-    ];
-    run(folder, &args).map(|_| ()).map_err(|wrote| {
-        format!(
-            "Lira can't make the worktree `{}`. git wrote:\n{wrote}",
-            copy.display()
-        )
-    })
-}
-
-/// Removes a worktree that `add_copy` made, with all that is in it.
-pub fn remove_copy(folder: &Path, copy: &Path) -> Result<(), String> {
-    let args = [
-        OsStr::new("worktree"),
-        OsStr::new("remove"),
-        OsStr::new("--force"),
+        OsStr::new("--no-checkout"),
+        OsStr::new("--"),
+        OsStr::new(top.trim_end_matches('\n')),
         copy.as_os_str(),
     ];
-    run(folder, &args).map(|_| ()).map_err(|wrote| {
-        format!(
-            "Lira can't remove the worktree `{}`. git wrote:\n{wrote}",
-            copy.display()
-        )
-    })
+    run(folder, &clone).map_err(failed)?;
+    run(copy, &["checkout", "--quiet", "--detach", commit]).map_err(failed)?;
+    run(copy, &["remote", "remove", "origin"]).map_err(failed)?;
+    Ok(())
 }
 
 /// The commit that a remote has on this branch now, or `None` when the

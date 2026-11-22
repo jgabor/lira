@@ -52,20 +52,38 @@ pub fn run(file: &LiraFile, folder: &Path, base: &str, output: Output) -> Result
     let _ = fs::remove_file(&scores_file);
     let (status, wrote) =
         ended.map_err(|e| format!("couldn't run the check command with `sh`: {e}"))?;
-    let written = written.map_err(|e| format!("couldn't read the scores of the check: {e}"))?;
-    let scores = Scores::read(&written).map_err(|e| format!("the scores of the check, {e}"))?;
-    let known = |name: &str| file.scores.iter().any(|score| score.name == name);
-    if let Some(name) = scores.names().find(|name| !known(name)) {
-        return Err(format!(
-            "the check wrote the score `{name}`, and {} has no score with that name. Add it there as a `[[score]]`, or remove it from the check",
-            lira_file::NAME
-        ));
-    }
+    let read = || {
+        let written = written.map_err(|e| format!("couldn't read the scores of the check: {e}"))?;
+        let scores = Scores::read(&written).map_err(|e| format!("the scores of the check, {e}"))?;
+        let known = |name: &str| file.scores.iter().any(|score| score.name == name);
+        let unknown = scores.names().find(|name| !known(name)).map(str::to_string);
+        match unknown {
+            Some(name) => Err(format!(
+                "the check wrote the score `{name}`, and {} has no score with that name. Add it there as a `[[score]]`, or remove it from the check",
+                lira_file::NAME
+            )),
+            None => Ok(scores),
+        }
+    };
+    let mut wrote = String::from_utf8_lossy(&wrote).into_owned();
+    let (scores, passed) = match (read(), output) {
+        (Ok(scores), _) => (scores, status.success()),
+        (Err(error), Output::Shown) => return Err(error),
+        // An agent reads what the check wrote, and it can repair the
+        // scores too. So scores that Lira can't use are a failed check, and
+        // what is wrong with them comes after the output.
+        (Err(error), Output::Kept) => {
+            wrote.push_str(&format!(
+                "\nLira can't use the scores that the check wrote: {error}\n"
+            ));
+            (Scores::default(), false)
+        }
+    };
     Ok(Outcome {
-        passed: status.success(),
+        passed,
         scores,
         status: status.to_string(),
-        wrote: String::from_utf8_lossy(&wrote).into_owned(),
+        wrote,
     })
 }
 

@@ -2,6 +2,7 @@
 
 use crate::worktree::Worktree;
 use crate::{agent, git};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The instructions for the Reviewer. Lira puts the request and the change
@@ -26,8 +27,9 @@ pub struct Review {
 /// with, and `started` is the folder that Lira started in.
 ///
 /// The Reviewer can't change a file of the change. It works in a copy of
-/// the repository for itself alone, on no branch, and Lira removes the copy
-/// afterwards. Lira also says no to each of its permission requests.
+/// the repository for itself alone, which shares no branch with the
+/// repository and knows no remote, and Lira removes the copy afterwards.
+/// Lira also says no to each of its permission requests.
 pub fn run(
     started: &Path,
     worktree: &Worktree,
@@ -37,10 +39,22 @@ pub fn run(
 ) -> Result<Review, String> {
     let message = message(worktree, request, from, to)?;
     let copy = copy_folder(&worktree.folder);
-    git::add_copy(&worktree.folder, &copy, to)?;
-    let read = read(started, worktree, &copy, &message);
+    // The folder must be new: Lira removes it with all that is in it.
+    fs::create_dir(&copy).map_err(|error| {
+        format!(
+            "Lira can't make the folder `{}` for the Reviewer: {error}",
+            copy.display()
+        )
+    })?;
+    let read = git::add_copy(&worktree.folder, &copy, to)
+        .and_then(|()| read(started, worktree, &copy, &message));
     // The copy goes away, also when the Reviewer failed.
-    let removed = git::remove_copy(&worktree.folder, &copy);
+    let removed = fs::remove_dir_all(&copy).map_err(|error| {
+        format!(
+            "Lira can't remove the folder `{}` of the Reviewer: {error}",
+            copy.display()
+        )
+    });
     let text = read?;
     removed?;
     Ok(Review {
