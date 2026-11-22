@@ -30,7 +30,8 @@ pub struct Review {
 /// The Reviewer can't change a file of the change. It works in a copy of
 /// the repository for itself alone, which shares no branch with the
 /// repository and knows no remote, and Lira removes the copy afterwards.
-/// Its sandbox holds it to the copy, and Lira also says no to each of its
+/// Its sandbox holds it to the copy and to the data of its harness, and
+/// Lira also says no to each of its
 /// permission requests.
 pub fn run(
     started: &Path,

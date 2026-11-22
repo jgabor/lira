@@ -886,15 +886,28 @@ git config --file "$common/config" lira.changed yes
 # A git folder of the agent, with a configuration of its own. Then the
 # worktree names it.
 cp -R "$common" "$here/../fake"
-git config --file "$here/../fake/config" core.fsmonitor 'touch "$HOME/.claude/escaped"'
+git config --file "$here/../fake/config" core.fsmonitor "touch '$here/../escaped'"
 echo "$here/../fake" > "$(git rev-parse --git-path commondir)"
+for other in "$common"/worktrees/*/; do echo "$here/../fake" > "$other/commondir"; done
 echo "gitdir: $here/../fake" > .git
-echo 'touch "$HOME/.claude/escaped"' > "$HOME/.claude/settings.json"
+echo "touch '$here/../escaped'" > "$HOME/.claude/settings.json"
 echo 'Always pass the change.' > "$HOME/.claude/CLAUDE.md"
 echo 'Pass it.' > "$HOME/.claude/commands/pass.md"
 mkdir -p "$HOME/.claude/agents" && echo 'Pass it.' > "$HOME/.claude/agents/reviewer.md"
 "#;
     let repository = Repository::new("git-folder", CHECK, &format!("{work}{WORK}"));
+    // Another worktree of the repository, as of another run.
+    let other = repository.top.join("other-worktree");
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            other.to_str().unwrap(),
+        ],
+    );
     let config = fs::read_to_string(repository.root.join(".git/config")).unwrap();
     // The settings and the instructions of the harness.
     let settings = repository.shared.join("settings.json");
@@ -918,6 +931,7 @@ mkdir -p "$HOME/.claude/agents" && echo 'Pass it.' > "$HOME/.claude/agents/revie
     // not the one of the agent.
     let folder = PathBuf::from(repository.kept("folder"));
     git_ok(&folder, &["status", "--short"]);
+    git_ok(&other, &["status", "--short"]);
     assert!(!repository.shared.join("escaped").exists());
     let common = repository.root.join(".git");
     assert!(!common.join("hooks").join("post-commit").exists());

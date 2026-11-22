@@ -120,12 +120,17 @@ fn sandbox_of(folder: &Path) -> Result<Sandbox, String> {
             )
         })?;
     }
+    let own_folder = git::own_file(folder, "")?;
     let mut sandbox = Sandbox::new();
     sandbox
         .writable(folder)
         .writable(&common)
         .read_only(&hooks)
         .read_only(&common.join("config"))
+        // The git folders of the other worktrees say where git finds their
+        // configuration, as the files below do for this one.
+        .read_only(&common.join("worktrees"))
+        .writable(&own_folder)
         .read_only(&own_config)
         // These say where git finds the git folder of the worktree, and the
         // configuration. So they could name a configuration of the agent.

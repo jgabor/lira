@@ -17,8 +17,9 @@ const BWRAP: &str = "bwrap";
 /// that it can't.
 #[derive(Default)]
 pub struct Sandbox {
-    writable: Vec<PathBuf>,
-    read_only: Vec<PathBuf>,
+    /// Each path, and if the agent can change it. A later path inside an
+    /// earlier one wins there.
+    paths: Vec<(PathBuf, bool)>,
 }
 
 impl Sandbox {
@@ -27,16 +28,17 @@ impl Sandbox {
         Sandbox::default()
     }
 
-    /// The agent can change what is in this folder or file.
+    /// The agent can change what is in this folder or file, also when it
+    /// is in a read-only folder that came before.
     pub fn writable(&mut self, path: &Path) -> &mut Sandbox {
-        self.writable.push(path.to_path_buf());
+        self.paths.push((path.to_path_buf(), true));
         self
     }
 
     /// The agent can't change this folder or file, also when it is in a
-    /// writable folder. It must be there.
+    /// writable folder that came before. It must be there.
     pub fn read_only(&mut self, path: &Path) -> &mut Sandbox {
-        self.read_only.push(path.to_path_buf());
+        self.paths.push((path.to_path_buf(), false));
         self
     }
 
@@ -44,12 +46,9 @@ impl Sandbox {
     /// folder that the command is given.
     pub fn command(&self, program: &OsStr) -> Command {
         let mut command = base();
-        for path in &self.writable {
-            command.arg("--bind").arg(path).arg(path);
-        }
-        // After the writable folders, so that these win.
-        for path in &self.read_only {
-            command.arg("--ro-bind").arg(path).arg(path);
+        for (path, writable) in &self.paths {
+            let bind = if *writable { "--bind" } else { "--ro-bind" };
+            command.arg(bind).arg(path).arg(path);
         }
         command.arg("--").arg(program);
         command
