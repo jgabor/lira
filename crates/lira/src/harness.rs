@@ -84,8 +84,8 @@ pub struct Harness {
     /// If Lira sent the signal to the process group of the harness.
     group_stopped: bool,
     /// A process that stops the harness and its children when Lira ends
-    /// with no time to do it, as after Ctrl-C. `None` when it could not
-    /// start, and after the harness ended.
+    /// with no time to do it, as after Ctrl-C. `None` after the harness
+    /// ended.
     guard: Option<Child>,
     /// The end of what the harness wrote to its error output.
     errors: Arc<Mutex<Vec<u8>>>,
@@ -291,7 +291,21 @@ impl Harness {
                 reason,
             }
         })?;
-        let guard = guard(child.id());
+        // Lira starts no harness that it can't stop when Lira itself is
+        // stopped.
+        let guard = match guard(child.id()) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Start {
+                    reason: format!(
+                        "Lira can't start `sh`, which it needs to stop the harness `{program}`: {error}"
+                    ),
+                    program,
+                });
+            }
+        };
         let (input, input_failed) = write_lines(child.stdin.take().expect("the input is a pipe"));
         let lines = read_lines(child.stdout.take().expect("the output is a pipe"));
         let (errors, errors_ended) = keep(child.stderr.take().expect("the error output is a pipe"));
@@ -882,7 +896,7 @@ impl Drop for Harness {
 /// Lira holds. The pipe ends when Lira ends, however that happens, and the
 /// guard then stops the process group of the harness. It has a process
 /// group of its own, so that Ctrl-C in the terminal does not reach it.
-fn guard(harness: u32) -> Option<Child> {
+fn guard(harness: u32) -> std::io::Result<Child> {
     let wait_then_stop = r#"while IFS= read -r line; do :; done; kill -s KILL -- "$1""#;
     Command::new("sh")
         .args(["-c", wait_then_stop, "sh", &format!("-{harness}")])
@@ -891,7 +905,6 @@ fn guard(harness: u32) -> Option<Child> {
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .ok()
 }
 
 /// Writes each line that it gets to the input of a harness, on a thread of

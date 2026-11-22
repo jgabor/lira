@@ -152,8 +152,17 @@ impl<'a> PullRequest<'a> {
             Some(address) => github::describe(folder, address, &file),
             None => {
                 let main = &self.worktree.main;
-                github::open_draft(folder, main, branch, &subjects[0], &file)
-                    .map(|address| self.address = Some(address))
+                github::open_draft(folder, main, branch, &subjects[0], &file).and_then(|draft| {
+                    // A pull request that is not new got its description
+                    // in a call before, and that can be an older one.
+                    let described = if draft.new {
+                        Ok(())
+                    } else {
+                        github::describe(folder, &draft.address, &file)
+                    };
+                    self.address = Some(draft.address);
+                    described
+                })
             }
         };
         let _ = fs::remove_file(&file);
@@ -242,29 +251,27 @@ impl<'a> PullRequest<'a> {
     fn new_name(&mut self) -> Result<String, String> {
         let folder = &self.worktree.folder;
         let remote = &self.worktree.remote;
+        // A first push whose answer got lost, under a name that the branch
+        // of the agent had then.
+        if let Some(tried_as) = self.tried_as.clone()
+            && let Some(there) = git::remote_commit(folder, remote, &tried_as)?
+            && self.tried.contains(&there)
+        {
+            self.pushed = Some(there);
+            return Ok(tried_as);
+        }
         let name = self.local.clone();
         let names = [name.clone()]
             .into_iter()
             .chain((2..=NAMES).map(|number| format!("{name}-{number}")));
         for other in names {
-            match git::remote_commit(folder, remote, &other)? {
-                None => {
-                    if other != name {
-                        eprintln!(
-                            "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
-                        );
-                    }
-                    return Ok(other);
+            if git::remote_commit(folder, remote, &other)?.is_none() {
+                if other != name {
+                    eprintln!(
+                        "lira: the remote `{remote}` has a branch `{name}` already, so the branch is `{other}` there"
+                    );
                 }
-                // The branch is Lira's own: the remote took the first push,
-                // and the answer got lost.
-                Some(there)
-                    if self.tried_as.as_deref() == Some(&other) && self.tried.contains(&there) =>
-                {
-                    self.pushed = Some(there);
-                    return Ok(other);
-                }
-                Some(_) => {}
+                return Ok(other);
             }
         }
         Err(format!(

@@ -318,13 +318,17 @@ pub fn add_copy(folder: &Path, copy: &Path, commit: &str) -> Result<(), String> 
             copy.display()
         )
     };
-    let top = run(folder, &["rev-parse", "--show-toplevel"]).map_err(failed)?;
+    // `folder` is the top folder of a worktree, and git can copy from it.
+    // The name of the remote is fixed here: a setting of git can give the
+    // remote of a new copy another name, and Lira removes it by its name.
     let clone = [
         OsStr::new("clone"),
         OsStr::new("--quiet"),
         OsStr::new("--no-checkout"),
+        OsStr::new("--origin"),
+        OsStr::new("origin"),
         OsStr::new("--"),
-        OsStr::new(top.trim_end_matches('\n')),
+        folder.as_os_str(),
         copy.as_os_str(),
     ];
     run(folder, &clone).map_err(failed)?;
@@ -376,9 +380,11 @@ pub fn commit_of(folder: &Path, branch: &str) -> Result<Option<String>, String> 
 
 /// The name of each branch of the repository.
 pub fn branches(folder: &Path) -> Result<Vec<String>, String> {
+    // The full name, and not the short one: git prints the short name of a
+    // branch in another form when a tag has the same name.
     let names = run(
         folder,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
     )
     .map_err(|wrote| {
         format!(
@@ -386,7 +392,10 @@ pub fn branches(folder: &Path) -> Result<Vec<String>, String> {
             folder.display()
         )
     })?;
-    Ok(names.lines().map(str::to_string).collect())
+    let names = names
+        .lines()
+        .filter_map(|name| name.strip_prefix("refs/heads/"));
+    Ok(names.map(str::to_string).collect())
 }
 
 /// Pushes a commit to a branch of a remote. `before` is the commit that

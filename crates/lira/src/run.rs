@@ -25,10 +25,6 @@ const TRIES: usize = 3;
 /// After this many rounds of review that end with findings, Lira stops.
 const ROUNDS: usize = 3;
 
-/// The file with all that a failed check wrote, when the output is too
-/// long for the message to the agent.
-const OUTPUT: &str = "lira-check-output.txt";
-
 /// How much of the output of a failed check the agent gets, in bytes. It
 /// is the end of the output, where a check says what is wrong.
 const KEPT: usize = 20_000;
@@ -69,6 +65,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         conversation,
         pull_request: PullRequest::new(&made)?,
         said: String::new(),
+        outputs: 0,
     };
     let address = match run.steps() {
         Ok(address) => address,
@@ -100,6 +97,10 @@ struct Run<'a> {
     pull_request: PullRequest<'a>,
     /// The newest reply of the agent.
     said: String,
+    /// How many files Lira wrote with the whole output of a failed check.
+    /// Each file has a name of its own, so a message of before still names
+    /// the output that it is about.
+    outputs: usize,
 }
 
 impl Run<'_> {
@@ -241,16 +242,8 @@ impl Run<'_> {
         // has the commits of the branch of the agent. So the two must be
         // the same: the worktree is at the newest commit of the pull
         // request, and all in it is in a commit.
-        if self.pull_request.commit() != Some(git::head(folder)?.as_str()) {
-            let branch = self.pull_request.local();
-            return Ok(Some(Failure {
-                for_the_agent: format!(
-                    "Your worktree is not at the newest commit of your branch, `{branch}`, so the check waits. Lira takes the commits of that branch for the pull request. Check out `{branch}`, and put on it what belongs to the change.\n"
-                ),
-                for_you: format!(
-                    "the worktree was not at the newest commit of the branch `{branch}` of the agent, so the check did not run\n"
-                ),
-            }));
+        if let Some(failure) = self.moved("so the check waits", "so the check did not run")? {
+            return Ok(Some(failure));
         }
         let changes = git::changes(folder)?;
         if !changes.trim().is_empty() {
@@ -269,6 +262,15 @@ impl Run<'_> {
         let outcome = check::run(&self.made.file, folder, &base, Output::Kept)?;
         let command = &self.made.file.check;
         if outcome.passed {
+            // A check can also go to another commit. Then it passed that
+            // commit.
+            let moved = self.moved(
+                "after the check ran, so the check did not pass your commits",
+                "after the check, so the check did not pass the commits of the pull request",
+            )?;
+            if moved.is_some() {
+                return Ok(moved);
+            }
             // A check can change files, as a command that formats them
             // does. Then it passed its own files, and not the commits.
             let changes = git::changes(folder)?;
@@ -292,7 +294,9 @@ impl Run<'_> {
                 // The start of a long output can say what is wrong. The
                 // agent reads all of it in a file that git keeps for the
                 // worktree, outside the files of the repository.
-                let whole = git::own_file(folder, OUTPUT).and_then(|file| {
+                self.outputs += 1;
+                let name = format!("lira-check-output-{}.txt", self.outputs);
+                let whole = git::own_file(folder, &name).and_then(|file| {
                     fs::write(&file, &outcome.wrote)
                         .map(|()| file)
                         .map_err(|error| error.to_string())
@@ -316,14 +320,37 @@ impl Run<'_> {
         }))
     }
 
+    /// Looks if the worktree is at the commit that Lira pushed for the pull
+    /// request. The check reads the files of the worktree, and the pull
+    /// request has the commits of the branch of the agent, so the two must
+    /// be the same. When they are not, it returns what to say: `agent` and
+    /// `you` end the sentences for the agent and for the person.
+    fn moved(&self, agent: &str, you: &str) -> Result<Option<Failure>, String> {
+        if self.pull_request.commit() == Some(git::head(&self.made.folder)?.as_str()) {
+            return Ok(None);
+        }
+        let branch = self.pull_request.local();
+        Ok(Some(Failure {
+            for_the_agent: format!(
+                "Your worktree is not at the newest commit of your branch, `{branch}`, {agent}. Lira takes the commits of that branch for the pull request. Check out `{branch}`, and put on it what belongs to the change.\n"
+            ),
+            for_you: format!(
+                "the worktree was not at the newest commit of the branch `{branch}` of the agent {you}\n"
+            ),
+        }))
+    }
+
     /// A new Reviewer reads the change as the pull request has it now.
     fn review(&mut self) -> Result<review::Review, String> {
         let folder = &self.made.folder;
         let main = format!("refs/remotes/{}/{}", self.made.remote, self.made.main);
         let from = git::base(folder, &main)?;
-        // The check passed this commit just now.
-        let to = git::head(folder)?;
-        review::run(self.started, self.made, self.request, &from, &to)
+        // The check passed this commit just now: the one that Lira pushed
+        // for the pull request.
+        let Some(to) = self.pull_request.commit() else {
+            return Err("the agent made no commit, so there is no change to review".to_string());
+        };
+        review::run(self.started, self.made, self.request, &from, to)
     }
 
     /// Where the work is, for an error.
