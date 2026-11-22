@@ -279,15 +279,66 @@ pub fn subjects(folder: &Path, from: &str, to: &str) -> Result<Vec<String>, Stri
     Ok(log.lines().map(str::to_string).collect())
 }
 
-/// If the worktree in a folder has a change that is in no commit.
-pub fn has_changes(folder: &Path) -> Result<bool, String> {
-    let status = run(folder, &["status", "--porcelain"]).map_err(|wrote| {
+/// The changes of the worktree in a folder that are in no commit, one file
+/// on each line, as `git status --short` prints them. It is empty when all
+/// is in a commit.
+pub fn changes(folder: &Path) -> Result<String, String> {
+    run(folder, &["status", "--short"]).map_err(|wrote| {
         format!(
             "Lira can't read the changes of `{}`. git wrote:\n{wrote}",
             folder.display()
         )
-    })?;
-    Ok(!status.trim().is_empty())
+    })
+}
+
+/// The change from the commit `from` to the commit `to`: all that `to` has
+/// and that the newest commit of both does not have. With `names`, it is
+/// the name of each file and how much of it changed, and not the lines.
+pub fn diff(folder: &Path, from: &str, to: &str, names: bool) -> Result<String, String> {
+    let range = format!("{from}...{to}");
+    let form = if names { "--stat=200" } else { "--patch" };
+    let args = ["diff", "--no-color", "--no-ext-diff", form, &range, "--"];
+    run(folder, &args).map_err(|wrote| {
+        format!(
+            "Lira can't read the change in `{}`. git wrote:\n{wrote}",
+            folder.display()
+        )
+    })
+}
+
+/// Makes a worktree in the new folder `copy`, with the files of a commit
+/// and on no branch. What is done in it changes no branch.
+pub fn add_copy(folder: &Path, copy: &Path, commit: &str) -> Result<(), String> {
+    let args = [
+        OsStr::new("worktree"),
+        OsStr::new("add"),
+        OsStr::new("--quiet"),
+        OsStr::new("--detach"),
+        copy.as_os_str(),
+        OsStr::new(commit),
+    ];
+    run(folder, &args).map(|_| ()).map_err(|wrote| {
+        format!(
+            "Lira can't make the worktree `{}`. git wrote:\n{wrote}",
+            copy.display()
+        )
+    })
+}
+
+/// Removes a worktree that `add_copy` made, with all that is in it.
+pub fn remove_copy(folder: &Path, copy: &Path) -> Result<(), String> {
+    let args = [
+        OsStr::new("worktree"),
+        OsStr::new("remove"),
+        OsStr::new("--force"),
+        copy.as_os_str(),
+    ];
+    run(folder, &args).map(|_| ()).map_err(|wrote| {
+        format!(
+            "Lira can't remove the worktree `{}`. git wrote:\n{wrote}",
+            copy.display()
+        )
+    })
 }
 
 /// If a remote has this branch now.

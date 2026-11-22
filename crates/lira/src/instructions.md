@@ -8,5 +8,7 @@ Nobody reads what you write while you work, so ask no question. Decide what you 
 4. Commit your work on the branch. Lira takes only what is in a commit.
 5. End with a short text for the user. Say what you changed, and each choice that the user may want to overrule.
 
+After your reply, Lira runs the check of the repository, and a Reviewer reads the change. When one of them finds something, Lira tells you, and you repair it in the same way.
+
 The request of the user:
 

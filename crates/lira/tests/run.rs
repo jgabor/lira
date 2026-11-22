@@ -9,13 +9,34 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// What each stand-in for the harness starts with. `next` reads one line
-/// from Lira and keeps it. `say` writes one line to Lira. The stand-in keeps
-/// the folder and the branch that it starts in. Then it answers
-/// `initialize` and `session/new`, and reads the message for the agent.
+/// from Lira and keeps it. `say` writes one line to Lira. The stand-in
+/// answers `initialize` and `session/new`, and reads the first message.
+///
+/// Lira starts the same program for the agent and for each Reviewer. The
+/// first message says which one it is. For a Reviewer, the stand-in runs
+/// the script `reviewer.sh` when a test wrote one, and says that the change
+/// is good when no test did. For the agent, it keeps the folder and the
+/// branch that it starts in, and then runs what follows this text.
 const START: &str = r#"#!/bin/sh
 here="$(dirname "$0")"
-next() { IFS= read -r line || exit 0; printf '%s\n' "$line" >> "$here/received"; }
+# Each start has a number. Start 1 is the agent.
+start=$(( $(cat "$here/starts" 2>/dev/null || echo 0) + 1 ))
+echo "$start" > "$here/starts"
+received="$here/received"
+[ "$start" -gt 1 ] && received="$here/received-$start"
+# Reads one line. `id` is the number of the newest request of Lira.
+next() {
+  IFS= read -r line || exit 0
+  printf '%s\n' "$line" >> "$received"
+  request=$(printf '%s\n' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),"method".*/\1/p')
+  [ -n "$request" ] && id="$request"
+}
 say() { printf '%s\n' "$1"; }
+# Says a text as the reply to the newest message, and ends the reply.
+reply() {
+  say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"'"$1"'"}}}}'
+  say '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}'
+}
 # Tells Lira that the agent finished a tool call.
 ended() { say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"t-1","status":"completed"}}}'; }
 # Makes a commit with one new file: `commit <file> <subject>`.
@@ -27,11 +48,22 @@ called() {
     tries=$((tries + 1)); [ "$tries" -gt 100 ] && return 1; sleep 0.1
   done
 }
-pwd > "$here/folder"
-git branch --show-current > "$here/branch"
 next; say '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
 next; say '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"c-1"}}'
 next
+case "$line" in
+  *"You are a Reviewer"*)
+    pwd > "$here/review-folder"
+    if [ -e "$here/reviewer.sh" ]; then
+      . "$here/reviewer.sh"
+    else
+      reply 'The change is good.\n\nReview: pass'
+    fi
+    exit 0
+    ;;
+esac
+pwd > "$here/folder"
+git branch --show-current > "$here/branch"
 "#;
 
 /// The reply of the agent, and its end.
@@ -136,6 +168,16 @@ impl Repository {
     /// The stand-in for the harness does `work` when the message for the
     /// agent comes.
     fn new(test: &str, lira_file: &str, work: &str) -> Repository {
+        Repository::with(test, lira_file, "", work)
+    }
+
+    /// A repository whose check command runs the script `check`. The main
+    /// branch has the script.
+    fn checked(test: &str, check: &str, work: &str) -> Repository {
+        Repository::with(test, "check = \"sh check.sh\"\n", check, work)
+    }
+
+    fn with(test: &str, lira_file: &str, check: &str, work: &str) -> Repository {
         let top = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("run")
             .join(test);
@@ -158,6 +200,9 @@ impl Repository {
         );
         fs::write(repository.seed.join("README.md"), "first\n").unwrap();
         fs::write(repository.seed.join("lira.toml"), lira_file).unwrap();
+        if !check.is_empty() {
+            fs::write(repository.seed.join("check.sh"), check).unwrap();
+        }
         git_ok(&repository.seed, &["add", "--all"]);
         git_ok(
             &repository.seed,
@@ -249,6 +294,29 @@ impl Repository {
             .to_string()
     }
 
+    /// Gives the stand-in the script that it runs as a Reviewer.
+    fn reviewer(&self, script: &str) {
+        fs::write(self.harness.join("reviewer.sh"), script).unwrap();
+    }
+
+    /// How many times Lira started the harness.
+    fn starts(&self) -> usize {
+        self.kept("starts").parse().unwrap()
+    }
+
+    /// The text of the first message of a start of the harness. Start 1 is
+    /// the agent, and each later start is a Reviewer.
+    fn first_message(&self, start: usize) -> String {
+        let file = match start {
+            1 => "received".to_string(),
+            start => format!("received-{start}"),
+        };
+        let text = fs::read_to_string(self.harness.join(&file))
+            .unwrap_or_else(|e| panic!("the stand-in kept no `{file}`: {e}"));
+        let message = json::read(text.lines().nth(2).unwrap()).unwrap();
+        text_of(&message)
+    }
+
     /// The calls of `gh` that start with these words, one on each line.
     fn calls(&self, start: &str) -> Vec<String> {
         let calls = fs::read_to_string(self.top.join("bin").join("calls")).unwrap_or_default();
@@ -279,6 +347,26 @@ impl Repository {
         let runs = Repository::worktrees(data).join("lira");
         !runs.exists() || fs::read_dir(runs).unwrap().next().is_none()
     }
+}
+
+/// The text of a message that Lira wrote for an agent.
+fn text_of(message: &Json) -> String {
+    assert_eq!(
+        message.get("method").and_then(Json::as_text),
+        Some("session/prompt")
+    );
+    let params = message.get("params").unwrap();
+    let parts = params.get("prompt").and_then(Json::as_list).unwrap();
+    parts[0]
+        .get("text")
+        .and_then(Json::as_text)
+        .unwrap()
+        .to_string()
+}
+
+/// The text of the message that the stand-in kept in a file, as one line.
+fn kept_message(repository: &Repository, file: &str) -> String {
+    text_of(&json::read(&repository.kept(file)).unwrap())
 }
 
 fn errors(output: &Output) -> String {
@@ -1033,28 +1121,6 @@ fn with_no_login_lira_run_stops_before_it_makes_a_worktree() {
 }
 
 #[test]
-fn lira_says_when_the_worktree_has_changes_that_are_in_no_commit() {
-    let work = "echo left > left.txt\n";
-    let repository = Repository::new("left", CHECK, &format!("{work}{WORK}"));
-    let output = repository.run();
-    passed(&output);
-    assert!(
-        errors(&output).contains("in no commit"),
-        "{}",
-        errors(&output)
-    );
-    // With nothing left, it says nothing about it.
-    let repository = Repository::new("nothing-left", CHECK, WORK);
-    let output = repository.run();
-    passed(&output);
-    assert!(
-        !errors(&output).contains("in no commit"),
-        "{}",
-        errors(&output)
-    );
-}
-
-#[test]
 fn a_harness_that_ends_after_the_first_commit_leaves_the_draft_and_lira_names_it() {
     let work = "commit one 'Add a file'\nended\ncalled 'pr create'\nexit 9\n";
     let repository = Repository::new("ends-with-draft", CHECK, work);
@@ -1062,4 +1128,369 @@ fn a_harness_that_ends_after_the_first_commit_leaves_the_draft_and_lira_names_it
     let error = failed(&output);
     assert!(error.contains(ADDRESS), "{error}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// A check that passes when the change has the file `fixed.txt`. It keeps
+/// each run in the file that `ORDER` names, and the folder that it ran in.
+const NEEDS_FIXED: &str = r#"echo check >> "$ORDER"
+pwd > "$ORDER-folder"
+echo "the check looks for fixed.txt"
+if [ ! -e fixed.txt ]; then
+  echo "and fixed.txt is not there" >&2
+  exit 1
+fi
+"#;
+
+/// An agent that makes a commit, and then repairs the change when Lira
+/// sends it a second message. It keeps the second message.
+const WORK_THEN_REPAIR: &str = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+commit fixed 'Add the fixed file'
+reply 'I repaired it.'
+"#;
+
+impl Repository {
+    /// `lira run`, with a file that the check and the Reviewer write their
+    /// order in.
+    fn run_in_order(&self) -> Output {
+        self.lira()
+            .env("ORDER", self.top.join("order"))
+            .args(["run", REQUEST])
+            .output()
+            .unwrap()
+    }
+
+    fn order(&self) -> String {
+        fs::read_to_string(self.top.join("order"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+// spec(Steps): When the check fails, Lira gives the output of the check to the agent.
+#[test]
+fn when_the_check_fails_lira_gives_its_output_to_the_agent() {
+    let repository = Repository::checked("check-fails", NEEDS_FIXED, WORK_THEN_REPAIR);
+    let output = repository.run_in_order();
+    passed(&output);
+    // The agent got what the check wrote, to its output and to its error
+    // output.
+    let second = kept_message(&repository, "second-message");
+    assert!(second.contains("the check looks for fixed.txt"), "{second}");
+    assert!(second.contains("and fixed.txt is not there"), "{second}");
+    // The check ran in the worktree of the change, before and after the
+    // repair.
+    assert_eq!(repository.order(), "check check");
+    assert_eq!(
+        fs::read_to_string(repository.top.join("order-folder"))
+            .unwrap()
+            .trim(),
+        repository.kept("folder")
+    );
+    // The repair is in the pull request.
+    let folder = PathBuf::from(repository.kept("folder"));
+    let branch = repository.kept("branch");
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+}
+
+#[test]
+fn a_check_that_fails_three_times_ends_the_run_with_a_failure() {
+    // This agent never makes the file that the check looks for.
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+while :; do
+  next
+  echo message >> "$here/more-messages"
+  reply 'I can not repair it.'
+done
+"#;
+    let repository = Repository::checked("check-fails-always", NEEDS_FIXED, work);
+    let output = repository.run_in_order();
+    let error = failed(&output);
+    assert!(error.contains("failed 3 times"), "{error}");
+    assert!(error.contains("and fixed.txt is not there"), "{error}");
+    // Lira asked the agent to repair the change after the first and after
+    // the second failure.
+    assert_eq!(repository.order(), "check check check");
+    assert_eq!(repository.kept("more-messages"), "message\nmessage");
+    // No Reviewer read the change, and the pull request stays a draft.
+    assert_eq!(repository.starts(), 1);
+    assert!(error.contains(ADDRESS), "{error}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+}
+
+#[test]
+fn the_agent_gets_the_end_of_a_long_output_of_the_check() {
+    let check = r#"i=0
+while [ "$i" -lt 3000 ]; do echo "line $i of the output of the check"; i=$((i + 1)); done
+echo "the last line says what is wrong"
+[ -e fixed.txt ]
+"#;
+    let repository = Repository::checked("check-long", check, WORK_THEN_REPAIR);
+    passed(&repository.run_in_order());
+    let second = kept_message(&repository, "second-message");
+    assert!(
+        second.contains("the last line says what is wrong"),
+        "{second}"
+    );
+    assert!(second.contains("line 2999 of the output"), "{second}");
+    assert!(!second.contains("line 0 of the output"), "{second}");
+    assert!(second.len() < 30_000, "{}", second.len());
+}
+
+#[test]
+fn changes_that_are_in_no_commit_go_back_to_the_agent_before_the_check() {
+    // The check would pass with the file that the agent did not commit.
+    let work = r#"commit greeting 'Add a greeting'
+echo fixed > fixed.txt
+reply 'I made the files.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+git add fixed.txt
+git commit --quiet --message 'Add the fixed file'
+reply 'I committed it.'
+"#;
+    let repository = Repository::checked("not-in-a-commit", NEEDS_FIXED, work);
+    passed(&repository.run_in_order());
+    let second = kept_message(&repository, "second-message");
+    assert!(second.contains("in no commit"), "{second}");
+    assert!(second.contains("fixed.txt"), "{second}");
+    // The check ran one time, on what is in the commits.
+    assert_eq!(repository.order(), "check");
+}
+
+// spec(Steps): A Reviewer reads the change after the check passes.
+#[test]
+fn a_reviewer_reads_the_change_after_the_check_passes() {
+    let repository = Repository::checked("review", NEEDS_FIXED, WORK_THEN_REPAIR);
+    repository.reviewer("echo review >> \"$here/../order\"\nreply 'Good.\\n\\nReview: pass'\n");
+    passed(&repository.run_in_order());
+    // The check failed, then it passed, and only then a Reviewer started.
+    assert_eq!(repository.order(), "check check review");
+    assert_eq!(repository.starts(), 2);
+    // The Reviewer got the request, the commits and the change.
+    let message = repository.first_message(2);
+    assert!(message.contains(REQUEST), "{message}");
+    assert!(message.contains("Add a greeting"), "{message}");
+    assert!(message.contains("Add the fixed file"), "{message}");
+    assert!(message.contains("+++ b/greeting.txt"), "{message}");
+    assert!(message.contains("+++ b/fixed.txt"), "{message}");
+    // The folder of the Reviewer has the files of the change.
+    assert!(message.contains("Review: pass"), "{message}");
+}
+
+#[test]
+fn with_a_check_that_fails_no_reviewer_reads_the_change() {
+    let work =
+        "commit greeting 'Add a greeting'\nreply 'Done.'\nwhile :; do next; reply 'No.'; done\n";
+    let repository = Repository::checked("no-review", NEEDS_FIXED, work);
+    repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
+    failed(&repository.run_in_order());
+    assert_eq!(repository.order(), "check check check");
+}
+
+// spec(Steps): A Reviewer can't change a file.
+#[test]
+fn a_reviewer_can_not_change_a_file() {
+    let work = "git branch -m feat/reviewed\n";
+    let repository = Repository::new("review-changes", CHECK, &format!("{work}{WORK}"));
+    // This Reviewer asks if it can change a file. Then it changes a file of
+    // the change, makes a new file and makes a commit, without the answer
+    // that it needs.
+    repository.reviewer(
+        r#"say '{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"sessionId":"c-1","toolCall":{"toolCallId":"t-1","title":"Write greeting.txt","kind":"edit"},"options":[{"optionId":"yes","name":"Yes","kind":"allow_once"},{"optionId":"no","name":"No","kind":"reject_once"}]}}'
+next
+printf '%s\n' "$line" > "$here/answer"
+ls > "$here/review-files"
+echo changed > greeting.txt
+echo new > new.txt
+git add --all
+git commit --quiet --message 'A commit of the Reviewer'
+reply 'I changed it.\n\nReview: pass'
+"#,
+    );
+    passed(&repository.run());
+    // Lira said no.
+    let answer = json::read(&repository.kept("answer")).unwrap();
+    let expected =
+        r#"{"jsonrpc":"2.0","id":9,"result":{"outcome":{"outcome":"selected","optionId":"no"}}}"#;
+    assert_eq!(answer, json::read(expected).unwrap());
+    // The Reviewer had the files of the change, in a folder of its own.
+    assert!(repository.kept("review-files").contains("greeting.txt"));
+    let folder = PathBuf::from(repository.kept("folder"));
+    let review = PathBuf::from(repository.kept("review-folder"));
+    assert_ne!(review, folder);
+    // The change is as the agent left it: its files, its commits, and what
+    // the remote has.
+    assert_eq!(
+        fs::read_to_string(folder.join("greeting.txt")).unwrap(),
+        "greeting\n"
+    );
+    assert!(!folder.join("new.txt").exists());
+    assert_eq!(git_ok(&folder, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git_ok(&folder, &["log", "--format=%s", "-1"]),
+        "Add a greeting"
+    );
+    assert_eq!(
+        repository.on_remote("feat/reviewed"),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+    // The folder of the Reviewer is gone, and git has no record of it.
+    assert!(!review.exists());
+    let worktrees = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
+    assert_eq!(worktrees.matches("worktree ").count(), 2, "{worktrees}");
+    let branches = git_ok(&repository.root, &["branch", "--format=%(refname:short)"]);
+    assert_eq!(branches, "feat/reviewed\nmain");
+}
+
+#[test]
+fn lira_gives_the_findings_of_a_reviewer_to_the_agent() {
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+commit repair 'Repair the greeting'
+reply 'I repaired it.'
+"#;
+    let repository = Repository::checked("findings", "echo check >> \"$ORDER\"\n", work);
+    // The first Reviewer has a finding, and the second one has none.
+    repository.reviewer(
+        r#"echo review >> "$here/../order"
+if [ "$start" -eq 2 ]; then
+  reply 'The greeting has no capital letter.\n\nReview: findings'
+else
+  reply 'Good now.\n\nReview: pass'
+fi
+"#,
+    );
+    let output = repository.run_in_order();
+    passed(&output);
+    let second = kept_message(&repository, "second-message");
+    assert!(
+        second.contains("The greeting has no capital letter."),
+        "{second}"
+    );
+    // After the repair, the check runs again, and a new Reviewer reads the
+    // change with the repair.
+    assert_eq!(repository.order(), "check review check review");
+    assert_eq!(repository.starts(), 3);
+    let first = repository.first_message(2);
+    let again = repository.first_message(3);
+    assert!(!first.contains("+++ b/repair.txt"), "{first}");
+    assert!(again.contains("+++ b/repair.txt"), "{again}");
+    // The new Reviewer does not read what the one before it wrote.
+    assert!(!again.contains("capital letter"), "{again}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{ADDRESS}\n")
+    );
+}
+
+#[test]
+fn three_rounds_of_review_with_findings_end_the_run_with_a_failure() {
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+while :; do
+  next
+  echo message >> "$here/more-messages"
+  reply 'I do not agree.'
+done
+"#;
+    let repository = Repository::new("findings-always", CHECK, work);
+    repository.reviewer("reply 'It is still wrong.\\n\\nReview: findings'\n");
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("3 rounds"), "{error}");
+    assert!(error.contains("It is still wrong."), "{error}");
+    // Three Reviewers read the change, and the agent got the findings of
+    // the first two.
+    assert_eq!(repository.starts(), 4);
+    assert_eq!(repository.kept("more-messages"), "message\nmessage");
+    assert!(error.contains(ADDRESS), "{error}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn a_reviewer_that_does_not_say_pass_has_findings() {
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+next
+printf '%s\n' "$line" > "$here/second-message"
+reply 'I looked at it.'
+"#;
+    let repository = Repository::new("no-verdict", CHECK, work);
+    repository.reviewer(
+        r#"if [ "$start" -eq 2 ]; then
+  reply 'I am not sure about the greeting.'
+else
+  reply 'Review: pass'
+fi
+"#,
+    );
+    passed(&repository.run());
+    let second = kept_message(&repository, "second-message");
+    assert!(
+        second.contains("I am not sure about the greeting."),
+        "{second}"
+    );
+}
+
+// spec(Format of the Lira file): | `models.reviewer` | Text | The AI model for the Reviewer. |
+#[test]
+fn the_reviewer_gets_the_ai_model_of_the_lira_file() {
+    let lira_file = format!("{CHECK}[models]\nagent = \"model-a\"\nreviewer = \"model-r\"\n");
+    let repository = Repository::new("review-model", &lira_file, WORK);
+    passed(&repository.run());
+    let model = |file: &str| {
+        let text = fs::read_to_string(repository.harness.join(file)).unwrap();
+        let new = json::read(text.lines().nth(1).unwrap()).unwrap();
+        new.get("params")
+            .and_then(|params| params.get("_meta"))
+            .and_then(|meta| meta.get("claudeCode"))
+            .and_then(|claude| claude.get("options"))
+            .and_then(|options| options.get("model"))
+            .and_then(Json::as_text)
+            .map(str::to_string)
+    };
+    assert_eq!(model("received").as_deref(), Some("model-a"));
+    assert_eq!(model("received-2").as_deref(), Some("model-r"));
+}
+
+#[test]
+fn a_reviewer_whose_harness_ends_is_a_failure_and_leaves_no_folder() {
+    let repository = Repository::new("review-ends", CHECK, WORK);
+    repository.reviewer("echo 'the Reviewer broke' >&2\nexit 4\n");
+    let output = repository.run();
+    let error = failed(&output);
+    assert!(error.contains("the Reviewer broke"), "{error}");
+    assert!(error.contains(ADDRESS), "{error}");
+    assert!(!Path::new(&repository.kept("review-folder")).exists());
+    let worktrees = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
+    assert_eq!(worktrees.matches("worktree ").count(), 2, "{worktrees}");
+}
+
+#[test]
+fn the_progress_note_says_when_the_check_and_the_reviewer_passed_the_change() {
+    let repository = Repository::new("note-passed", CHECK, WORK);
+    passed(&repository.run());
+    let note = repository.gh("edited");
+    let next = note.split("## Next").nth(1).unwrap();
+    let next = next.split("## Decisions").next().unwrap();
+    assert!(
+        next.contains("The check and a Reviewer passed the change."),
+        "{note}"
+    );
 }

@@ -14,21 +14,44 @@ pub struct Outcome {
     pub passed: bool,
     /// The scores that the check wrote.
     pub scores: Scores,
+    /// How the check command ended, such as `exit status: 1`.
+    pub status: String,
+    /// What the check command wrote, to its output and to its error output,
+    /// when Lira kept it.
+    pub wrote: String,
+}
+
+/// What Lira does with what the check command writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    /// The person who runs Lira reads it, as the check writes it.
+    Shown,
+    /// Lira keeps it, to give it to an agent.
+    Kept,
 }
 
 /// Runs the check command of `file` in `folder`. `base` is the commit of the
 /// main branch that the change is compared with.
-pub fn run(file: &LiraFile, folder: &Path, base: &str) -> Result<Outcome, String> {
+pub fn run(file: &LiraFile, folder: &Path, base: &str, output: Output) -> Result<Outcome, String> {
     let scores_file = empty_file()?;
-    let status = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .args(["-c", &file.check])
         .current_dir(folder)
         .env("LIRA_SCORES", &scores_file)
-        .env("LIRA_BASE", base)
-        .status();
+        .env("LIRA_BASE", base);
+    let ended = match output {
+        Output::Shown => command.status().map(|status| (status, Vec::new())),
+        // The check has no input here, and Lira does not wait for a process
+        // that the check left behind.
+        Output::Kept => {
+            crate::process::run(command, true).map(|ended| (ended.status, ended.output))
+        }
+    };
     let written = fs::read_to_string(&scores_file);
     let _ = fs::remove_file(&scores_file);
-    let status = status.map_err(|e| format!("couldn't run the check command with `sh`: {e}"))?;
+    let (status, wrote) =
+        ended.map_err(|e| format!("couldn't run the check command with `sh`: {e}"))?;
     let written = written.map_err(|e| format!("couldn't read the scores of the check: {e}"))?;
     let scores = Scores::read(&written).map_err(|e| format!("the scores of the check, {e}"))?;
     let known = |name: &str| file.scores.iter().any(|score| score.name == name);
@@ -41,6 +64,8 @@ pub fn run(file: &LiraFile, folder: &Path, base: &str) -> Result<Outcome, String
     Ok(Outcome {
         passed: status.success(),
         scores,
+        status: status.to_string(),
+        wrote: String::from_utf8_lossy(&wrote).into_owned(),
     })
 }
 
@@ -75,7 +100,7 @@ pub fn command(folder: &Path) -> Result<bool, String> {
     } else {
         github::main_scores(folder, &main.name)?
     };
-    let outcome = run(&file, folder, &base)?;
+    let outcome = run(&file, folder, &base, Output::Shown)?;
     for line in report(&file.scores, &outcome.scores, &on_main) {
         println!("{line}");
     }
