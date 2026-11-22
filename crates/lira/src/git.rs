@@ -92,6 +92,13 @@ pub fn base(folder: &Path, main: &str) -> Result<String, String> {
     })
 }
 
+/// The newest commit that a branch and a commit both have, or `None` when
+/// they have none, or when the repository has no such branch.
+pub fn base_of(folder: &Path, branch: &str, commit: &str) -> Result<Option<String>, String> {
+    let base = git(folder, &["merge-base", branch, commit])?;
+    Ok(base.map(|base| base.trim().to_string()))
+}
+
 /// The Lira file, as the main branch has it.
 pub fn lira_file(folder: &Path, main: &MainBranch) -> Result<LiraFile, String> {
     lira_file_at(folder, main, &main.full)

@@ -116,7 +116,17 @@ impl<'a> PullRequest<'a> {
         // The agent can make a commit while Lira looks. So Lira reads the
         // newest commit one time, and pushes and describes that commit.
         let commit = self.work()?;
-        let subjects = git::subjects(folder, &self.worktree.commit, &commit)?;
+        // The agent can put its work on a newer main branch. The commits
+        // that it took from the main branch are not its work, so its work
+        // starts at the newest commit that it has in common with the main
+        // branch of the remote.
+        let main = format!(
+            "refs/remotes/{}/{}",
+            self.worktree.remote, self.worktree.main
+        );
+        let start = git::base_of(folder, &main, &commit)?;
+        let start = start.as_deref().unwrap_or(&self.worktree.commit);
+        let subjects = git::subjects(folder, start, &commit)?;
         if subjects.is_empty() {
             return match &self.pushed {
                 // The agent made no commit yet.
