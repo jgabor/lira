@@ -4,17 +4,24 @@
 
 use lira::json::{self, Json};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// What each stand-in for the harness starts with. `next` reads one line
 /// from Lira and keeps it. `say` writes one line to Lira. The stand-in keeps
 /// the folder and the branch that it starts in. Then it answers
-/// `initialize` and `session/new`, and reads the message for the agent.
+/// `initialize` and `session/new`, takes the AI model when Lira names one,
+/// and reads the message for the agent.
 const START: &str = r#"#!/bin/sh
 here="$(dirname "$0")"
-next() { IFS= read -r line || exit 0; printf '%s\n' "$line" >> "$here/received"; }
+# Reads one line. `id` is the number of the newest request of Lira.
+next() {
+  IFS= read -r line || exit 0
+  printf '%s\n' "$line" >> "$here/received"
+  request=$(printf '%s\n' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),"method".*/\1/p')
+  [ -n "$request" ] && id="$request"
+}
 say() { printf '%s\n' "$1"; }
 # Tells Lira that the agent finished a tool call.
 ended() { say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"t-1","status":"completed"}}}'; }
@@ -30,19 +37,28 @@ called() {
 pwd > "$here/folder"
 git branch --show-current > "$here/branch"
 next; say '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
-next; say '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"c-1"}}'
+next; say '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"c-1","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"large-model","options":[]}]}}'
 next
+# The stand-in keeps the AI model that Lira chooses for the conversation.
+case "$line" in
+  *'"method":"session/set_config_option"'*'"configId":"model"'*)
+    printf '%s\n' "$line" | sed 's/.*"value":"\([^"]*\)".*/\1/' > "$here/model"
+    say '{"jsonrpc":"2.0","id":'"$id"',"result":{"configOptions":[]}}'
+    next
+    ;;
+esac
+printf '%s\n' "$line" > "$here/message"
 "#;
 
 /// The reply of the agent, and its end.
 const REPLY: &str = r#"say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I made the file."}}}}'
-say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+say '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}'
 "#;
 
 /// The work of an agent that makes one commit, and its reply.
 const WORK: &str = r#"commit greeting 'Add a greeting'
 say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I made the file."}}}}'
-say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+say '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}'
 "#;
 
 /// Stands in for `gh`. It keeps each call, and the description that a call
@@ -125,10 +141,25 @@ fn git_ok(folder: &Path, args: &[&str]) -> String {
     git(folder, args).unwrap_or_else(|| panic!("git {args:?} failed in {}", folder.display()))
 }
 
+/// Makes a program from a script.
+///
+/// Another process writes the file. The tests run at the same time, and
+/// each one starts processes. A process that starts gets, for a moment, the
+/// files that this process has open. If this process had the script open
+/// for writing in that moment, the system would refuse to run the script
+/// until that other process is on its way.
 fn program(path: &Path, script: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut writer = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = writer.stdin.take().unwrap();
+    input.write_all(script.as_bytes()).unwrap();
+    drop(input);
+    assert!(writer.wait().unwrap().success());
 }
 
 impl Repository {
@@ -235,7 +266,7 @@ impl Repository {
 
     /// The text of the message for the agent.
     fn message(&self) -> String {
-        let message = self.received(3);
+        let message = json::read(&self.kept("message")).unwrap();
         assert_eq!(
             message.get("method").and_then(Json::as_text),
             Some("session/prompt")
@@ -378,6 +409,7 @@ fn with_no_xdg_data_home_the_data_folder_is_in_the_home_folder() {
     );
 }
 
+// spec(Server): An `XDG_DATA_HOME` that is empty, or that is not an absolute path, counts as not set.
 #[test]
 fn an_xdg_data_home_that_is_empty_or_not_absolute_is_not_used() {
     for (test, value) in [("xdg-empty", ""), ("xdg-relative", "some/folder")] {
@@ -595,23 +627,42 @@ fn the_agent_gets_the_ai_model_of_the_lira_file() {
     let lira_file = format!("{CHECK}[models]\nagent = \"small-model\"\n");
     let repository = Repository::new("model", &lira_file, WORK);
     passed(&repository.run());
-    let new = repository.received(2);
-    let model = new
-        .get("params")
-        .and_then(|params| params.get("_meta"))
-        .and_then(|meta| meta.get("claudeCode"))
-        .and_then(|claude| claude.get("options"))
-        .and_then(|options| options.get("model"))
-        .and_then(Json::as_text);
-    assert_eq!(model, Some("small-model"), "{new}");
+    // The harness had another AI model for the conversation, and Lira
+    // chose this one before the agent got the message.
+    assert_eq!(repository.kept("model"), "small-model");
+    assert!(repository.message().contains(REQUEST));
 }
 
 #[test]
-fn with_no_ai_model_in_the_lira_file_lira_names_none() {
+fn with_no_ai_model_in_the_lira_file_lira_chooses_none() {
     let repository = Repository::new("no-model", CHECK, WORK);
     passed(&repository.run());
-    let new = repository.received(2);
-    assert_eq!(new.get("params").unwrap().get("_meta"), None, "{new}");
+    assert!(!repository.harness.join("model").exists());
+    let text = fs::read_to_string(repository.harness.join("received")).unwrap();
+    assert!(!text.contains("session/set_config_option"), "{text}");
+}
+
+#[test]
+fn a_harness_that_does_not_take_the_ai_model_is_an_error_and_leaves_no_worktree() {
+    let lira_file = format!("{CHECK}[models]\nagent = \"small-model\"\n");
+    let repository = Repository::new("model-refused", &lira_file, REPLY);
+    // This harness has no option for the AI model.
+    program(
+        &repository.harness.join("agent"),
+        r#"#!/bin/sh
+IFS= read -r line; printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+IFS= read -r line; printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"c-1"}}'
+IFS= read -r line && echo "$line" > "$(dirname "$0")/third"
+"#,
+    );
+    let error = failed(&repository.run());
+    assert!(error.contains("`small-model`"), "{error}");
+    // The agent got no message with another AI model.
+    assert!(!repository.harness.join("third").exists());
+    assert!(Repository::has_no_worktree(
+        &repository.top.join("xdg").join("lira")
+    ));
+    assert_eq!(repository.run_branches(), "");
 }
 
 #[test]
@@ -668,6 +719,7 @@ fn lira_run_takes_one_request() {
         // Lira has no options for a run, so this is a mistake and no request.
         &["run", "--help"],
         &["run", "-h"],
+        &["run", "-x\n"],
     ] {
         let output = repository.lira().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -675,6 +727,15 @@ fn lira_run_takes_one_request() {
     }
     assert!(!repository.harness.join("folder").exists());
     assert_eq!(repository.run_branches(), "");
+}
+
+#[test]
+fn a_request_can_start_with_a_dash() {
+    let repository = Repository::new("dash", CHECK, WORK);
+    let request = "- Add a greeting file\n- Keep it short";
+    let output = repository.lira().args(["run", request]).output().unwrap();
+    passed(&output);
+    assert!(repository.message().ends_with(request));
 }
 
 #[test]
@@ -1062,4 +1123,56 @@ fn a_harness_that_ends_after_the_first_commit_leaves_the_draft_and_lira_names_it
     let error = failed(&output);
     assert!(error.contains(ADDRESS), "{error}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// If a process with this number runs.
+fn runs(process: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", process])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Waits until `done` is true, for 10 seconds at most.
+fn wait_for(what: &str, done: impl Fn() -> bool) {
+    let start = std::time::Instant::now();
+    while !done() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{what} did not happen in 10 seconds"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_run_that_is_interrupted_leaves_no_harness_behind() {
+    // This agent starts a process of its own, and never ends its reply.
+    let work = r#"sleep 300 &
+echo "$!" > "$here/child"
+echo "$$" > "$here/harness"
+while :; do sleep 1; done
+"#;
+    let repository = Repository::new("interrupted", CHECK, work);
+    let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    let kept = |file: &str| fs::read_to_string(repository.harness.join(file));
+    wait_for("the start of the agent", || kept("harness").is_ok());
+    let (harness, child) = (repository.kept("harness"), repository.kept("child"));
+    assert!(runs(&harness) && runs(&child));
+
+    // The signal of Ctrl-C. Lira has no time to stop the harness.
+    let lira_process = lira.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-s", "INT", &lira_process])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!lira.wait().unwrap().success());
+    wait_for("the end of the harness and of its child", || {
+        !runs(&harness) && !runs(&child)
+    });
 }
