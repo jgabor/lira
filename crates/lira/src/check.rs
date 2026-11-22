@@ -43,6 +43,11 @@ pub fn run(
     sandbox: Option<&Sandbox>,
 ) -> Result<Outcome, String> {
     let scores_file = empty_file()?;
+    let failed = if sandbox.is_some() {
+        "couldn't run the check command in the sandbox"
+    } else {
+        "couldn't run the check command with `sh`"
+    };
     let mut command = match sandbox {
         Some(sandbox) => {
             let mut sandbox = sandbox.clone();
@@ -66,8 +71,7 @@ pub fn run(
     };
     let written = fs::read_to_string(&scores_file);
     let _ = fs::remove_file(&scores_file);
-    let (status, wrote) =
-        ended.map_err(|e| format!("couldn't run the check command with `sh`: {e}"))?;
+    let (status, wrote) = ended.map_err(|e| format!("{failed}: {e}"))?;
     let read = || {
         let written = written.map_err(|e| format!("couldn't read the scores of the check: {e}"))?;
         let scores = Scores::read(&written).map_err(|e| format!("the scores of the check, {e}"))?;

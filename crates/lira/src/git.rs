@@ -313,10 +313,22 @@ pub fn changes(folder: &Path) -> Result<String, String> {
 /// The change from the commit `from` to the commit `to`: all that `to` has
 /// and that the newest commit of both does not have. With `names`, it is
 /// the name of each file and how much of it changed, and not the lines.
+///
+/// A submodule shows as the commits that it moved between. git does not go
+/// into the submodule for that, so it runs nothing that the agent wrote in
+/// the configuration of the submodule.
 pub fn diff(folder: &Path, from: &str, to: &str, names: bool) -> Result<String, String> {
     let range = format!("{from}...{to}");
     let form = if names { "--stat=200" } else { "--patch" };
-    let args = ["diff", "--no-color", "--no-ext-diff", form, &range, "--"];
+    let args = [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--submodule=short",
+        form,
+        &range,
+        "--",
+    ];
     run(folder, &args).map_err(|wrote| {
         format!(
             "Lira can't read the change in `{}`. git wrote:\n{wrote}",

@@ -889,6 +889,7 @@ cp -R "$common" "$here/../fake"
 git config --file "$here/../fake/config" core.fsmonitor "touch '$here/../escaped'"
 echo "$here/../fake" > "$(git rev-parse --git-path commondir)"
 for other in "$common"/worktrees/*/; do echo "$here/../fake" > "$other/commondir"; done
+echo "$here/../fake/worktrees" > "$(git rev-parse --git-path gitdir)"
 echo "gitdir: $here/../fake" > .git
 # The git folder of a submodule of the repository, with a configuration of
 # the agent.
@@ -974,15 +975,27 @@ fn git_outside_the_sandbox_does_not_go_into_a_submodule_of_the_agent() {
     // The agent adds a submodule, and gives it a configuration that runs a
     // command. git in the sandbox can't make the file in the home folder.
     // git that Lira runs outside the sandbox could, if it went into the
-    // submodule.
+    // submodule: `git status`, and `git diff` for the Reviewer.
     let work = r#"git init --quiet sub
 (cd sub && commit inner 'Add a file')
 git add sub 2>/dev/null
 git commit --quiet --message 'Add a submodule'
 git -C sub config core.fsmonitor "touch '$HOME/escaped'"
+git -C sub config diff.external "sh -c 'touch \"\$HOME/escaped-diff\"' --"
 "#;
     let repository = Repository::new("submodule", CHECK, &format!("{work}{WORK}"));
-    passed(&repository.run());
+    // Your configuration of git can tell `git diff` to show the change in
+    // a submodule. git goes into the submodule for that.
+    let global = repository.top.join("gitconfig");
+    fs::write(&global, "[diff]\n\tsubmodule = diff\n").unwrap();
+    let output = repository
+        .lira()
+        .env("GIT_CONFIG_GLOBAL", &global)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert!(!repository.top.join("home").join("escaped-diff").exists());
     assert!(!repository.top.join("home").join("escaped").exists());
     let folder = PathBuf::from(repository.kept("folder"));
     assert_eq!(
