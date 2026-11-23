@@ -3564,8 +3564,34 @@ fi
 
     passed(&repository.run());
     assert!(!first.exists(), "{}", first.display());
-    let lock = first.with_extension("lock");
+    let mut lock = first.clone().into_os_string();
+    lock.push(".lock");
+    let lock = PathBuf::from(lock);
     assert!(!lock.exists(), "{}", lock.display());
+}
+
+// spec(Steps): When Lira can't lock the folder of a harness, it runs no agent.
+#[test]
+fn lira_runs_no_agent_when_it_can_not_lock_the_folder_of_a_harness() {
+    let repository = Repository::new("no-lock", CHECK, WORK);
+    // Lira can't make a lock file in a folder where it can't write.
+    let harness = repository.top.join("xdg").join("lira").join("harness");
+    fs::create_dir_all(&harness).unwrap();
+    fs::set_permissions(
+        &harness,
+        std::os::unix::fs::PermissionsExt::from_mode(0o500),
+    )
+    .unwrap();
+    let output = repository.run();
+    fs::set_permissions(
+        &harness,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Lira can't lock the file"), "{error}");
+    assert!(!repository.harness.join("starts").exists());
 }
 
 #[test]
