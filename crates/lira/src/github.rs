@@ -311,7 +311,7 @@ pub fn view(folder: &Path, number: &str) -> Result<View, String> {
 
 /// The comments on the pull request at `address`, the oldest first: the
 /// comments of the conversation, the reviews with a text, and the comments
-/// on a line of the change. `login` is the login of `gh`: the user.
+/// on a line of the change. `login` is the login of `gh`: your login.
 pub fn comments(folder: &Path, address: &str, login: &str) -> Result<Vec<Comment>, String> {
     let pull = pull_of(address);
     // Each comment is one line of JSON, so no text of a comment can look
@@ -465,7 +465,7 @@ fn comments_in(printed: &str, source: Source) -> Result<Vec<Listed>, String> {
 /// sent yet is no comment, and neither are its comments on a line. A review
 /// with no text is no comment. The text of a review and of a comment on a
 /// line starts with what it is. A reply on a line starts with the comments
-/// that it replies to, and says which of them `login`, the user, wrote.
+/// that it replies to, and says which of them you wrote: those of `login`.
 fn in_order(all: Vec<Listed>, login: &str) -> Vec<Comment> {
     let sent: Vec<(i64, Option<String>)> = all
         .iter()
