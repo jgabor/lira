@@ -98,6 +98,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         agent,
         sandbox,
         pull_request: PullRequest::new(&made, request)?,
+        continued: false,
         said: String::new(),
         outputs: 0,
     };
@@ -143,6 +144,8 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
                 .map(|agent| (agent, sandbox))
         })
         .map_err(|error| format!("{error}\nThe worktree {place} stays"))?;
+    let pull_request = PullRequest::continued(&made, address, &view.branch, &on_remote)
+        .map_err(|error| format!("{error}\nThe worktree {place} stays"))?;
     // The pull request leaves the Inbox only when an agent works on it. So
     // `needs:answer` goes last, when all else worked.
     if !view.draft {
@@ -174,7 +177,8 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         request: &request,
         agent,
         sandbox,
-        pull_request: PullRequest::continued(&made, address, &view.branch, &on_remote)?,
+        pull_request,
+        continued: true,
         said: String::new(),
         outputs: 0,
     };
@@ -335,6 +339,8 @@ struct Run<'a> {
     /// the code of the change, and that is code of the agent.
     sandbox: Sandbox,
     pull_request: PullRequest<'a>,
+    /// If the run is of `lira continue`.
+    continued: bool,
     /// The newest reply of the agent.
     said: String,
     /// How many files Lira wrote with the whole output of a failed check.
@@ -573,9 +579,17 @@ impl Run<'_> {
         let _ = self.note(&format!(
             "Nothing. Lira stopped, and the pull request waits for you: {why}."
         ));
-        match question.map(|question| self.pull_request.ask(&question)) {
-            Some(Err(problem)) => format!("{error}\n{problem}"),
-            _ => error,
+        // A new agent of `lira continue` works on a pull request that you
+        // answered. When its work fails, the pull request waits for you
+        // again.
+        let waits = match question {
+            Some(question) => self.pull_request.ask(&question),
+            None if self.continued => self.pull_request.wait(),
+            None => Ok(()),
+        };
+        match waits {
+            Err(problem) => format!("{error}\n{problem}"),
+            Ok(()) => error,
         }
     }
 

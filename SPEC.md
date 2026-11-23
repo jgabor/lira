@@ -236,6 +236,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - Your answer is each comment that the login of `gh` wrote after the last comment of Lira, and that Lira did not write.
 - A comment from someone else is data, and the agent is told so.
 - The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
+- When the work of the new agent fails, the pull request gets `needs:answer` again.
 - When the pull request is ready for review, it becomes a draft again.
 - The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
 - A commit that is on the remote and not in the worktree is taken first.
