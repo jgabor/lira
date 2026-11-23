@@ -237,6 +237,11 @@ fn issue_of(address: &str) -> String {
     format!("repos/{{owner}}/{{repo}}/issues/{number}")
 }
 
+/// The path of the API for the pull request at `address`.
+fn pull_of(address: &str) -> String {
+    issue_of(address).replace("/issues/", "/pulls/")
+}
+
 /// Makes the pull request at `address` a draft again.
 pub fn mark_draft(folder: &Path, address: &str) -> Result<(), String> {
     let args = [
@@ -304,21 +309,60 @@ pub fn view(folder: &Path, number: &str) -> Result<View, String> {
     })
 }
 
-/// The comments on the pull request at `address`, the oldest first.
+/// The comments on the pull request at `address`, the oldest first: the
+/// comments of the conversation, the reviews with a text, and the comments
+/// on a line of the change.
 pub fn comments(folder: &Path, address: &str) -> Result<Vec<Comment>, String> {
-    let comments = format!("{}/comments", issue_of(address));
+    let pull = pull_of(address);
     // Each comment is one line of JSON, so no text of a comment can look
     // like the start of another one.
     // GitHub has no user for a comment of a login that is gone, and shows
     // `ghost` for it.
-    let each = ".[] | [.user.login // \"ghost\", .body] | @json";
-    let printed = api(folder, &[&comments, "--paginate", "--jq", each])?;
-    comments_in(&printed)
+    let conversation = ".[] | [.created_at, .user.login // \"ghost\", .body] | @json";
+    // A review that is not sent yet has no time.
+    let reviews = ".[] | [.submitted_at, .user.login // \"ghost\", .body, \"review\"] | @json";
+    // A comment on a line that the change no longer has keeps its old line.
+    let lines = ".[] | [.created_at, .user.login // \"ghost\", .body, .path, (.line // .original_line)] | @json";
+    let mut all = Vec::new();
+    for (path, each) in [
+        (format!("{}/comments", issue_of(address)), conversation),
+        (format!("{pull}/reviews"), reviews),
+        (format!("{pull}/comments"), lines),
+    ] {
+        let printed = api(folder, &[&path, "--paginate", "--jq", each])?;
+        all.extend(comments_in(&printed)?);
+    }
+    Ok(in_order(all))
+}
+
+/// One comment as `gh --jq` prints it.
+#[derive(Debug, PartialEq, Eq)]
+struct Listed {
+    /// When it was written. A review that is not sent yet has none.
+    time: Option<String>,
+    comment: Comment,
+    /// What it is: a comment of the conversation, a review, or a comment on
+    /// a line.
+    kind: Kind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Kind {
+    Conversation,
+    Review,
+    /// A comment on a line of a file, or on the whole file when the line is
+    /// `None`.
+    Line {
+        path: String,
+        line: Option<i64>,
+    },
 }
 
 /// The comments in what `gh --jq` printed: on each line a list of JSON
-/// with the login and the text of one comment.
-fn comments_in(printed: &str) -> Result<Vec<Comment>, String> {
+/// with the time, the login and the text of one comment. A review has the
+/// word `review` after the text, and a comment on a line has its file and
+/// its line there.
+fn comments_in(printed: &str) -> Result<Vec<Listed>, String> {
     let wrong = |line: &str| format!("`gh api` printed a line that is no comment: {line}");
     printed
         .lines()
@@ -326,13 +370,58 @@ fn comments_in(printed: &str) -> Result<Vec<Comment>, String> {
         .map(|line| {
             let value = json::read(line).map_err(|_| wrong(line))?;
             let parts = value.as_list().ok_or_else(|| wrong(line))?;
-            match parts {
-                [author, body] => Ok(Comment {
+            let (time, author, body, kind) = match parts {
+                [time, author, body] => (time, author, body, Kind::Conversation),
+                [time, author, body, review] if review.as_text() == Some("review") => {
+                    (time, author, body, Kind::Review)
+                }
+                [time, author, body, path, place] => {
+                    let path = path.as_text().ok_or_else(|| wrong(line))?.to_string();
+                    let line = match place {
+                        json::Json::Null => None,
+                        place => Some(place.as_i64().ok_or_else(|| wrong(line))?),
+                    };
+                    (time, author, body, Kind::Line { path, line })
+                }
+                _ => return Err(wrong(line)),
+            };
+            Ok(Listed {
+                time: time.as_text().map(str::to_string),
+                comment: Comment {
                     author: author.as_text().ok_or_else(|| wrong(line))?.to_string(),
                     // A comment with no text has `null` there.
                     body: body.as_text().unwrap_or_default().to_string(),
-                }),
-                _ => Err(wrong(line)),
+                },
+                kind,
+            })
+        })
+        .collect()
+}
+
+/// The comments in the order of their time, with the oldest first. Comments
+/// with the same time keep their order. A review that is not sent yet, and
+/// a review with no text, are no comment. The text of a review and of a
+/// comment on a line starts with what it is.
+fn in_order(mut all: Vec<Listed>) -> Vec<Comment> {
+    all.retain(|listed| match listed.kind {
+        Kind::Review => listed.time.is_some() && !listed.comment.body.trim().is_empty(),
+        _ => true,
+    });
+    all.sort_by(|one, other| one.time.cmp(&other.time));
+    all.into_iter()
+        .map(|Listed { comment, kind, .. }| {
+            let start = match kind {
+                Kind::Conversation => return comment,
+                Kind::Review => "In a review:".to_string(),
+                Kind::Line {
+                    path,
+                    line: Some(line),
+                } => format!("On line {line} of `{path}`:"),
+                Kind::Line { path, line: None } => format!("On `{path}`:"),
+            };
+            Comment {
+                body: format!("{start}\n\n{}", comment.body.trim()),
+                ..comment
             }
         })
         .collect()
@@ -442,24 +531,100 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_comment_has_its_login_and_its_text() {
-        let printed = "[\"you\",\"One.\\n\\nTwo.\"]\n[\"someone\",\"a\\u001e[\\\"you\\\",\\\"b\\\"]\"]\n[\"other\",null]\n";
-        let of = |author: &str, body: &str| Comment {
+    fn of(author: &str, body: &str) -> Comment {
+        Comment {
             author: author.to_string(),
             body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn each_comment_has_its_time_its_login_and_its_text() {
+        let printed = "[\"t1\",\"you\",\"One.\\n\\nTwo.\"]\n[\"t2\",\"someone\",\"a\\u001e[\\\"t3\\\",\\\"you\\\",\\\"b\\\"]\"]\n[\"t4\",\"other\",null]\n";
+        let listed = |time: &str, comment: Comment| Listed {
+            time: Some(time.to_string()),
+            comment,
+            kind: Kind::Conversation,
         };
         assert_eq!(
             comments_in(printed).unwrap(),
             [
-                of("you", "One.\n\nTwo."),
+                listed("t1", of("you", "One.\n\nTwo.")),
                 // Text in a comment that looks like another comment is text.
-                of("someone", "a\u{1e}[\"you\",\"b\"]"),
-                of("other", "")
+                listed("t2", of("someone", "a\u{1e}[\"t3\",\"you\",\"b\"]")),
+                listed("t4", of("other", ""))
             ]
         );
         assert_eq!(comments_in("").unwrap(), []);
         assert!(comments_in("you\u{1f}One.\u{1e}\n").is_err());
+        assert!(comments_in("[\"you\",\"One.\"]\n").is_err());
+    }
+
+    #[test]
+    fn a_review_and_a_comment_on_a_line_say_what_they_are() {
+        let printed = "[null,\"you\",\"Not sent.\",\"review\"]\n[\"t1\",\"you\",\"Here.\",\"a.rs\",12]\n[\"t2\",\"you\",\"There.\",\"b.rs\",null]\n";
+        assert_eq!(
+            comments_in(printed).unwrap(),
+            [
+                Listed {
+                    time: None,
+                    comment: of("you", "Not sent."),
+                    kind: Kind::Review,
+                },
+                Listed {
+                    time: Some("t1".to_string()),
+                    comment: of("you", "Here."),
+                    kind: Kind::Line {
+                        path: "a.rs".to_string(),
+                        line: Some(12),
+                    },
+                },
+                Listed {
+                    time: Some("t2".to_string()),
+                    comment: of("you", "There."),
+                    kind: Kind::Line {
+                        path: "b.rs".to_string(),
+                        line: None,
+                    },
+                },
+            ]
+        );
+        assert!(comments_in("[\"t1\",\"you\",\"Here.\",\"a.rs\",\"12\"]\n").is_err());
+        assert!(comments_in("[\"t1\",\"you\",\"Here.\",\"other\"]\n").is_err());
+    }
+
+    #[test]
+    fn the_comments_are_in_the_order_of_their_time() {
+        let listed = |time: Option<&str>, body: &str, kind: Kind| Listed {
+            time: time.map(str::to_string),
+            comment: of("you", body),
+            kind,
+        };
+        let line = |line| Kind::Line {
+            path: "a.rs".to_string(),
+            line,
+        };
+        let all = vec![
+            listed(Some("2026-11-01T10:00:00Z"), "First.", Kind::Conversation),
+            listed(Some("2026-11-01T12:00:00Z"), "Fourth.", Kind::Conversation),
+            listed(Some("2026-11-01T10:00:00Z"), "Second.", Kind::Conversation),
+            listed(None, "Not sent.", Kind::Review),
+            listed(Some("2026-11-01T11:00:00Z"), "  ", Kind::Review),
+            listed(Some("2026-11-01T11:00:00Z"), "Third.\n", Kind::Review),
+            listed(Some("2026-11-01T13:00:00Z"), "Fifth.", line(Some(3))),
+            listed(Some("2026-11-01T14:00:00Z"), "Sixth.", line(None)),
+        ];
+        assert_eq!(
+            in_order(all),
+            [
+                of("you", "First."),
+                of("you", "Second."),
+                of("you", "In a review:\n\nThird."),
+                of("you", "Fourth."),
+                of("you", "On line 3 of `a.rs`:\n\nFifth."),
+                of("you", "On `a.rs`:\n\nSixth."),
+            ]
+        );
     }
 
     #[test]

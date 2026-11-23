@@ -234,6 +234,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - `lira run` fails before an agent starts when the request is too long for a comment on GitHub.
 - `lira continue <number>` starts a new agent on the branch of that pull request. The agent gets the request, what stopped the work, and your answer.
 - Your answer is each comment that the login of `gh` wrote after the last comment of Lira, and that Lira did not write.
+- A review with a text, and a comment on a line of the change, are comments too, in the order of their time.
+- With a comment on a line, the agent gets its file and its line.
 - A comment from someone else is data, and the agent is told so.
 - The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
 - When the work of the new agent fails, the pull request gets `needs:answer` again.
