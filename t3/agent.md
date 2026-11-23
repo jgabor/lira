@@ -82,11 +82,32 @@ can't continue, stop and ask as AGENTS.md says.
        "model": "claude-opus-5-5", "options": {"effort": "high"}}
       ```
 
-   A Reviewer does not work when it can't start, or when it stops before its
-   review, for example at its usage limit. Then start the next one with the
-   same `task`. When none of them works, stop and ask. When the wait ends
-   while the Reviewer still runs, it has not failed: wait for its result as
-   `delegate_task` says.
+   Before you start a Reviewer, read the usage limit of its harness with
+   [to11y](https://crates.io/crates/to11y):
+
+   ```sh
+   to11y rate_limit_status --harness <harness>
+   to11y usage_remaining_quota --harness <harness>
+   ```
+
+   | Reviewer      | `<harness>`   | Scope that its model uses |
+   | ------------- | ------------- | ------------------------- |
+   | Factory Droid | `droid`       | `standard`                |
+   | Antigravity   | `antigravity` | `gemini`                  |
+   | Claude Code   | `claude-code` | `all`                     |
+
+   A result counts only when its command exits with 0. In each result, read
+   only the entry of the list `scopes` for the scope in the row of the
+   Reviewer. Skip the Reviewer when `rate_limit_status` gives that scope
+   `"blocked": true`, or when `usage_remaining_quota` gives it a
+   `remaining_percent` that is less than 5. When `to11y` is not there, or no
+   result that counts lists the scope, start the Reviewer.
+
+   A Reviewer does not work when you skip it, when it can't start, or when it
+   stops before its review, for example at its usage limit. Then go to the
+   next one, and give it the same `task`. When none of them works, stop and
+   ask. When the wait ends while the Reviewer still runs, it has not failed:
+   wait for its result as `delegate_task` says.
 
    Give the Reviewer the goal of the issue and the command
    `git diff origin/main...HEAD`. Tell it to change no file, and to say for
