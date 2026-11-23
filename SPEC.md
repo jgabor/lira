@@ -132,7 +132,7 @@ Lira does these steps for each issue, in this order.
 - Lira runs the `setup` command with `sh -c`.
 - When the `setup` command fails, Lira removes the new worktree and its branch, and the error shows what the command wrote.
 - A new worktree starts from the newest main branch.
-- A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder.
+- A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder, except as `lira continue` says.
 - When the check fails, Lira gives the output of the check to the agent.
 - After 3 failed tries at the same check, the agent stops and asks.
 - A Reviewer reads the change after the check passes.
@@ -256,6 +256,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
 - When the pull request is ready for review, it becomes a draft again.
 - The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+- When something that git does not list as a worktree is in the folder of the branch, the new worktree is that folder with `~2` at the end of its name, or with `~3` when that is there too, and so on.
 - A commit that is on the remote and not in the worktree is taken first.
 - A commit that is in the old worktree and not on the remote is pushed with the work of the new agent.
 - When the old worktree is on another branch, or on no branch, Lira puts it back on the branch of the pull request.

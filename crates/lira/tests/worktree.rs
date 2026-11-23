@@ -164,7 +164,7 @@ fn a_new_worktree_starts_from_the_newest_main_branch() {
     assert!(!repository.root.join("NEW.md").exists());
 }
 
-// spec(Steps): A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder.
+// spec(Steps): A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder, except as `lira continue` says.
 #[test]
 fn a_new_worktree_is_in_the_data_folder() {
     let repository = Repository::named("folder", CHECK, "acme", "tool.box");
