@@ -194,7 +194,12 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         pull_request,
         continued: Some(Continued {
             answers: read.answer.len(),
-            read: comments.last().and_then(|newest| newest.id.clone()),
+            read: comments.last().and_then(|newest| {
+                Some(comment::Read::Until {
+                    id: newest.id.clone()?,
+                    time: newest.time.clone(),
+                })
+            }),
             login,
         }),
         said: String::new(),
@@ -386,9 +391,9 @@ struct Continued {
     login: String,
     /// How many comments your answer had.
     answers: usize,
-    /// What names the newest comment when the agent started. The agent
-    /// read each comment until that one.
-    read: Option<String>,
+    /// The newest comment when the agent started. The agent read each
+    /// comment until that one.
+    read: Option<comment::Read>,
 }
 
 impl Run<'_> {
@@ -417,7 +422,7 @@ impl Run<'_> {
     fn read(&self) -> Option<comment::Read> {
         match &self.continued {
             None => Some(comment::Read::Request),
-            Some(continued) => continued.read.clone().map(comment::Read::Until),
+            Some(continued) => continued.read.clone(),
         }
     }
 
