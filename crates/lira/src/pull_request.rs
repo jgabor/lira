@@ -4,15 +4,6 @@
 
 use crate::worktree::Worktree;
 use crate::{comment, git, github};
-use std::fs;
-
-/// The file that holds a description on its way to GitHub. git keeps it for
-/// the worktree, outside the files of the repository.
-const DESCRIPTION: &str = "lira-description.md";
-
-/// The file that holds a comment on its way to GitHub. git keeps it for the
-/// worktree, outside the files of the repository.
-const COMMENT: &str = "lira-comment.md";
 
 /// The label of a pull request whose agent stopped and asks.
 pub const NEEDS_ANSWER: &str = "needs:answer";
@@ -200,17 +191,7 @@ impl<'a> PullRequest<'a> {
 
     /// Writes a comment on the pull request at `address`.
     fn comment(&self, address: &str, text: &str) -> Result<(), String> {
-        let folder = &self.worktree.folder;
-        let file = git::own_file(folder, COMMENT)?;
-        git::write_new(&file, text).map_err(|error| {
-            format!(
-                "Lira can't write the comment to `{}`: {error}",
-                file.display()
-            )
-        })?;
-        let sent = github::comment(folder, address, &file);
-        let _ = fs::remove_file(&file);
-        sent
+        github::comment(&self.worktree.folder, address, text)
     }
 
     /// Writes the comment with the request on the pull request, when there
@@ -228,25 +209,9 @@ impl<'a> PullRequest<'a> {
 
     /// Gives the pull request at `address` this description.
     fn describe(&mut self, address: &str, description: &str) -> Result<(), String> {
-        let folder = &self.worktree.folder;
-        let file = self.write(description)?;
-        let sent = github::describe(folder, address, &file);
-        let _ = fs::remove_file(&file);
-        sent?;
+        github::describe(&self.worktree.folder, address, description)?;
         self.described = description.to_string();
         Ok(())
-    }
-
-    /// Writes a description to the file that `gh` reads it from.
-    fn write(&self, description: &str) -> Result<std::path::PathBuf, String> {
-        let file = git::own_file(&self.worktree.folder, DESCRIPTION)?;
-        git::write_new(&file, description).map_err(|error| {
-            format!(
-                "Lira can't write the description of the pull request to `{}`: {error}",
-                file.display()
-            )
-        })?;
-        Ok(file)
     }
 
     /// What went wrong at the last look, if something did.
@@ -311,22 +276,21 @@ impl<'a> PullRequest<'a> {
         if let Some(address) = self.address.clone() {
             return self.describe(&address, &description);
         }
-        let file = self.write(&description)?;
         let branch = self.branch.as_deref().expect("the branch was pushed");
         let main = &self.worktree.main;
-        let opened =
-            github::open_draft(folder, main, branch, &subjects[0], &file).and_then(|draft| {
+        let opened = github::open_draft(folder, main, branch, &subjects[0], &description).and_then(
+            |draft| {
                 // A pull request that is not new got its description in a call
                 // before, and that can be an older one.
                 let described = if draft.new {
                     Ok(())
                 } else {
-                    github::describe(folder, &draft.address, &file)
+                    github::describe(folder, &draft.address, &description)
                 };
                 self.address = Some(draft.address);
                 described
-            });
-        let _ = fs::remove_file(&file);
+            },
+        );
         opened?;
         self.described = description;
         Ok(())
