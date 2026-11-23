@@ -64,11 +64,11 @@ pub fn question(question: &str) -> String {
 }
 
 /// The comment that says that the check and a Reviewer passed the change
-/// after your answer. A later `lira continue` reads only what you wrote
+/// of `lira continue`. A later `lira continue` reads only what you wrote
 /// after it.
 pub fn passed() -> String {
     format!(
-        "{PASSED}\nThe check and a Reviewer passed the change after your answer, and the pull request is ready for review."
+        "{PASSED}\nThe check and a Reviewer passed the change, and the pull request is ready for review."
     )
 }
 

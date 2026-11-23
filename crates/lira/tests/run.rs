@@ -4757,7 +4757,7 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
 }
 
 // spec(lira continue): When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
-// spec(lira continue): A second `lira continue` gets only the answer that you wrote after the first.
+// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after it.
 // spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 #[test]
 fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {

@@ -193,7 +193,7 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
 fn continuation(branch: &str, read: &comment::Read) -> String {
     let stopped = match (&read.stopped, read.passed) {
         (Some(stopped), _) => quote(stopped),
-        (None, true) => "Nothing stopped the work. The check and a Reviewer passed the change, and the pull request was ready for review. Then the user sent it back with the answer below.\n".to_string(),
+        (None, true) => "Nothing stopped the work. The check and a Reviewer passed the change, and the pull request was ready for review. Then the user sent it back.\n".to_string(),
         (None, false) => "Lira did not write what stopped the work.\n".to_string(),
     };
     let answer = match read.answer.is_empty() {
