@@ -4603,8 +4603,8 @@ fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
 fn a_folder_that_git_does_not_list_in_the_place_of_the_old_worktree_is_not_used() {
     // The agent gave its branch a new name, and the old worktree is gone.
     // In its place is a folder with a `.git` file of its own, which names a
-    // git folder that shares the git folder of the repository, or no git
-    // folder at all.
+    // git folder whose shared git folder is the one of the repository, or no
+    // git folder at all.
     for (test, valid) in [("unlisted-valid", true), ("unlisted-invalid", false)] {
         let repository = Repository::stopped_after(test, CHECK, "git branch -m fix/greeting\n");
         let branch = repository.pull_request_branch();
@@ -4629,15 +4629,32 @@ fn a_folder_that_git_does_not_list_in_the_place_of_the_old_worktree_is_not_used(
                 common.canonicalize().unwrap().to_str().unwrap()
             );
         }
-        passed(&repository.continue_work());
+        // git writes an event for each folder that it runs in.
+        let trace = repository.top.join("git-trace");
+        passed(
+            &repository
+                .lira()
+                .env("ORDER", repository.shared.join("order"))
+                .env("GIT_TRACE2_EVENT", &trace)
+                .args(["continue", "7"])
+                .output()
+                .unwrap(),
+        );
         let data = repository.top.join("xdg").join("lira");
         assert_eq!(
             PathBuf::from(repository.kept("folder")),
             Repository::worktrees(&data).join(&branch),
             "{test}"
         );
-        // git ran in neither folder: the folder has only its `.git` file,
-        // and the git folder is as it was.
+        // git ran in neither folder: no event names them, the folder has
+        // only its `.git` file, and the git folder is as it was.
+        let events = fs::read_to_string(&trace).unwrap();
+        let new = Repository::worktrees(&data).join(&branch);
+        assert!(events.contains(new.to_str().unwrap()), "{events}");
+        for folder in [&old, &fake] {
+            let named = folder.to_str().unwrap();
+            assert!(!events.contains(named), "{test}: {named} in {events}");
+        }
         let names: Vec<_> = fs::read_dir(&old)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
