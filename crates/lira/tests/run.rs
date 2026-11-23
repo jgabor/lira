@@ -2039,13 +2039,13 @@ fn a_relative_xdg_runtime_dir_hides_nothing() {
     // agent needs its `.git`. The file `bus` there is no session bus.
     let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("run")
-        .join("relative-runtime")
+        .join("relative-user-folder")
         .join("repository");
     let work = format!(
         "git status --short > \"$here/status\"\ncat '{}' > \"$here/bus\"\n",
         root.join("bus").display()
     );
-    let repository = Repository::new("relative-runtime", CHECK, &format!("{work}{WORK}"));
+    let repository = Repository::new("relative-user-folder", CHECK, &format!("{work}{WORK}"));
     fs::write(repository.root.join("bus"), "text\n").unwrap();
     let output = repository
         .lira()
@@ -2064,7 +2064,7 @@ fn a_file_that_lira_gives_the_sandbox_in_the_hidden_xdg_runtime_dir_is_there() {
     // `XDG_RUNTIME_DIR`, so Lira makes the file of the scores there. The
     // sandbox hides that folder, and the check still finds the file.
     let check = "test -f \"$LIRA_SCORES\"\n";
-    let repository = Repository::checked("runtime-scores", check, WORK);
+    let repository = Repository::checked("user-folder-scores", check, WORK);
     let user_folder = repository.top.join("xdg-user");
     let temporary = user_folder.join("tmp");
     fs::create_dir_all(&temporary).unwrap();
