@@ -52,7 +52,7 @@ impl<'a> PullRequest<'a> {
     /// starts. There is no pull request yet.
     pub fn new(worktree: &'a Worktree, request: &str) -> Result<PullRequest<'a>, String> {
         Ok(PullRequest {
-            request: Some(comment::request(request)),
+            request: Some(comment::request(request, &worktree.branch)),
             worktree,
             before: git::branches(&worktree.folder)?,
             local: worktree.branch.clone(),

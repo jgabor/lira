@@ -90,6 +90,9 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
 /// The worktree for the branch `branch` of a pull request whose work
 /// continues. It is the old worktree of the branch when git still has it in
 /// `data`, and a new one from the branch of the remote when it does not.
+/// `started_on` is the branch that the old worktree started on, when Lira
+/// knows it. The old worktree is in the folder of that branch, also when
+/// the agent gave the branch another name.
 /// A commit that the remote has on the branch, and that the worktree does
 /// not have, is taken first. Then the `setup` command runs in a new
 /// worktree. It returns the worktree, and the commit that the remote has on
@@ -98,6 +101,7 @@ pub fn continued(
     repository: &Path,
     data: &Path,
     branch: &str,
+    started_on: Option<&str>,
 ) -> Result<(Worktree, String), String> {
     if !git::allows_branch(repository, branch)? {
         return Err(format!(
@@ -139,12 +143,22 @@ pub fn continued(
                 .flatten()
                 .collect();
             git::prune_worktrees(repository, &inside)?;
-            // The old worktree can be in the folder of the branch, and on
-            // another branch or on no branch. Then it goes back to the
-            // branch. The repository can have no such branch any more,
-            // when the agent gave it another name.
-            let folder = ours.join(branch);
-            if is_at(&folder, &ours, branch) && is_a_worktree_of(&folder, repository)? {
+            // The old worktree can be in the folder of the branch that it
+            // started on, or in the folder of the branch, and on another
+            // branch or on no branch. Then it goes back to the branch. The
+            // repository can have no such branch any more, when the agent
+            // gave it another name. The folder that it started on comes
+            // first: the folder of the branch can hold the worktree of an
+            // earlier pull request on a branch with the same name.
+            let mut old = None;
+            for name in [started_on, Some(branch)].into_iter().flatten() {
+                let folder = ours.join(name);
+                if is_at(&folder, &ours, name) && is_a_worktree_of(&folder, repository)? {
+                    old = Some(folder);
+                    break;
+                }
+            }
+            if let Some(folder) = old {
                 if !git::has_branch(repository, branch)? {
                     git::add_branch(repository, branch, &on_remote)?;
                 }
@@ -186,8 +200,16 @@ fn is_inside(folder: &Path, ours: &Path) -> bool {
 }
 
 /// If `folder` is the folder `branch` in the folder `ours`, with each link
-/// in both paths followed. A link there to another folder is not.
+/// in both paths followed. A link there to another folder is not. Each
+/// part of `branch` is one name, and it does not go up.
 fn is_at(folder: &Path, ours: &Path, branch: &str) -> bool {
+    let names = !branch.is_empty()
+        && Path::new(branch)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+    if !names {
+        return false;
+    }
     match (folder.canonicalize(), ours.canonicalize()) {
         (Ok(folder), Ok(ours)) => folder == ours.join(branch),
         _ => false,

@@ -3707,14 +3707,23 @@ impl Repository {
     /// A run that stops as `stopped` says, in a repository with this Lira
     /// file.
     fn stopped_with(test: &str, lira_file: &str) -> Repository {
-        let work = r#"commit greeting 'Add a greeting'
+        Repository::stopped_after(test, lira_file, "")
+    }
+
+    /// A run that stops as `stopped` says, in a repository with this Lira
+    /// file. The agent does `first` before its commit.
+    fn stopped_after(test: &str, lira_file: &str, first: &str) -> Repository {
+        let work = format!(
+            "{first}{}",
+            r#"commit greeting 'Add a greeting'
 reply 'I made the file.'
 while :; do
   next
   reply 'I do not agree.'
 done
-"#;
-        let repository = Repository::new(test, lira_file, work);
+"#
+        );
+        let repository = Repository::new(test, lira_file, &work);
         repository.reviewer("reply 'It is still wrong.\\n\\nReview: findings'\n");
         failed(&repository.run());
         fs::remove_file(repository.harness.join("reviewer.sh")).unwrap();
@@ -4227,6 +4236,107 @@ fn an_old_worktree_on_no_branch_goes_back_to_the_branch() {
             Some("Add a greeting")
         );
     }
+}
+
+// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+#[test]
+fn an_old_worktree_whose_branch_has_a_new_name_is_found_on_no_branch() {
+    // The agent gave its branch a new name, so the folder of the worktree
+    // has another name than the branch. Then the worktree went on no
+    // branch. Its branch has a commit that is not pushed, or the branch is
+    // gone.
+    for (test, branch_too) in [("renamed-detached", false), ("renamed-no-branch", true)] {
+        let repository = Repository::stopped_after(test, CHECK, "git branch -m fix/greeting\n");
+        let branch = repository.pull_request_branch();
+        assert_eq!(branch, "fix/greeting");
+        let old = PathBuf::from(repository.kept("folder"));
+        assert!(!old.ends_with(&branch), "{}", old.display());
+        if !branch_too {
+            fs::write(old.join("mine.txt"), "mine\n").unwrap();
+            git_ok(&old, &["add", "--all"]);
+            git_ok(
+                &old,
+                &["commit", "--quiet", "--message", "A commit of the worktree"],
+            );
+        }
+        git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+        if branch_too {
+            git_ok(&repository.root, &["branch", "--quiet", "-D", &branch]);
+        }
+        passed(&repository.continue_work());
+        assert_eq!(PathBuf::from(repository.kept("folder")), old, "{test}");
+        assert_eq!(repository.kept("branch"), branch);
+        let newest = match branch_too {
+            true => "Add a greeting",
+            false => "A commit of the worktree",
+        };
+        assert_eq!(repository.kept("log-at-start").lines().next(), Some(newest));
+    }
+}
+
+#[test]
+fn the_folder_that_the_worktree_started_in_comes_before_an_old_folder_of_the_branch() {
+    // A worktree of an earlier pull request on a branch with the same name
+    // stays in the folder of that name, on no branch.
+    let repository =
+        Repository::stopped_after("started-first", CHECK, "git branch -m fix/greeting\n");
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+    let data = repository.top.join("xdg").join("lira");
+    let earlier = Repository::worktrees(&data).join(&branch);
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            earlier.to_str().unwrap(),
+        ],
+    );
+    passed(&repository.continue_work());
+    assert_eq!(PathBuf::from(repository.kept("folder")), old);
+    assert_eq!(git_ok(&earlier, &["branch", "--show-current"]), "");
+}
+
+#[test]
+fn a_started_on_branch_that_names_a_folder_outside_the_data_folder_is_not_used() {
+    let repository =
+        Repository::stopped_after("started-outside", CHECK, "git branch -m fix/greeting\n");
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+    // A worktree of yours, on no branch, outside the data folder. The
+    // comment with the request names it.
+    let mine = repository.top.join("mine");
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            mine.to_str().unwrap(),
+        ],
+    );
+    let listed = repository.shared.join("bin").join("listed");
+    let text = fs::read_to_string(&listed).unwrap();
+    let started = old.strip_prefix(Repository::worktrees(
+        &repository.top.join("xdg").join("lira"),
+    ));
+    let started = started.unwrap().to_str().unwrap();
+    let line = format!("<!-- lira started on {started} -->");
+    assert!(text.contains(&line), "{text}");
+    let yours = format!("<!-- lira started on {} -->", mine.display());
+    fs::write(&listed, text.replace(&line, &yours)).unwrap();
+    passed(&repository.continue_work());
+    let data = repository.top.join("xdg").join("lira");
+    assert_eq!(
+        PathBuf::from(repository.kept("folder")),
+        Repository::worktrees(&data).join(&branch)
+    );
+    assert_eq!(git_ok(&mine, &["branch", "--show-current"]), "");
 }
 
 #[test]

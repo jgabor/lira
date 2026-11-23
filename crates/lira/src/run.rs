@@ -61,14 +61,15 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
     sandbox::require()?;
     // `lira continue` reads the request from its comment, so the comment
     // must fit.
-    if !comment::request_fits(request) {
+    let branch = new_branch();
+    if !comment::request_fits(request, &branch) {
         return Err(format!(
             "the request is too long for a comment on GitHub, which takes {} characters at most. Lira keeps the request in a comment on the pull request, so no agent started",
             comment::LONGEST
         ));
     }
     let data = data::folder()?;
-    let made = worktree::make(folder, &data, &new_branch())?;
+    let made = worktree::make(folder, &data, &branch)?;
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
 
@@ -134,7 +135,8 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         ));
     };
     let data = data::folder()?;
-    let (made, on_remote) = worktree::continued(folder, &data, &view.branch)?;
+    let (made, on_remote) =
+        worktree::continued(folder, &data, &view.branch, read.started_on.as_deref())?;
     let place = format!("`{}`", made.folder.display());
     eprintln!("lira: the agent works in {place}");
     let model = made.file.models.agent.as_deref();
