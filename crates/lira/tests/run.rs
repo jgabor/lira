@@ -1584,7 +1584,7 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
 /// is the one where a program looks when the variable is not set.
 const OTHER_LOGINS: &str = r#"other_logins() {
   for file in "$HOME/.git-credentials" "$XDG_CONFIG_HOME/git/credentials" "$HOME/.config/git/credentials" "$HOME/.netrc"; do
-    echo "$file: $(cat "$file" 2>/dev/null)"
+    echo "$file: $(cat "$file" 2>&1)"
   done
   for folder in "$HOME/.git-credential-cache" "$XDG_CACHE_HOME/git/credential" "$HOME/.cache/git/credential" "$system/.ssh" "$system/.config/gh"; do
     echo "$folder: $(ls -A "$folder" 2>&1)"
@@ -1601,7 +1601,10 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     let repository = Repository::new("other-logins", CHECK, "");
     let system = repository.top.join("system");
     let logins = format!("system='{}'\n{OTHER_LOGINS}", system.display());
-    let work = format!("{logins}other_logins > \"$here/agent-logins\"\n{WORK}");
+    // The agent writes to a file of logins too.
+    let work = format!(
+        "{logins}echo changed > \"$HOME/.netrc\"\nother_logins > \"$here/agent-logins\"\n{WORK}"
+    );
     program(&repository.harness.join("agent"), &format!("{START}{work}"));
     repository.reviewer(&format!(
         "{logins}other_logins > \"$here/reviewer-logins\"\nreply 'Review: pass'\n"
@@ -1678,6 +1681,36 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     {
         assert_eq!(fs::read_to_string(&file).unwrap(), "secret\n");
     }
+}
+
+#[test]
+fn with_no_home_an_agent_has_no_login_in_the_home_folder_of_the_system() {
+    let repository = Repository::new("system-home", CHECK, "");
+    let system = repository.top.join("system");
+    let folders = [system.join(".ssh"), system.join(".config").join("gh")];
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    let work: String = folders
+        .iter()
+        .map(|folder| format!("ls -A '{}' >> \"$here/seen\"\n", folder.display()))
+        .collect();
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{work}{WORK}"),
+    );
+    // `HOME` is not set, so the harness finds its data folder in
+    // `CLAUDE_CONFIG_DIR`.
+    let lira = repository.lira();
+    let output = with_home(&lira, &system, &repository.top.join("passwd"))
+        .env_remove("HOME")
+        .env("CLAUDE_CONFIG_DIR", &repository.data)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("seen"), "");
 }
 
 /// `lira` on a host where the system names `home` as the home folder of the

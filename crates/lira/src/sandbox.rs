@@ -98,6 +98,11 @@ const SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 /// The variables with a token or a socket are not set. This comes after the
 /// other paths, so that it wins over them.
 ///
+/// `/dev/null` of the host takes the place of each file and socket. It is
+/// bound with `--dev-bind`, because a program can't open a device on a mount
+/// of `--ro-bind`. So a program reads nothing from it, and what it writes
+/// there goes nowhere, and not to the file of the host.
+///
 /// A login in a folder that the sandbox has of its own is hidden already:
 /// in `/dev`, `/proc`, `/tmp`, `/run`, or a folder of logins. `bwrap` would
 /// make the folders of its path there, or hide a file of the sandbox, such
@@ -123,7 +128,7 @@ fn hide_logins(command: &mut Command) {
             && !file.is_dir()
             && !is_hidden(&file, &hidden)
         {
-            command.arg("--ro-bind").arg("/dev/null").arg(&file);
+            command.arg("--dev-bind").arg("/dev/null").arg(&file);
             hidden.push(file);
         }
     }
