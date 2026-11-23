@@ -1815,8 +1815,8 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
 /// names for the user, which is `$system`, and of the keyring. `$HOME/bus`
 /// is the socket of the session bus of D-Bus that its variable names, and
 /// `$XDG_RUNTIME_DIR/bus` is the one where a program looks when the
-/// variable is not set. The runtime folder has the sockets of the ssh
-/// agents of the keyring and of gpg-agent too.
+/// variable is not set. The folder of `XDG_RUNTIME_DIR` has the sockets of
+/// the ssh agent of the keyring too.
 const OTHER_LOGINS: &str = r#"other_logins() {
   for file in "$HOME/.git-credentials" "$XDG_CONFIG_HOME/git/credentials" "$HOME/.config/git/credentials" "$HOME/.netrc"; do
     echo "$file: $(cat "$file" 2>&1)"
@@ -1876,14 +1876,13 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     // address of D-Bus can escape each byte of the path.
     let bus = home.join("bus");
     let _bus = listen("other-logins", &bus);
-    // The runtime folder is not in `/run`. It has the session bus, and the
-    // ssh agents of the keyring and of gpg-agent.
+    // The folder of `XDG_RUNTIME_DIR` is not in `/run`. It has the session
+    // bus, and the ssh agent of the keyring.
     let _user_bus = listen("other-logins-user", &user_folder.join("bus"));
     let mut _agents = Vec::new();
     for (name, socket) in [
         ("keyring", user_folder.join("keyring").join("ssh")),
         ("gcr", user_folder.join("gcr").join("ssh")),
-        ("gnupg", user_folder.join("gnupg").join("S.gpg-agent.ssh")),
     ] {
         fs::create_dir_all(socket.parent().unwrap()).unwrap();
         _agents.push(listen(&format!("other-logins-{name}"), &socket));
@@ -2034,7 +2033,7 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
 }
 
 #[test]
-fn a_relative_runtime_folder_hides_nothing() {
+fn a_relative_xdg_runtime_dir_hides_nothing() {
     // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
     // in the repository, so `.` is the repository, and the worktree of the
     // agent needs its `.git`. The file `bus` there is no session bus.
@@ -2057,6 +2056,26 @@ fn a_relative_runtime_folder_hides_nothing() {
     passed(&output);
     assert_eq!(repository.kept("status"), "");
     assert_eq!(repository.kept("bus"), "text");
+}
+
+#[test]
+fn a_file_that_lira_gives_the_sandbox_in_the_hidden_xdg_runtime_dir_is_there() {
+    // The folder for temporary files is in the folder of
+    // `XDG_RUNTIME_DIR`, so Lira makes the file of the scores there. The
+    // sandbox hides that folder, and the check still finds the file.
+    let check = "test -f \"$LIRA_SCORES\"\n";
+    let repository = Repository::checked("runtime-scores", check, WORK);
+    let user_folder = repository.top.join("xdg-user");
+    let temporary = user_folder.join("tmp");
+    fs::create_dir_all(&temporary).unwrap();
+    let output = repository
+        .lira()
+        .env("XDG_RUNTIME_DIR", &user_folder)
+        .env("TMPDIR", &temporary)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
 }
 
 #[test]

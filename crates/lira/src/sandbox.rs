@@ -74,15 +74,22 @@ impl Sandbox {
     /// folder that the command is given.
     pub fn command(&self, program: &OsStr) -> Command {
         let mut command = base();
+        let user_folder = user_folder();
+        if let Some(folder) = &user_folder {
+            command.arg("--tmpfs").arg(folder);
+        }
         for (path, place, writable) in &self.paths {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
-        hide_logins(&mut command, &self.hidden);
+        hide_logins(&mut command, &self.hidden, user_folder);
         command.arg("--").arg(program);
         command
     }
 }
+
+/// The folders that the sandbox has of its own. See `base`.
+const OWN: [&str; 4] = ["/dev", "/proc", "/tmp", "/run"];
 
 /// The variables that can hold a token for GitHub, for `gh` and for git.
 const TOKENS: [&str; 4] = [
@@ -113,17 +120,15 @@ const SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 /// there goes nowhere, and not to the file of the host.
 ///
 /// A login in a folder that the sandbox has of its own is hidden already:
-/// in `/dev`, `/proc`, `/tmp`, `/run`, or a folder of logins. `bwrap` would
-/// make the folders of its path there, or hide a file of the sandbox, such
-/// as `/dev/null`. So it is left out.
+/// in `/dev`, `/proc`, `/tmp`, `/run`, the folder of `XDG_RUNTIME_DIR`, or
+/// a folder of logins. `bwrap` would make the folders of its path there, or
+/// hide a file of the sandbox, such as `/dev/null`. So it is left out.
 ///
 /// `others` are other files of logins, which are hidden as the files of
-/// logins for GitHub.
-fn hide_logins(command: &mut Command, others: &[PathBuf]) {
-    let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+/// logins for GitHub. `user_folder` is the folder of `XDG_RUNTIME_DIR`,
+/// when the sandbox has its own.
+fn hide_logins(command: &mut Command, others: &[PathBuf], user_folder: Option<PathBuf>) {
+    let mut hidden: Vec<PathBuf> = OWN.iter().map(PathBuf::from).chain(user_folder).collect();
     let is_hidden =
         |path: &Path, hidden: &[PathBuf]| hidden.iter().any(|folder| path.starts_with(folder));
     for folder in login_folders() {
@@ -154,6 +159,24 @@ fn set(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
+/// The folder that `XDG_RUNTIME_DIR` names, when the sandbox needs to make
+/// it empty. It has the sockets of the session bus and of the ssh agent of
+/// the keyring. It is in `/run` on most hosts, and the sandbox has its own
+/// `/run`, so then it is `None`. A relative path names no folder, as the
+/// XDG specification says.
+///
+/// The sandbox makes it empty before it adds the paths that Lira names, as
+/// it does `/tmp` and `/run`. So a path that Lira names in it is there.
+fn user_folder() -> Option<PathBuf> {
+    let folder = PathBuf::from(set("XDG_RUNTIME_DIR")?);
+    let folder = folder
+        .is_absolute()
+        .then_some(folder)?
+        .canonicalize()
+        .ok()?;
+    (folder.is_dir() && !OWN.iter().any(|path| folder.starts_with(path))).then_some(folder)
+}
+
 /// The home folders of the user: the one that `HOME` names, and the one
 /// that the system names. They can differ, and ssh reads its keys from the
 /// one that the system names.
@@ -171,19 +194,8 @@ fn homes() -> Vec<PathBuf> {
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
 /// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
 /// plain store in `~/.gcm/store`.
-///
-/// The runtime folder of the user, which `XDG_RUNTIME_DIR` names, has the
-/// sockets of the session bus and of the ssh agents of the keyring and of
-/// gpg-agent. It is in `/run` on most hosts, and the sandbox has its own
-/// `/run`. When it is not in `/run`, it is here. A relative path names no
-/// runtime folder, as the XDG specification says.
 fn login_folders() -> Vec<PathBuf> {
     let mut folders = Vec::new();
-    if let Some(folder) = set("XDG_RUNTIME_DIR").map(PathBuf::from)
-        && folder.is_absolute()
-    {
-        folders.push(folder);
-    }
     if let Some(folder) = set("GH_CONFIG_DIR") {
         folders.push(PathBuf::from(folder));
     }
