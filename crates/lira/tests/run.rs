@@ -1732,6 +1732,8 @@ const LOGINS: &str = r#"logins() {
 "#;
 
 // spec(GitHub): An agent and a Reviewer have no login for GitHub.
+// spec(Steps): In the sandbox of an agent, `~/.ssh`, `~/.gnupg`, `~/.netrc` and `~/.git-credentials` are empty, with no login for GitHub or for another site.
+// spec(Steps): In the sandbox, `SSH_AUTH_SOCK` and `DBUS_SESSION_BUS_ADDRESS` are not set, and a socket file that they name is not a socket there.
 #[test]
 fn an_agent_and_a_reviewer_have_no_login_for_github() {
     let work = format!("{LOGINS}logins > \"$here/agent-logins\"\n{WORK}");
@@ -1831,6 +1833,9 @@ const OTHER_LOGINS: &str = r#"other_logins() {
 "#;
 
 // spec(GitHub): An agent and a Reviewer have no login for GitHub.
+// spec(Steps): In the sandbox of an agent, `~/.ssh`, `~/.gnupg`, `~/.netrc` and `~/.git-credentials` are empty, with no login for GitHub or for another site.
+// spec(Steps): In the sandbox, `SSH_AUTH_SOCK` and `DBUS_SESSION_BUS_ADDRESS` are not set, and a socket file that they name is not a socket there.
+// spec(Steps): In the sandbox, the folder of `XDG_RUNTIME_DIR` has no file of the host, other than the paths that Lira gives the sandbox.
 #[test]
 fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     let repository = Repository::new("other-logins", CHECK, "");
@@ -2032,6 +2037,7 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     assert_eq!(repository.kept("seen"), "");
 }
 
+// spec(Steps): An `XDG_RUNTIME_DIR` that is not an absolute path counts as not set.
 #[test]
 fn a_relative_xdg_runtime_dir_hides_nothing() {
     // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
@@ -2058,6 +2064,7 @@ fn a_relative_xdg_runtime_dir_hides_nothing() {
     assert_eq!(repository.kept("bus"), "text");
 }
 
+// spec(Steps): In the sandbox, the folder of `XDG_RUNTIME_DIR` has no file of the host, other than the paths that Lira gives the sandbox.
 #[test]
 fn a_file_that_lira_gives_the_sandbox_in_the_hidden_xdg_runtime_dir_is_there() {
     // The folder for temporary files is in the folder of
@@ -2088,6 +2095,7 @@ const GPG_AGENT: [&str; 4] = [
 ];
 
 // spec(GitHub): An agent and a Reviewer have no login for GitHub.
+// spec(Steps): In the sandbox of an agent, `~/.ssh`, `~/.gnupg`, `~/.netrc` and `~/.git-credentials` are empty, with no login for GitHub or for another site.
 #[test]
 fn an_agent_and_a_reviewer_reach_no_socket_of_gpg_agent() {
     // The host has no `/run/user/<uid>`, so gpg-agent keeps its sockets in

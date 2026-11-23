@@ -1,7 +1,8 @@
 //! The sandbox of an agent. The harness runs in it, and so does the check of
 //! the change of the agent. What runs in it can change files only in the
 //! folders that Lira names. It can read all files of the host, except the
-//! logins for GitHub.
+//! places where ssh, gpg, git and `gh` keep logins, for GitHub and for
+//! other sites.
 //!
 //! This is the one place that knows how the sandbox works. Lira makes it
 //! with the program `bwrap` (bubblewrap), so it runs on Linux only.
@@ -107,8 +108,9 @@ const SSH_AGENT: &str = "SSH_AUTH_SOCK";
 /// hosts.
 const SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 
-/// Hides the logins for GitHub that the host keeps in the known places.
-/// Lira keeps them, because Lira pushes the branch and opens the pull
+/// Hides the places where the host keeps logins, for GitHub and for other
+/// sites. Each place is hidden whole. Lira keeps the logins for GitHub,
+/// because Lira pushes the branch and opens the pull
 /// request. A folder of logins is empty in the sandbox. A file of logins is
 /// empty there, and a socket that leads to a login is not a socket there.
 /// The variables with a token or a socket are not set. This comes after the
