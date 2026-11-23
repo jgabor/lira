@@ -252,7 +252,8 @@ fn a_lira_file_with_no_setup_runs_no_command() {
     assert_eq!(files, ["README.md", "lira.toml"]);
 }
 
-// spec(Steps): When the `setup` command fails, Lira removes the new worktree and its branch, and the error shows what the command wrote.
+// spec(Steps): When the `setup` command fails, Lira removes the new worktree, and the error shows what the command wrote.
+// spec(Steps): Lira removes the branch of the new worktree too, when the repository did not have the branch before.
 #[test]
 fn a_setup_command_that_fails_is_an_error_that_shows_its_output() {
     let lira_file = format!(

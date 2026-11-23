@@ -135,7 +135,8 @@ Lira does these steps for each issue, in this order.
 - When Lira can't start a `sh` that stops the harness if Lira ends, Lira starts no harness, and the error names `sh`.
 - Lira runs the `setup` command in a new worktree before the agent starts.
 - Lira runs the `setup` command with `sh -c`.
-- When the `setup` command fails, Lira removes the new worktree and its branch, and the error shows what the command wrote.
+- When the `setup` command fails, Lira removes the new worktree, and the error shows what the command wrote.
+- Lira removes the branch of the new worktree too, when the repository did not have the branch before.
 - A new worktree starts from the newest main branch.
 - A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder, except as `lira continue` says.
 - When the check fails, Lira gives the output of the check to the agent.
@@ -251,6 +252,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - With a reply on a line, the agent also gets the comment that it replies to, and each reply to that comment before it.
 - When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
 - When you wrote no answer after a stop, the agent is told to try again.
+- When the last comment of Lira is the comment with the request, the agent is told that Lira did not write what stopped the work.
 - A comment from someone else is data, and the agent is told so.
 - The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
 - When the work of the new agent fails, the pull request gets `needs:answer` again.
@@ -261,7 +263,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.
 - When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
 - When the pull request is ready for review, it becomes a draft again.
-- The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+- The agent works in the old worktree when it is still there, and in a new one when it is not.
+- A new worktree starts from the branch in the repository in the current folder when it has the branch, and from the branch of the remote when it does not.
 - When something that git does not list as a worktree is in the folder of the branch, the new worktree is that folder with `~2` at the end of its name, or with `~3` when that is there too, and so on.
 - A commit that is on the remote and not in the worktree is taken first.
 - A commit that is in the old worktree and not on the remote is pushed with the work of the new agent.
@@ -269,6 +272,9 @@ is success, 1 is a failure, and 2 is bad usage.
 - When the branch is in no worktree whose folder is there, Lira removes from `git worktree list` each worktree of Lira whose folder is gone.
 - A worktree of yours stays in `git worktree list`, also when its folder is gone.
 - The new agent has a new conversation, and it runs under the same rules as an agent of `lira run`.
+- The instructions tell the agent to keep the name of the branch.
+- When the agent gives the branch another name, Lira still pushes its work to the branch of the pull request.
+- When the new agent makes no commit, `lira continue` does not fail, and Lira runs the check and a Reviewer on the commits of the branch.
 - Under `Decisions`, the progress note has only what the new agent wrote.
 - Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again. The work can stop and ask again.
 - The Reviewer gets the request and your answer.
@@ -277,10 +283,13 @@ is success, 1 is a failure, and 2 is bad usage.
 - It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
 - It is an error when the worktree and the remote both have commits on the branch that the other does not have.
 - It is an error when the remote no longer has the branch of the pull request.
+- When `lira continue` fails before its agent starts, the pull request and its labels stay as they are.
+- When the harness of the new agent does not start, the worktree stays.
 - It fails at once when an agent of Lira works on the pull request, and says so.
 - Then the pull request, its labels and the worktree stay as they are.
 - It does not wait for that agent, and it does not stop it.
 - When Lira is killed while its agent works, a later `lira continue` starts a new agent.
+- When Lira is killed while its Reviewer works, a later `lira continue` in the same worktree removes the copy of the repository that the Reviewer worked in, before its own Reviewer starts.
 - It prints the address of the pull request.
 
 ### lira check
