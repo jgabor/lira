@@ -4659,7 +4659,7 @@ fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
         // Written before the question, so it is not part of your answer.
         line(
             "2026-10-01T10:00:00Z",
-            "someone",
+            "you",
             "Should the greeting say hello?",
             21,
             Json::Null,
@@ -4692,9 +4692,15 @@ fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
     let place = message[..parent]
         .rfind("line 1 of `greeting.txt`")
         .expect(&message);
-    // The comment of someone else is data.
-    assert!(message[place..parent].contains("`someone`"), "{message}");
-    assert!(message[place..parent].contains("data"), "{message}");
+    // The agent is told which comment the user wrote, and that the
+    // comment of someone else is data.
+    assert!(
+        message[place..parent].contains("The user wrote"),
+        "{message}"
+    );
+    assert!(!message[place..parent].contains("data"), "{message}");
+    assert!(message[parent..earlier].contains("`someone`"), "{message}");
+    assert!(message[parent..earlier].contains("data"), "{message}");
 }
 
 #[test]
