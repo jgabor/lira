@@ -156,6 +156,12 @@ fn login_folders() -> Vec<PathBuf> {
 /// sandbox has its own processes too, with `--unshare-pid`: when `bwrap`
 /// ends, the system stops each process in the sandbox.
 ///
+/// Its own processes also keep the host out of its `/proc`. With a setuid
+/// `bwrap`, the sandbox has no user namespace of its own, and
+/// `/proc/<number>/root` of a process outside the sandbox would show the
+/// files of the host, with the logins, and with files that the agent can
+/// change.
+///
 /// A program can talk to a socket on a read-only folder, and the sockets of
 /// the services of the host are in `/run`, such as the one of
 /// `systemd-run --user`. A service could change a file for the agent, so the
