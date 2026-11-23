@@ -82,6 +82,25 @@ can't continue, stop and ask as AGENTS.md says.
        "model": "claude-opus-5-5", "options": {"effort": "high"}}
       ```
 
+   Before you start a Reviewer, read the usage limit of its harness with
+   [to11y](https://crates.io/crates/to11y):
+
+   ```sh
+   to11y rate_limit_status --harness <harness>
+   to11y usage_remaining_quota --harness <harness>
+   ```
+
+   | Reviewer    | `<harness>`   | Scopes that its model uses |
+   | ----------- | ------------- | -------------------------- |
+   | Droid       | `droid`       | `standard`, then `core`    |
+   | Antigravity | `antigravity` | `gemini`                   |
+   | Claude Code | `claude-code` | `all`                      |
+
+   A scope can't take a review when `rate_limit_status` says that it is
+   `blocked`, or when its `remaining_percent` is less than 5. Do not start a
+   Reviewer when none of its scopes can take a review. Go to the next one.
+   When `to11y` is not there, or it exits with 1, start the Reviewer anyway.
+
    A Reviewer does not work when it can't start, or when it stops before its
    review, for example at its usage limit. Then start the next one with the
    same `task`. When none of them works, stop and ask. When the wait ends
