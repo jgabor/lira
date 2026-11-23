@@ -246,7 +246,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
 - After a `lira continue` that passed, the next one gets only the answer that you wrote after it.
 - After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
-- After a `lira continue` that fails, the next one gets the same question and the same answer again.
+- After a `lira continue` that fails with no question, the next one gets the same question and the same answer again.
+- When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.
 - When the pull request is ready for review, it becomes a draft again.
 - The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
 - A commit that is on the remote and not in the worktree is taken first.

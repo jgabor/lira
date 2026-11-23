@@ -154,6 +154,10 @@ if [ "$1 $2" = "pr edit" ]; then
 fi
 if [ "$1 $2" = "pr comment" ]; then
   [ -n "$ORDER" ] && echo comment >> "$ORDER"
+  if [ -e "$here/no-comment" ]; then
+    echo "the stand-in for gh writes no comment" >&2
+    exit 1
+  fi
   cp "$description" "$here/commented"
   # Each comment has a number, and GitHub lists it with the login that
   # wrote it, as `gh api --jq` prints it for Lira.
@@ -4784,7 +4788,7 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     assert_eq!(repository.calls("pr comment").len(), 4);
 }
 
-// spec(lira continue): After a `lira continue` that fails, the next one gets the same question and the same answer again.
+// spec(lira continue): After a `lira continue` that fails with no question, the next one gets the same question and the same answer again.
 #[test]
 fn after_a_continue_that_fails_the_next_gets_the_question_and_the_answer_again() {
     let repository = Repository::stopped("continue-again");
@@ -4804,6 +4808,23 @@ fn after_a_continue_that_fails_the_next_gets_the_question_and_the_answer_again()
     let message = repository.message();
     assert!(message.contains("3 rounds of review"), "{message}");
     assert!(message.contains(ANSWER), "{message}");
+}
+
+// spec(lira continue): When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.
+#[test]
+fn a_continue_that_passes_and_can_not_write_its_comment_still_passes() {
+    let repository = Repository::stopped("continue-no-comment");
+    repository.comment("you", ANSWER);
+    fs::write(repository.shared.join("bin").join("no-comment"), "").unwrap();
+    let output = repository.continue_work();
+    passed(&output);
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("could not write"), "{said}");
+    assert!(said.contains("writes no comment"), "{said}");
+    assert_eq!(
+        repository.calls("pr ready"),
+        [format!("pr ready {ADDRESS}")]
+    );
 }
 
 #[test]
