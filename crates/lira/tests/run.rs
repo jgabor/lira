@@ -311,12 +311,13 @@ fn program(path: &Path, script: &str) {
     assert!(writer.wait().unwrap().success());
 }
 
-/// Makes a socket for a stand-in of the ssh agent at `socket`.
+/// Makes a socket at `socket`, for a stand-in of the ssh agent or of the
+/// session bus of D-Bus.
 ///
 /// A path for a socket must be shorter than 108 bytes, and the folder of a
 /// test can be longer than that. So the socket is made through a link with
 /// a short path in `/tmp`, to the folder of the socket.
-fn ssh_agent(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
+fn listen(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
     let link = Path::new("/tmp").join(format!("lira-{}-{test}", std::process::id()));
     let _ = fs::remove_file(&link);
     std::os::unix::fs::symlink(socket.parent().unwrap(), &link).unwrap();
@@ -1522,7 +1523,7 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
         fs::write(folder.join("login"), "secret\n").unwrap();
     }
     let socket = home.join("s");
-    let _agent = ssh_agent("logins", &socket);
+    let _agent = listen("logins", &socket);
     let output = repository
         .lira()
         .env("GH_CONFIG_DIR", &folders[0])
@@ -1576,6 +1577,189 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
     }
 }
 
+/// A shell function that prints each other login for GitHub that a program
+/// in the sandbox sees: the ones of the credential helpers of git, of
+/// `~/.netrc`, of the home folder that the system names for the user, which
+/// is `$system`, and of the keyring. `$HOME/bus` is the socket of the
+/// session bus of D-Bus that its variable names, and `$XDG_RUNTIME_DIR/bus`
+/// is the one where a program looks when the variable is not set.
+const OTHER_LOGINS: &str = r#"other_logins() {
+  for file in "$HOME/.git-credentials" "$XDG_CONFIG_HOME/git/credentials" "$HOME/.config/git/credentials" "$HOME/.netrc"; do
+    echo "$file: $(cat "$file" 2>&1)"
+  done
+  for folder in "$HOME/.git-credential-cache" "$XDG_CACHE_HOME/git/credential" "$HOME/.cache/git/credential" "$system/.ssh" "$system/.config/gh"; do
+    echo "$folder: $(ls -A "$folder" 2>&1)"
+  done
+  [ -S "$HOME/bus" ] && echo "the session bus is there"
+  [ -S "$XDG_RUNTIME_DIR/bus" ] && echo "the session bus in XDG_RUNTIME_DIR is there"
+  env | grep '^DBUS_SESSION_BUS_ADDRESS=' || true
+}
+"#;
+
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
+    let repository = Repository::new("other-logins", CHECK, "");
+    let system = repository.top.join("system");
+    let logins = format!("system='{}'\n{OTHER_LOGINS}", system.display());
+    // The agent writes to a file of logins too.
+    let work = format!(
+        "{logins}echo changed > \"$HOME/.netrc\"\nother_logins > \"$here/agent-logins\"\n{WORK}"
+    );
+    program(&repository.harness.join("agent"), &format!("{START}{work}"));
+    repository.reviewer(&format!(
+        "{logins}other_logins > \"$here/reviewer-logins\"\nreply 'Review: pass'\n"
+    ));
+    // The host keeps a login in each of these places.
+    let home = repository.top.join("home");
+    let xdg_config = repository.top.join("xdg-config");
+    let xdg_cache = repository.top.join("xdg-cache");
+    let files = [
+        home.join(".git-credentials"),
+        xdg_config.join("git").join("credentials"),
+        home.join(".config").join("git").join("credentials"),
+        home.join(".netrc"),
+    ];
+    let folders = [
+        home.join(".git-credential-cache"),
+        xdg_cache.join("git").join("credential"),
+        home.join(".cache").join("git").join("credential"),
+        system.join(".ssh"),
+        system.join(".config").join("gh"),
+    ];
+    for file in &files {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "secret\n").unwrap();
+    }
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    // The session bus of D-Bus is at a path that is not in `/run`. An
+    // address of D-Bus can escape each byte of the path.
+    let bus = home.join("bus");
+    let _bus = listen("other-logins", &bus);
+    let user_folder = repository.top.join("xdg-user");
+    fs::create_dir_all(&user_folder).unwrap();
+    let _user_bus = listen("other-logins-user", &user_folder.join("bus"));
+    let address = format!(
+        "unix:path={}%2fbus,guid=0123456789abcdef0123456789abcdef",
+        home.display()
+    );
+    // The system names `system` as the home folder of the user, and
+    // `HOME` names another folder.
+    let lira = repository.lira();
+    let mut command = with_home(&lira, &system, &repository.top.join("passwd"));
+    let output = command
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env("DBUS_SESSION_BUS_ADDRESS", &address)
+        .env("XDG_RUNTIME_DIR", &user_folder)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    // Each file is empty or not there, each folder is empty, and the bus is
+    // out of reach.
+    let empty: String = files
+        .iter()
+        .chain(&folders)
+        .map(|path| format!("{}: \n", path.display()))
+        .collect();
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("agent-logins")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("reviewer-logins")).unwrap(),
+        empty
+    );
+    // The logins of the host are as they were.
+    for file in files
+        .iter()
+        .cloned()
+        .chain(folders.map(|f| f.join("login")))
+    {
+        assert_eq!(fs::read_to_string(&file).unwrap(), "secret\n");
+    }
+}
+
+#[test]
+fn with_no_home_an_agent_and_a_reviewer_have_no_login_in_the_home_folder_of_the_system() {
+    let repository = Repository::new("system-home", CHECK, "");
+    let system = repository.top.join("system");
+    let folders = [system.join(".ssh"), system.join(".config").join("gh")];
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    let list = |seen: &str| -> String {
+        folders
+            .iter()
+            .map(|folder| format!("ls -A '{}' >> \"$here/{seen}\" 2>&1\n", folder.display()))
+            .collect()
+    };
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{}{WORK}", list("seen")),
+    );
+    repository.reviewer(&format!("{}reply 'Review: pass'\n", list("reviewer-seen")));
+    // `HOME` is not set, so the harness finds its data folder in
+    // `CLAUDE_CONFIG_DIR`.
+    let lira = repository.lira();
+    let output = with_home(&lira, &system, &repository.top.join("passwd"))
+        .env_remove("HOME")
+        .env("CLAUDE_CONFIG_DIR", &repository.data)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    // Each folder is there, and empty.
+    assert_eq!(repository.kept("seen"), "");
+    assert_eq!(repository.kept("reviewer-seen"), "");
+}
+
+/// `lira` on a host where the system names `home` as the home folder of the
+/// user. `bwrap` gives it a file `/etc/passwd` that says so, which it writes
+/// at `passwd`. The folder of `nscd`, when the host has one, is empty
+/// there, so that the system reads that file, and does not ask `nscd`.
+fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
+    use std::os::unix::fs::MetadataExt;
+    let me = fs::metadata("/proc/self").unwrap();
+    fs::write(
+        passwd,
+        format!(
+            "lira:x:{}:{}::{}:/bin/sh\n",
+            me.uid(),
+            me.gid(),
+            home.display()
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new("bwrap");
+    command
+        .args(["--dev-bind", "/", "/", "--ro-bind"])
+        .arg(passwd)
+        .arg("/etc/passwd");
+    if Path::new("/run/nscd").is_dir() {
+        command.args(["--tmpfs", "/run/nscd"]);
+    }
+    command
+        .arg("--")
+        .arg(lira.get_program())
+        .args(lira.get_args());
+    if let Some(folder) = lira.get_current_dir() {
+        command.current_dir(folder);
+    }
+    for (name, value) in lira.get_envs() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
 #[test]
 fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     // The socket of the ssh agent is in `~/.ssh`, and the folder of `gh` is
@@ -1587,7 +1771,7 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     let ssh = repository.top.join("home").join(".ssh");
     fs::create_dir_all(&ssh).unwrap();
     let socket = ssh.join("s");
-    let _agent = ssh_agent("hidden-logins", &socket);
+    let _agent = listen("hidden-logins", &socket);
     let gh = Path::new("/tmp").join(format!("lira-test-{}", std::process::id()));
     fs::create_dir_all(gh.join("gh")).unwrap();
     fs::write(gh.join("gh").join("login"), "secret\n").unwrap();

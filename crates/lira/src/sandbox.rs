@@ -7,8 +7,9 @@
 //! with the program `bwrap` (bubblewrap), so it runs on Linux only.
 
 use crate::process;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,51 +86,79 @@ const TOKENS: [&str; 4] = [
 /// The variable that names the socket of the ssh agent.
 const SSH_AGENT: &str = "SSH_AUTH_SOCK";
 
+/// The variable that names the session bus of D-Bus. The keyring of the
+/// system answers there, and `gh` keeps its token in the keyring on some
+/// hosts.
+const SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
+
 /// Hides the logins for GitHub that the host keeps in the known places.
 /// Lira keeps them, because Lira pushes the branch and opens the pull
-/// request. A folder of logins is empty in the sandbox, the socket of the
-/// ssh agent is not a socket there, and the variables with a token are not
-/// set. This comes after the other paths, so that it wins over them.
+/// request. A folder of logins is empty in the sandbox. A file of logins is
+/// empty there, and a socket that leads to a login is not a socket there.
+/// The variables with a token or a socket are not set. This comes after the
+/// other paths, so that it wins over them.
+///
+/// `/dev/null` of the host takes the place of each file and socket. It is
+/// bound with `--dev-bind`, because a program can't open a device on a mount
+/// of `--ro-bind`. So a program reads nothing from it, and what it writes
+/// there goes nowhere, and not to the file of the host.
 ///
 /// A login in a folder that the sandbox has of its own is hidden already:
 /// in `/dev`, `/proc`, `/tmp`, `/run`, or a folder of logins. `bwrap` would
 /// make the folders of its path there, or hide a file of the sandbox, such
 /// as `/dev/null`. So it is left out.
 fn hide_logins(command: &mut Command) {
-    let mut empty: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
+    let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
         .iter()
         .map(PathBuf::from)
         .collect();
     let is_hidden =
-        |path: &Path, empty: &[PathBuf]| empty.iter().any(|folder| path.starts_with(folder));
+        |path: &Path, hidden: &[PathBuf]| hidden.iter().any(|folder| path.starts_with(folder));
     for folder in login_folders() {
         if let Ok(folder) = folder.canonicalize()
             && folder.is_dir()
-            && !is_hidden(&folder, &empty)
+            && !is_hidden(&folder, &hidden)
         {
             command.arg("--tmpfs").arg(&folder);
-            empty.push(folder);
+            hidden.push(folder);
         }
     }
-    let socket = std::env::var_os(SSH_AGENT).map(PathBuf::from);
-    if let Some(socket) = socket.and_then(|socket| socket.canonicalize().ok())
-        && !socket.is_dir()
-        && !is_hidden(&socket, &empty)
-    {
-        command.arg("--ro-bind").arg("/dev/null").arg(socket);
+    for file in login_files() {
+        if let Ok(file) = file.canonicalize()
+            && !file.is_dir()
+            && !is_hidden(&file, &hidden)
+        {
+            command.arg("--dev-bind").arg("/dev/null").arg(&file);
+            hidden.push(file);
+        }
     }
-    for name in TOKENS.iter().chain([&SSH_AGENT]) {
+    for name in TOKENS.iter().chain([&SSH_AGENT, &SESSION_BUS]) {
         command.env_remove(name);
     }
 }
 
-/// The folders where `gh` and ssh keep logins for GitHub. `gh` keeps its
-/// login in `GH_CONFIG_DIR`, or in `gh` in `XDG_CONFIG_HOME`, or in
+/// The value of a variable, when it is set and not empty.
+fn set(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+/// The home folders of the user: the one that `HOME` names, and the one
+/// that the system names. They can differ, and ssh reads its keys from the
+/// one that the system names.
+fn homes() -> Vec<PathBuf> {
+    let mut homes: Vec<PathBuf> = set("HOME").map(PathBuf::from).into_iter().collect();
+    homes.extend(system_home().filter(|home| !homes.contains(home)));
+    homes
+}
+
+/// The folders where `gh`, ssh and git keep logins for GitHub. `gh` keeps
+/// its login in `GH_CONFIG_DIR`, or in `gh` in `XDG_CONFIG_HOME`, or in
 /// `~/.config/gh`. Each of them is here, so that the agent finds no login
 /// when it sets the variables in another way. `git push` gets its password
-/// from `gh` too. ssh keeps its keys in `~/.ssh`.
+/// from `gh` too. ssh keeps its keys in `~/.ssh`. `git credential-cache`
+/// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
+/// in `XDG_CACHE_HOME` or `~/.cache`.
 fn login_folders() -> Vec<PathBuf> {
-    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
     let mut folders = Vec::new();
     if let Some(folder) = set("GH_CONFIG_DIR") {
         folders.push(PathBuf::from(folder));
@@ -137,12 +166,157 @@ fn login_folders() -> Vec<PathBuf> {
     if let Some(folder) = set("XDG_CONFIG_HOME") {
         folders.push(Path::new(&folder).join("gh"));
     }
-    if let Some(home) = set("HOME") {
-        let home = Path::new(&home);
+    if let Some(folder) = set("XDG_CACHE_HOME") {
+        folders.push(Path::new(&folder).join("git").join("credential"));
+    }
+    for home in homes() {
         folders.push(home.join(".config").join("gh"));
         folders.push(home.join(".ssh"));
+        folders.push(home.join(".git-credential-cache"));
+        folders.push(home.join(".cache").join("git").join("credential"));
     }
     folders
+}
+
+/// The files and sockets that hold or lead to a login for GitHub. `git
+/// credential-store` keeps its logins in `~/.git-credentials`, or in
+/// `git/credentials` in `XDG_CONFIG_HOME` or `~/.config`. git also reads
+/// `~/.netrc`. The ssh agent answers at the socket that `SSH_AUTH_SOCK`
+/// names, and the keyring at the socket of the session bus.
+fn login_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(folder) = set("XDG_CONFIG_HOME") {
+        files.push(Path::new(&folder).join("git").join("credentials"));
+    }
+    for home in homes() {
+        files.push(home.join(".git-credentials"));
+        files.push(home.join(".config").join("git").join("credentials"));
+        files.push(home.join(".netrc"));
+    }
+    files.extend(set(SSH_AGENT).map(PathBuf::from));
+    files.extend(session_buses());
+    files
+}
+
+/// The sockets of the session bus of D-Bus: each `unix:path=` of
+/// `DBUS_SESSION_BUS_ADDRESS`, and `bus` in `XDG_RUNTIME_DIR`, where a
+/// program looks when the variable is not set. A bus on an abstract socket
+/// or on the network has no path, so it is not here.
+fn session_buses() -> Vec<PathBuf> {
+    let mut buses = Vec::new();
+    if let Some(addresses) = set(SESSION_BUS) {
+        buses.extend(socket_paths(addresses.as_bytes()));
+    }
+    if let Some(folder) = set("XDG_RUNTIME_DIR") {
+        buses.push(Path::new(&folder).join("bus"));
+    }
+    buses
+}
+
+/// The paths of the sockets in a list of D-Bus addresses, such as
+/// `unix:path=/run/user/1000/bus,guid=…`. The addresses are separated by
+/// `;`, and a value can escape a byte as `%` and two hexadecimal digits.
+fn socket_paths(addresses: &[u8]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for address in addresses.split(|&byte| byte == b';') {
+        let Some(keys) = address.strip_prefix(b"unix:") else {
+            continue;
+        };
+        for pair in keys.split(|&byte| byte == b',') {
+            if let Some(value) = pair.strip_prefix(b"path=")
+                && let Some(path) = unescape(value)
+            {
+                paths.push(PathBuf::from(OsString::from_vec(path)));
+            }
+        }
+    }
+    paths
+}
+
+/// A value of a D-Bus address with each `%` and two hexadecimal digits as
+/// the byte that they escape. It is `None` when a `%` escapes no byte.
+fn unescape(value: &[u8]) -> Option<Vec<u8>> {
+    let digit = |byte: u8| (byte as char).to_digit(16);
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.iter();
+    while let Some(&byte) = rest.next() {
+        if byte == b'%' {
+            let high = digit(*rest.next()?)?;
+            let low = digit(*rest.next()?)?;
+            bytes.push((high * 16 + low) as u8);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    Some(bytes)
+}
+
+/// The home folder that the system names for the user, with
+/// `getpwuid_r`, as ssh finds it.
+fn system_home() -> Option<PathBuf> {
+    use std::ffi::{CStr, c_char, c_int};
+    use std::mem::MaybeUninit;
+    use std::ptr;
+
+    /// `struct passwd` of Linux.
+    #[repr(C)]
+    struct Passwd {
+        name: *mut c_char,
+        password: *mut c_char,
+        uid: u32,
+        gid: u32,
+        gecos: *mut c_char,
+        dir: *mut c_char,
+        shell: *mut c_char,
+    }
+    unsafe extern "C" {
+        fn getuid() -> u32;
+        fn getpwuid_r(
+            uid: u32,
+            entry: *mut Passwd,
+            buffer: *mut c_char,
+            size: usize,
+            result: *mut *mut Passwd,
+        ) -> c_int;
+    }
+    /// The error of `getpwuid_r` when the buffer is too small.
+    const ERANGE: c_int = 34;
+
+    let mut entry = MaybeUninit::<Passwd>::uninit();
+    let mut buffer: Vec<c_char> = vec![0; 4096];
+    let mut result: *mut Passwd = ptr::null_mut();
+    loop {
+        // SAFETY: each pointer is valid for the call, and `size` is the
+        // length of `buffer`.
+        let error = unsafe {
+            getpwuid_r(
+                getuid(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if error == ERANGE && buffer.len() < 1 << 20 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if error != 0 || result.is_null() {
+            return None;
+        }
+        break;
+    }
+    // SAFETY: `getpwuid_r` found the entry, so `result` points at `entry`,
+    // and its strings are in `buffer`, which lives until the end of this
+    // function.
+    let dir = unsafe { (*result).dir };
+    if dir.is_null() {
+        return None;
+    }
+    // SAFETY: `dir` is a string that ends with a zero byte, in `buffer`.
+    let dir = unsafe { CStr::from_ptr(dir) };
+    let dir = OsStr::from_bytes(dir.to_bytes());
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
 }
 
 /// `bwrap` with what each sandbox has: all files of the host, read-only;
@@ -215,4 +389,28 @@ pub fn require() -> Result<(), String> {
         ended.status,
         String::from_utf8_lossy(&ended.output).trim_end()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_path_of_each_unix_socket_in_a_list_of_addresses() {
+        let addresses = b"unix:abstract=/tmp/a,guid=1;tcp:host=h,port=1;\
+            unix:path=/home/u/bus,guid=1;unix:guid=2,path=/s%2c%ffx";
+        assert_eq!(
+            socket_paths(addresses),
+            [
+                PathBuf::from("/home/u/bus"),
+                PathBuf::from(OsString::from_vec(b"/s,\xffx".to_vec())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_with_a_bad_escape_is_no_path() {
+        assert_eq!(socket_paths(b"unix:path=/s%2"), Vec::<PathBuf>::new());
+        assert_eq!(socket_paths(b"unix:path=/s%zz"), Vec::<PathBuf>::new());
+    }
 }
