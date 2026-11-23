@@ -1685,7 +1685,7 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
 }
 
 #[test]
-fn with_no_home_an_agent_has_no_login_in_the_home_folder_of_the_system() {
+fn with_no_home_an_agent_and_a_reviewer_have_no_login_in_the_home_folder_of_the_system() {
     let repository = Repository::new("system-home", CHECK, "");
     let system = repository.top.join("system");
     let folders = [system.join(".ssh"), system.join(".config").join("gh")];
@@ -1693,14 +1693,17 @@ fn with_no_home_an_agent_has_no_login_in_the_home_folder_of_the_system() {
         fs::create_dir_all(folder).unwrap();
         fs::write(folder.join("login"), "secret\n").unwrap();
     }
-    let work: String = folders
-        .iter()
-        .map(|folder| format!("ls -A '{}' >> \"$here/seen\"\n", folder.display()))
-        .collect();
+    let list = |seen: &str| -> String {
+        folders
+            .iter()
+            .map(|folder| format!("ls -A '{}' >> \"$here/{seen}\" 2>&1\n", folder.display()))
+            .collect()
+    };
     program(
         &repository.harness.join("agent"),
-        &format!("{START}{work}{WORK}"),
+        &format!("{START}{}{WORK}", list("seen")),
     );
+    repository.reviewer(&format!("{}reply 'Review: pass'\n", list("reviewer-seen")));
     // `HOME` is not set, so the harness finds its data folder in
     // `CLAUDE_CONFIG_DIR`.
     let lira = repository.lira();
@@ -1711,12 +1714,15 @@ fn with_no_home_an_agent_has_no_login_in_the_home_folder_of_the_system() {
         .output()
         .unwrap();
     passed(&output);
+    // Each folder is there, and empty.
     assert_eq!(repository.kept("seen"), "");
+    assert_eq!(repository.kept("reviewer-seen"), "");
 }
 
 /// `lira` on a host where the system names `home` as the home folder of the
 /// user. `bwrap` gives it a file `/etc/passwd` that says so, which it writes
-/// at `passwd`.
+/// at `passwd`. The folder of `nscd`, when the host has one, is empty
+/// there, so that the system reads that file, and does not ask `nscd`.
 fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
     use std::os::unix::fs::MetadataExt;
     let me = fs::metadata("/proc/self").unwrap();
@@ -1734,7 +1740,12 @@ fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
     command
         .args(["--dev-bind", "/", "/", "--ro-bind"])
         .arg(passwd)
-        .args(["/etc/passwd", "--"])
+        .arg("/etc/passwd");
+    if Path::new("/run/nscd").is_dir() {
+        command.args(["--tmpfs", "/run/nscd"]);
+    }
+    command
+        .arg("--")
         .arg(lira.get_program())
         .args(lira.get_args());
     if let Some(folder) = lira.get_current_dir() {
