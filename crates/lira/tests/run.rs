@@ -6122,3 +6122,52 @@ fn a_lira_continue_after_a_killed_lira_starts_a_new_agent() {
         &format!("pr ready {ADDRESS}")
     );
 }
+
+// spec(Steps): An agent can't see the locks that Lira takes on the work of agents.
+#[test]
+fn an_agent_can_not_lock_the_work_on_another_pull_request() {
+    let repository = Repository::stopped("lock-of-another");
+    let lock = repository
+        .top
+        .join("xdg")
+        .join("lira")
+        .join("locks")
+        .join("owner")
+        .join("name")
+        .join(format!("{}.lock", repository.pull_request_branch()));
+    assert!(lock.is_file(), "{}", lock.display());
+    // The agent of a new run tries to lock the work on the pull request,
+    // and holds the lock while it works. The next start is the agent of
+    // `lira continue`.
+    let attempt = format!(
+        r#"if [ ! -e "$here/tried" ]; then
+  echo tried > "$here/tried"
+  export here
+  if flock --nonblock '{lock}' sh -c 'echo locked > "$here/locked"; {HOLD}'; then :; else
+    echo failed > "$here/lock-failed"
+    {HOLD}
+  fi
+  reply 'I did nothing.'
+  exit 0
+fi
+{CONTINUE}"#,
+        lock = lock.display(),
+    );
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{attempt}"),
+    );
+    let mut run = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    wait_for("the work of the agent", || {
+        repository.harness.join("working").exists()
+    });
+    let starts = repository.starts();
+
+    let continued = repository.continue_work();
+    fs::write(repository.harness.join("go"), "").unwrap();
+    let _ = run.wait();
+    passed(&continued);
+    assert!(repository.starts() > starts);
+    assert!(!repository.harness.join("locked").exists());
+    assert!(repository.harness.join("lock-failed").exists());
+}

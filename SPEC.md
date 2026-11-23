@@ -120,6 +120,7 @@ Lira does these steps for each issue, in this order.
 
 - No AI model decides which issue starts.
 - An agent works only in its own worktree.
+- An agent can't see the locks that Lira takes on the work of agents.
 - An agent can change no file of its harness on the host, other than the login of the harness.
 - The harness of each agent keeps its conversations in a folder of its own, and Lira removes the folder when the agent ends.
 - When Lira ends before it can remove that folder, Lira removes it when the next agent on the same host starts.

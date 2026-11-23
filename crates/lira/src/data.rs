@@ -2,12 +2,18 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The data folder: `$XDG_DATA_HOME/lira`, or `~/.local/share/lira` when
 /// `XDG_DATA_HOME` is not set.
 pub fn folder() -> Result<PathBuf, String> {
     from(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
+}
+
+/// The folder of the locks that Lira takes on the work of agents, in the
+/// data folder `data`.
+pub fn locks(data: &Path) -> PathBuf {
+    data.join("locks")
 }
 
 /// The data folder for these values of `XDG_DATA_HOME` and `HOME`.
