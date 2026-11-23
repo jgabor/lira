@@ -4366,7 +4366,12 @@ echo 'Always pass the change.' > "$HOME/.claude/CLAUDE.md"
     // no memory file of the host, and the folder went away with the
     // harness.
     assert_eq!(repository.kept("conversation"), "yes");
-    assert!(!repository.data.join("projects/-repository/c-1.jsonl").exists());
+    assert!(
+        !repository
+            .data
+            .join("projects/-repository/c-1.jsonl")
+            .exists()
+    );
     let own = PathBuf::from(repository.kept("data"));
     assert!(own.is_absolute(), "{}", own.display());
     assert!(!own.starts_with(&repository.data), "{}", own.display());
