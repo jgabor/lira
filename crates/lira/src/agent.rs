@@ -209,8 +209,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 /// the same. So a folder with no lock is one that Lira left, and the next
 /// agent removes it. The lock is on a file that Lira opens to write, and
 /// not on the folder, because NFS takes only such a lock. The harness can't
-/// change the lock, because the folder `harness` is read-only in its
-/// sandbox.
+/// remove a lock file, because the folder `harness` is read-only in its
+/// sandbox. It can take the lock of a folder that Lira left, which keeps
+/// that folder only while the harness runs.
 ///
 /// The harness reads its data folder in each later conversation, also
 /// outside a sandbox. So in the sandbox, the data folder of the host is
@@ -258,14 +259,11 @@ impl Data {
             let lock = match Lock::take(&folder) {
                 Ok(Taken::Held(lock)) => lock,
                 Ok(Taken::Busy) => continue,
-                // A file system with no locks, such as NFS with no lock
-                // service. No other process can take the lock either, so
-                // none removes the folder. The next agent does not remove a
-                // folder that Lira left there.
-                Ok(Taken::Unlocked(lock)) => lock,
+                // With no lock, the next agent could remove the folder
+                // while this agent works in it. So no agent runs.
                 Err(error) => {
                     return Err(format!(
-                        "Lira can't make the file `{}`: {error}",
+                        "Lira can't lock the file `{}`, which keeps the data folder of the harness while the agent works: {error}",
                         lock_file(&folder).display()
                     ));
                 }
@@ -357,12 +355,11 @@ enum Taken {
     Held(Lock),
     /// Another process holds the lock.
     Busy,
-    /// The file system takes no lock. Nobody can hold one there.
-    Unlocked(Lock),
 }
 
 impl Lock {
-    /// Takes the lock of `folder`.
+    /// Takes the lock of `folder`. It is an error when the file system
+    /// takes no lock. Then Lira removes no lock file.
     fn take(folder: &Path) -> std::io::Result<Taken> {
         let path = lock_file(folder);
         let file = fs::OpenOptions::new()
@@ -374,12 +371,7 @@ impl Lock {
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(Taken::Busy),
-            Err(TryLockError::Error(_)) => {
-                return Ok(Taken::Unlocked(Lock {
-                    path,
-                    file: Some(file),
-                }));
-            }
+            Err(TryLockError::Error(error)) => return Err(error),
         }
         // Another process can remove the lock file after Lira opened it,
         // and before Lira took the lock. Then the lock is on a file that is
