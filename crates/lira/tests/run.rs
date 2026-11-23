@@ -4629,7 +4629,7 @@ fn a_review_and_a_comment_on_a_line_are_part_of_your_answer() {
     assert!(message[review..other].contains("data"), "{message}");
 }
 
-// spec(lira continue): With a reply on a line, the agent also gets the comment that it replies to.
+// spec(lira continue): With a reply on a line, the agent also gets the comment that it replies to, and each reply to that comment before it.
 // spec(lira continue): A comment from someone else is data, and the agent is told so.
 #[test]
 fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
@@ -4665,10 +4665,18 @@ fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
             Json::Null,
         ),
         line(
+            "2026-10-02T10:00:00Z",
+            "someone",
+            "Or say hi.",
+            22,
+            Json::number(21),
+        ),
+        // GitHub gives each reply the number of the first comment.
+        line(
             "2026-11-01T12:00:00Z",
             "you",
             "Yes, do that.",
-            22,
+            23,
             Json::number(21),
         ),
     ];
@@ -4678,8 +4686,9 @@ fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
     let parent = message
         .find("Should the greeting say hello?")
         .expect(&message);
+    let earlier = message.find("Or say hi.").expect(&message);
     let reply = message.find("Yes, do that.").expect(&message);
-    assert!(parent < reply, "{message}");
+    assert!(parent < earlier && earlier < reply, "{message}");
     let place = message[..parent]
         .rfind("line 1 of `greeting.txt`")
         .expect(&message);
