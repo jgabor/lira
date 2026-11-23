@@ -311,12 +311,13 @@ fn program(path: &Path, script: &str) {
     assert!(writer.wait().unwrap().success());
 }
 
-/// Makes a socket for a stand-in of the ssh agent at `socket`.
+/// Makes a socket at `socket`, for a stand-in of the ssh agent or of the
+/// session bus of D-Bus.
 ///
 /// A path for a socket must be shorter than 108 bytes, and the folder of a
 /// test can be longer than that. So the socket is made through a link with
 /// a short path in `/tmp`, to the folder of the socket.
-fn ssh_agent(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
+fn listen(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
     let link = Path::new("/tmp").join(format!("lira-{}-{test}", std::process::id()));
     let _ = fs::remove_file(&link);
     std::os::unix::fs::symlink(socket.parent().unwrap(), &link).unwrap();
@@ -1522,7 +1523,7 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
         fs::write(folder.join("login"), "secret\n").unwrap();
     }
     let socket = home.join("s");
-    let _agent = ssh_agent("logins", &socket);
+    let _agent = listen("logins", &socket);
     let output = repository
         .lira()
         .env("GH_CONFIG_DIR", &folders[0])
@@ -1590,7 +1591,7 @@ const OTHER_LOGINS: &str = r#"other_logins() {
     echo "$folder: $(ls -A "$folder" 2>&1)"
   done
   [ -S "$HOME/bus" ] && echo "the session bus is there"
-  [ -S "$XDG_RUNTIME_DIR/bus" ] && echo "the session bus of the runtime folder is there"
+  [ -S "$XDG_RUNTIME_DIR/bus" ] && echo "the session bus in XDG_RUNTIME_DIR is there"
   env | grep '^DBUS_SESSION_BUS_ADDRESS=' || true
 }
 "#;
@@ -1637,10 +1638,10 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     // The session bus of D-Bus is at a path that is not in `/run`. An
     // address of D-Bus can escape each byte of the path.
     let bus = home.join("bus");
-    let _bus = ssh_agent("other-logins", &bus);
-    let runtime = repository.top.join("runtime");
-    fs::create_dir_all(&runtime).unwrap();
-    let _runtime_bus = ssh_agent("other-logins-runtime", &runtime.join("bus"));
+    let _bus = listen("other-logins", &bus);
+    let user_folder = repository.top.join("xdg-user");
+    fs::create_dir_all(&user_folder).unwrap();
+    let _user_bus = listen("other-logins-user", &user_folder.join("bus"));
     let address = format!(
         "unix:path={}%2fbus,guid=0123456789abcdef0123456789abcdef",
         home.display()
@@ -1653,7 +1654,7 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_CACHE_HOME", &xdg_cache)
         .env("DBUS_SESSION_BUS_ADDRESS", &address)
-        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_RUNTIME_DIR", &user_folder)
         .args(["run", REQUEST])
         .output()
         .unwrap();
@@ -1759,7 +1760,7 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     let ssh = repository.top.join("home").join(".ssh");
     fs::create_dir_all(&ssh).unwrap();
     let socket = ssh.join("s");
-    let _agent = ssh_agent("hidden-logins", &socket);
+    let _agent = listen("hidden-logins", &socket);
     let gh = Path::new("/tmp").join(format!("lira-test-{}", std::process::id()));
     fs::create_dir_all(gh.join("gh")).unwrap();
     fs::write(gh.join("gh").join("login"), "secret\n").unwrap();
