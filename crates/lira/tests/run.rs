@@ -5037,8 +5037,9 @@ fn a_pull_request_that_is_ready_becomes_a_draft_again() {
     );
 }
 
-// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one when it is not.
 // spec(lira continue): A commit that is on the remote and not in the worktree is taken first.
+// spec(lira continue): A new worktree starts from the branch in the repository in the current folder when it has the branch, and from the branch of the remote when it does not.
 #[test]
 fn the_agent_works_in_the_old_worktree_or_in_a_new_one_with_the_commits_of_the_remote() {
     // The `setup` command keeps the subject of the newest commit.
@@ -5158,10 +5159,14 @@ reply 'I repaired it.'
     );
 }
 
+// spec(lira continue): When `lira continue` fails before its agent starts, the pull request and its labels stay as they are.
+// spec(lira continue): When the harness of the new agent does not start, the worktree stays.
 #[test]
 fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
     let repository = Repository::stopped("continue-no-harness");
     repository.view(false, &["needs:answer"]);
+    let old = PathBuf::from(repository.kept("folder"));
+    let before = repository.as_it_is(&old);
     let nothing = repository.top.join("nothing-here");
     let output = repository
         .lira()
@@ -5171,11 +5176,29 @@ fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
         .unwrap();
     let error = failed(&output);
     assert!(error.contains("nothing-here"), "{error}");
+    assert!(error.contains("stays"), "{error}");
     assert_eq!(
         repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
         Vec::<String>::new()
     );
     assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
+    assert!(old.is_dir(), "the worktree {} is gone", old.display());
+    assert_eq!(repository.as_it_is(&old), before);
+
+    // A new worktree stays too.
+    let place = old.to_str().unwrap();
+    git_ok(&repository.root, &["worktree", "remove", "--force", place]);
+    let output = repository
+        .lira()
+        .env("LIRA_HARNESS", &nothing)
+        .args(["continue", "7"])
+        .output()
+        .unwrap();
+    let error = failed(&output);
+    assert!(error.contains("stays"), "{error}");
+    assert!(old.is_dir(), "the new worktree {} is gone", old.display());
+    let branch = repository.pull_request_branch();
+    assert_eq!(git_ok(&old, &["branch", "--show-current"]), branch);
 }
 
 // spec(lira continue): When the old worktree is on another branch, or on no branch, Lira puts it back on the branch of the pull request.
@@ -5208,7 +5231,7 @@ fn an_old_worktree_on_another_branch_or_on_no_branch_goes_back_to_the_branch() {
     }
 }
 
-// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one when it is not.
 #[test]
 fn an_old_worktree_whose_branch_has_a_new_name_is_found_on_no_branch() {
     // The agent gave its branch a new name, so the folder of the worktree
@@ -5609,7 +5632,7 @@ fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
     assert!(listed.contains(old.to_str().unwrap()), "{listed}");
 }
 
-// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+// spec(lira continue): The agent works in the old worktree when it is still there, and in a new one when it is not.
 #[test]
 fn a_folder_that_git_does_not_list_in_the_place_of_the_old_worktree_is_not_used() {
     // The agent gave its branch a new name, and the old worktree is gone.
@@ -5903,6 +5926,7 @@ fn killed_in_review(test: &str) -> (Repository, PathBuf) {
     (repository, copy)
 }
 
+// spec(lira continue): When Lira is killed while its Reviewer works, a later `lira continue` in the same worktree removes the copy of the repository that the Reviewer worked in, before its own Reviewer starts.
 #[test]
 fn a_copy_that_a_killed_reviewer_left_does_not_stop_the_next_review() {
     // Lira can also be killed after it made the folder of the copy, and
@@ -6169,4 +6193,141 @@ fi
     assert!(!repository.harness.join("lock-seen").exists());
     assert!(!repository.harness.join("locked").exists());
     assert!(repository.harness.join("lock-failed").exists());
+}
+
+// spec(lira continue): When the last comment of Lira is the comment with the request, the agent is told that Lira did not write what stopped the work.
+#[test]
+fn when_lira_wrote_no_stop_the_agent_is_told_so() {
+    // Lira was killed while its Reviewer worked, so it wrote no stop.
+    let (repository, _) = killed_in_review("continue-no-stop");
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(
+        message.contains("What stopped the work:\n\nLira did not write what stopped the work.\n"),
+        "{message}"
+    );
+}
+
+// spec(lira continue): When the new agent makes no commit, `lira continue` does not fail, and Lira runs the check and a Reviewer on the commits of the branch.
+#[test]
+fn a_new_agent_that_makes_no_commit_does_not_fail() {
+    // The check says in `ORDER` that it ran, when a test gives `ORDER`.
+    let check = r#"check = '[ -z "$ORDER" ] || echo check >> "$ORDER"'"#;
+    let repository = Repository::stopped_with("continue-no-commit", &format!("{check}\n"));
+    let branch = repository.pull_request_branch();
+    let pushed = repository.on_remote(&branch);
+    let starts = repository.starts();
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}reply 'There is nothing to change.'\n"),
+    );
+    passed(&repository.continue_work());
+    // The new agent, and then a Reviewer of the commits of the branch.
+    assert_eq!(repository.starts(), starts + 2);
+    let review = repository.first_message(starts + 2);
+    assert!(review.contains("You are a Reviewer"), "{review}");
+    assert!(review.contains("+++ b/greeting.txt"), "{review}");
+    assert_eq!(repository.on_remote(&branch), pushed);
+    let order = repository.order();
+    assert!(order.contains("check ready"), "{order}");
+    assert_eq!(
+        repository.calls("pr ready"),
+        [format!("pr ready {ADDRESS}")]
+    );
+}
+
+// spec(lira continue): The instructions tell the agent to keep the name of the branch.
+// spec(lira continue): When the agent gives the branch another name, Lira still pushes its work to the branch of the pull request.
+#[test]
+fn the_work_goes_to_the_branch_of_the_pull_request() {
+    let repository = Repository::stopped("continue-renamed");
+    let branch = repository.pull_request_branch();
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}git branch -m fix/renamed\n{CONTINUE}"),
+    );
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(
+        message.contains("Keep the name of the branch."),
+        "{message}"
+    );
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&folder, &["rev-parse", "fix/renamed"]))
+    );
+    assert_eq!(repository.on_remote("fix/renamed"), None);
+    assert_eq!(
+        git_ok(&folder, &["log", "-1", "--format=%s", "fix/renamed"]),
+        "Use the answer"
+    );
+}
+
+// spec(lira continue): A new worktree starts from the branch in the repository in the current folder when it has the branch, and from the branch of the remote when it does not.
+#[test]
+fn a_new_worktree_starts_from_the_branch_of_the_repository() {
+    // The old worktree has a commit that is not on the remote. Then its
+    // folder goes, and the branch stays in the repository.
+    let repository = Repository::stopped("worktree-gone-branch-ahead");
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    fs::write(old.join("mine.txt"), "mine\n").unwrap();
+    git_ok(&old, &["add", "--all"]);
+    git_ok(
+        &old,
+        &[
+            "commit",
+            "--quiet",
+            "--message",
+            "A commit of the repository",
+        ],
+    );
+    let mine = git_ok(&old, &["rev-parse", "HEAD"]);
+    let place = old.to_str().unwrap();
+    git_ok(&repository.root, &["worktree", "remove", "--force", place]);
+    assert_ne!(repository.on_remote(&branch), Some(mine.clone()));
+    passed(&repository.continue_work());
+    let folder = PathBuf::from(repository.kept("folder"));
+    assert_eq!(
+        repository.kept("log-at-start").lines().next(),
+        Some("A commit of the repository")
+    );
+    assert_eq!(git_ok(&folder, &["rev-parse", "HEAD~1"]), mine);
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&folder, &["rev-parse", "HEAD"]))
+    );
+}
+
+// spec(Steps): When the `setup` command fails, Lira removes the new worktree, and the error shows what the command wrote.
+// spec(Steps): Lira removes the branch of the new worktree too, when the repository did not have the branch before.
+// spec(lira continue): When `lira continue` fails before its agent starts, the pull request and its labels stay as they are.
+#[test]
+fn a_setup_command_that_fails_in_a_new_worktree_of_a_branch_keeps_the_branch() {
+    // The command fails when the file `no-setup` is in the home folder.
+    let setup = r#"setup = 'if [ -e "$HOME/no-setup" ]; then echo setup failed; exit 7; fi'"#;
+    let repository =
+        Repository::stopped_with("setup-fails-kept-branch", &format!("{CHECK}{setup}\n"));
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    let head = git_ok(&old, &["rev-parse", "HEAD"]);
+    let place = old.to_str().unwrap();
+    git_ok(&repository.root, &["worktree", "remove", "--force", place]);
+    fs::write(repository.top.join("home").join("no-setup"), "").unwrap();
+    let before = repository.as_it_is(&repository.root);
+    let starts = repository.starts();
+
+    let error = failed(&repository.continue_work());
+    assert!(error.contains("`setup`"), "{error}");
+    assert!(error.contains("setup failed"), "{error}");
+    assert_eq!(repository.starts(), starts);
+    assert!(
+        !old.exists(),
+        "the new worktree {} is still there",
+        old.display()
+    );
+    let full = format!("refs/heads/{branch}");
+    assert_eq!(git_ok(&repository.root, &["rev-parse", &full]), head);
+    assert_eq!(repository.as_it_is(&repository.root), before);
 }
