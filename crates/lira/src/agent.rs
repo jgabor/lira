@@ -5,9 +5,10 @@ use crate::data;
 use crate::harness::{Harness, Stop};
 use crate::lira_file::LiraFile;
 use crate::sandbox::Sandbox;
-use std::fs::{self, DirBuilder};
+use std::collections::BTreeSet;
+use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::ErrorKind;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -200,7 +201,19 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// The data folder of the harness of one agent, such as for its
 /// conversations. Each agent has a new one, in the folder `harness` of the
-/// data folder of Lira, and Lira removes it when the agent ends.
+/// data folder of Lira, and Lira removes it when the agent ends. Its name is
+/// `<host>-<process>-<number>`, with the name of the host and the number of
+/// the process of Lira.
+///
+/// The process of Lira that made the folder holds a lock on the file
+/// `<folder>.lock` beside it, until the folder is gone. A process that ends
+/// with no time to remove the folder, as after `SIGKILL`, loses the lock all
+/// the same. So a folder with no lock is one that Lira left, and the next
+/// agent on the same host removes it. The lock is on a file that Lira opens
+/// to write, and not on the folder, because NFS takes only such a lock. The
+/// harness can't remove a lock file, because the folder `harness` is
+/// read-only in its sandbox. It can take the lock of a folder that Lira
+/// left, which keeps that folder only while the harness runs.
 ///
 /// The harness reads its data folder in each later conversation, also
 /// outside a sandbox. So in the sandbox, the data folder of the host is
@@ -215,28 +228,58 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 ///   change, and the copy goes away with the folder.
 struct Data {
     folder: PathBuf,
+    /// The open lock file, with the lock on it. `drop` removes the folder
+    /// and the lock file before the lock goes away.
+    lock: Lock,
 }
 
 impl Data {
     /// Makes a new data folder, which only you can read.
     fn new() -> Result<Data, String> {
-        let above = data::folder()?.join("harness");
-        let failed = |folder: &Path, error| {
-            format!("Lira can't make the folder `{}`: {error}", folder.display())
+        Data::new_in(&data::folder()?.join("harness"), &host()?)
+    }
+
+    /// Makes a new data folder in `above`, for the host with the name
+    /// `host`. First it removes each folder there that Lira left on this
+    /// host.
+    fn new_in(above: &Path, host: &str) -> Result<Data, String> {
+        let failed = |path: &Path, error| {
+            format!("Lira can't make the folder `{}`: {error}", path.display())
         };
-        fs::create_dir_all(&above).map_err(|error| failed(&above, error))?;
+        fs::create_dir_all(above).map_err(|error| failed(above, error))?;
+        remove_left(above, host);
         loop {
             let name = format!(
-                "{}-{}",
+                "{host}-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             );
-            let folder = above.join(name);
+            let folder = above.join(&name);
+            // The lock comes first, so that no other process removes the
+            // folder before it is complete. Another process holds the lock
+            // only while it removes what an earlier process with the same
+            // number left.
+            let lock = match Lock::take(&folder) {
+                Ok(Taken::Held(lock)) => lock,
+                Ok(Taken::Busy) => continue,
+                // With no lock, the next agent could remove the folder
+                // while this agent works in it. So no agent runs.
+                Err(error) => {
+                    return Err(format!(
+                        "Lira can't lock the file `{}`, which keeps the data folder of the harness while the agent works: {error}",
+                        lock_file(&folder).display()
+                    ));
+                }
+            };
             // The folder must be new: Lira removes it with all that is in it.
             match DirBuilder::new().mode(0o700).create(&folder) {
-                Ok(()) => return Ok(Data { folder }),
-                // A folder of an earlier process with the same number.
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Ok(()) => return Ok(Data { folder, lock }),
+                // A folder that an earlier process with the same number
+                // left. The next agent removes it.
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    lock.keep();
+                    continue;
+                }
                 Err(error) => return Err(failed(&folder, error)),
             }
         }
@@ -290,12 +333,166 @@ impl Data {
 
 impl Drop for Data {
     fn drop(&mut self) {
-        if fs::remove_dir_all(&self.folder).is_err() {
-            // The harness can take the right to write away from a folder in
-            // it, and then nothing in that folder can go.
-            open(&self.folder);
-            let _ = fs::remove_dir_all(&self.folder);
+        remove(&self.folder);
+        self.lock.remove();
+    }
+}
+
+/// The lock file of a data folder: `<folder>.lock`.
+fn lock_file(folder: &Path) -> PathBuf {
+    let mut path = folder.as_os_str().to_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// The open lock file of a data folder. Lira removes the lock file when it
+/// lets go of it.
+struct Lock {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+/// What Lira found when it tried to take a lock.
+enum Taken {
+    /// Lira has the lock.
+    Held(Lock),
+    /// Another process holds the lock.
+    Busy,
+}
+
+impl Lock {
+    /// Takes the lock of `folder`. It is an error when the file system
+    /// takes no lock. Then Lira removes only a lock file that it made.
+    fn take(folder: &Path) -> std::io::Result<Taken> {
+        let path = lock_file(folder);
+        let open = |new: bool| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .create_new(new)
+                .truncate(false)
+                .mode(0o600)
+                .open(&path)
+        };
+        // If this call made the lock file, so that it can remove it again.
+        let (file, made) = match open(true) {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => (open(false)?, false),
+            Err(error) => return Err(error),
+        };
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(Taken::Busy),
+            Err(TryLockError::Error(error)) => {
+                // A file system that takes no lock gets no new lock files.
+                if made {
+                    let _ = fs::remove_file(&path);
+                }
+                return Err(error);
+            }
         }
+        // Another process can remove the lock file after Lira opened it,
+        // and before Lira took the lock. Then the lock is on a file that is
+        // gone, and it holds nothing.
+        let same = |found: &fs::Metadata, held: &fs::Metadata| {
+            found.dev() == held.dev() && found.ino() == held.ino()
+        };
+        let held = file.metadata()?;
+        match fs::symlink_metadata(&path) {
+            Ok(found) if same(&found, &held) => Ok(Taken::Held(Lock {
+                path,
+                file: Some(file),
+            })),
+            Ok(_) => Ok(Taken::Busy),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Taken::Busy),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Removes the lock file, while the lock is still on it.
+    fn remove(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = fs::remove_file(&self.path);
+            drop(file);
+        }
+    }
+
+    /// Lets go of the lock, and keeps the lock file.
+    fn keep(mut self) {
+        self.file = None;
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// Removes each data folder of the host `host` in `above` that no process
+/// of Lira holds a lock on, and its lock file. Lira holds the lock while it
+/// removes them, so that no other process takes them.
+fn remove_left(above: &Path, host: &str) {
+    let mut folders = BTreeSet::new();
+    for entry in fs::read_dir(above).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let folder = match name.strip_suffix(".lock") {
+            Some(folder) => folder,
+            None if entry.file_type().is_ok_and(|kind| kind.is_dir()) => name,
+            None => continue,
+        };
+        if of_host(folder, host) {
+            folders.insert(folder.to_string());
+        }
+    }
+    for name in folders {
+        let folder = above.join(name);
+        if let Ok(Taken::Held(mut lock)) = Lock::take(&folder) {
+            // A lock file can be there with no folder, and Lira removes
+            // only a folder, and not what a link names.
+            if fs::symlink_metadata(&folder).is_ok_and(|found| found.is_dir()) {
+                remove(&folder);
+            }
+            lock.remove();
+        }
+    }
+}
+
+/// If `name` is the name of a data folder that Lira made on the host with
+/// the name `host`: `<host>-<number>-<number>`. Two hosts can share the
+/// data folder of Lira, as on NFS, and a host can't always see the locks
+/// of another host there. So Lira removes only the folders of its own host.
+fn of_host(name: &str, host: &str) -> bool {
+    let number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let mut parts = name.rsplitn(3, '-');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(next), Some(process), Some(named)) if number(next) && number(process) && named == host
+    )
+}
+
+/// The name of the host, as Linux gives it.
+fn host() -> Result<String, String> {
+    let file = "/proc/sys/kernel/hostname";
+    let name = fs::read_to_string(file)
+        .map_err(|error| format!("Lira can't read the name of the host in `{file}`: {error}"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!(
+            "Lira can't read the name of the host: `{file}` is empty"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Removes a data folder with all that is in it.
+fn remove(folder: &Path) {
+    if fs::remove_dir_all(folder).is_err() {
+        // The harness can take the right to write away from a folder in it,
+        // and then nothing in that folder can go.
+        open(folder);
+        let _ = fs::remove_dir_all(folder);
     }
 }
 
@@ -334,4 +531,75 @@ pub fn stopped(stop: &Stop) -> Option<String> {
         Stop::Cancelled => "the message was stopped".to_string(),
         Stop::Other(reason) => format!("the harness gave the reason `{reason}`"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_data_folder_removes_the_left_ones_and_keeps_the_held_ones() {
+        let above = std::env::temp_dir().join(format!("lira-data-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&above);
+        let left = above.join("h-1-0");
+        fs::create_dir_all(left.join("projects")).unwrap();
+        fs::write(above.join("file"), "").unwrap();
+        // A harness can take the right to read away from its data folder.
+        let closed = above.join("h-1-1");
+        fs::create_dir_all(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        // The lock of a folder that Lira left, and a lock with no folder.
+        fs::write(above.join("h-1-1.lock"), "").unwrap();
+        fs::write(above.join("h-1-2.lock"), "").unwrap();
+        // A lock file beside a file that is no data folder.
+        fs::write(above.join("h-1-3"), "").unwrap();
+        fs::write(above.join("h-1-3.lock"), "").unwrap();
+        fs::set_permissions(above.join("h-1-3"), fs::Permissions::from_mode(0o644)).unwrap();
+        // The folders of other hosts, and of a Lira that put no host in
+        // the name. Lira can't see their locks.
+        let others = ["g-1-0", "x-h-1-0", "1-0"].map(|name| above.join(name));
+        for folder in &others {
+            fs::create_dir_all(folder).unwrap();
+        }
+        fs::write(above.join("g-1-0.lock"), "").unwrap();
+
+        let held = Data::new_in(&above, "h").unwrap();
+        assert!(!left.exists());
+        assert!(!closed.exists());
+        assert!(!above.join("h-1-1.lock").exists());
+        assert!(!above.join("h-1-2.lock").exists());
+        let mode = fs::metadata(above.join("h-1-3"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert!(!above.join("h-1-3.lock").exists());
+        assert!(above.join("file").exists());
+        for folder in &others {
+            assert!(folder.is_dir(), "{}", folder.display());
+        }
+        assert!(above.join("g-1-0.lock").exists());
+        let name = held.folder.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("h-"), "{name}");
+        let lock = above.join(format!("{name}.lock"));
+        assert!(lock.is_file());
+        fs::set_permissions(&held.folder, fs::Permissions::from_mode(0o000)).unwrap();
+        let other = Data::new_in(&above, "h").unwrap();
+        assert!(held.folder.exists());
+        // The folder that a harness holds keeps the mode that the harness gave it.
+        let mode = fs::symlink_metadata(&held.folder)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o000);
+        assert_ne!(held.folder, other.folder);
+
+        let folder = held.folder.clone();
+        drop(held);
+        assert!(!folder.exists());
+        assert!(!lock.exists());
+        assert!(other.folder.is_dir());
+        drop(other);
+        fs::remove_dir_all(&above).unwrap();
+    }
 }

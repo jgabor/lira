@@ -3532,6 +3532,68 @@ while :; do sleep 1; done
     });
 }
 
+// spec(Steps): When Lira ends before it can remove that folder, Lira removes it when the next agent on the same host starts.
+#[test]
+fn lira_removes_the_data_folder_of_a_harness_that_it_left_when_it_was_killed() {
+    // The first agent keeps its data folder and never ends its reply. The
+    // agent of the second run does its work.
+    let work = r#"if [ ! -e "$here/first-data" ]; then
+  echo "$CLAUDE_CONFIG_DIR" > "$here/first-data"
+  while :; do sleep 1; done
+fi
+"#;
+    let repository = Repository::new("killed", CHECK, &format!("{work}{WORK}"));
+    let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    wait_for("the start of the agent", || {
+        fs::read_to_string(repository.harness.join("first-data"))
+            .is_ok_and(|text| text.ends_with('\n'))
+            && !processes_with(harness).is_empty()
+    });
+    let first = PathBuf::from(repository.kept("first-data"));
+    assert!(first.is_dir(), "{}", first.display());
+
+    // Lira can do nothing after this signal.
+    lira.kill().unwrap();
+    assert!(!lira.wait().unwrap().success());
+    wait_for("the end of the harness", || {
+        processes_with(harness).is_empty()
+    });
+    assert!(first.is_dir(), "{}", first.display());
+
+    passed(&repository.run());
+    assert!(!first.exists(), "{}", first.display());
+    let mut lock = first.clone().into_os_string();
+    lock.push(".lock");
+    let lock = PathBuf::from(lock);
+    assert!(!lock.exists(), "{}", lock.display());
+}
+
+// spec(Steps): When Lira can't lock the folder of a harness, it runs no agent.
+#[test]
+fn lira_runs_no_agent_when_it_can_not_lock_the_folder_of_a_harness() {
+    let repository = Repository::new("no-lock", CHECK, WORK);
+    // Lira can't make a lock file in a folder where it can't write.
+    let harness = repository.top.join("xdg").join("lira").join("harness");
+    fs::create_dir_all(&harness).unwrap();
+    fs::set_permissions(
+        &harness,
+        std::os::unix::fs::PermissionsExt::from_mode(0o500),
+    )
+    .unwrap();
+    let output = repository.run();
+    fs::set_permissions(
+        &harness,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Lira can't lock the file"), "{error}");
+    assert!(!repository.harness.join("starts").exists());
+}
+
 #[test]
 fn the_pull_request_keeps_the_work_of_the_agent_when_the_worktree_goes_to_another_branch() {
     // After the draft is there, the agent looks at another branch, with a
