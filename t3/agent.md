@@ -92,7 +92,7 @@ can't continue, stop and ask as AGENTS.md says.
 
    | Reviewer      | `<harness>`   | Scopes that its model uses |
    | ------------- | ------------- | -------------------------- |
-   | Factory Droid | `droid`       | `standard`, then `core`    |
+   | Factory Droid | `droid`       | `standard`                 |
    | Antigravity   | `antigravity` | `gemini`                   |
    | Claude Code   | `claude-code` | `all`                      |
 
