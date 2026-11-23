@@ -989,9 +989,13 @@ done > "$here/processes"
     assert!(!seen.contains(env!("CARGO_BIN_EXE_lira")), "{seen}");
     let test = std::env::current_exe().unwrap();
     assert!(!seen.contains(test.to_str().unwrap()), "{seen}");
-    let first = fs::read("/proc/1/cmdline").unwrap();
+    // A host can hide the first process from this test, with `hidepid`.
+    let first = fs::read("/proc/1/cmdline").unwrap_or_default();
     let first = String::from_utf8_lossy(&first).replace('\0', " ");
-    assert!(!seen.lines().any(|seen| seen == first), "{seen}");
+    let first = first.trim();
+    if !first.is_empty() {
+        assert!(!seen.lines().any(|seen| seen.trim() == first), "{seen}");
+    }
 }
 
 #[test]
