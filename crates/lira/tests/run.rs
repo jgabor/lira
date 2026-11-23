@@ -3408,8 +3408,17 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
     let git = String::from_utf8_lossy(&git.stdout).trim().to_string();
     std::os::unix::fs::symlink(git, only.join("git")).unwrap();
     // The stand-in for `bwrap`, so that the harness can keep its number.
+    // It keeps a sign each time that Lira starts a sandbox with it.
     let bwrap = repository.shared.join("sandbox").join("bwrap");
-    std::os::unix::fs::symlink(bwrap, only.join("bwrap")).unwrap();
+    let sandboxes = repository.top.join("sandboxes");
+    program(
+        &only.join("bwrap"),
+        &format!(
+            "#!/bin/sh\necho started >> '{}'\nexec '{}' \"$@\"\n",
+            sandboxes.display(),
+            bwrap.display()
+        ),
+    );
     let path = format!(
         "{}:{}",
         only.display(),
@@ -3423,6 +3432,13 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
         .unwrap();
     let error = failed(&output);
     assert!(error.contains("`sh`"), "{error}");
+    // Lira sees that it can't guard the harness before it starts the
+    // harness. The first sandbox is the one where Lira tries `bwrap`, and
+    // the harness gets none.
+    assert_eq!(
+        fs::read_to_string(&sandboxes).unwrap_or_default(),
+        "started\n"
+    );
     // The harness does not stay, and the worktree is gone.
     // The numbers of processes in the sandbox are not the ones of the host,
     // so the test finds the harness on the host by its command line.

@@ -277,46 +277,62 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut child = command.spawn().map_err(|error| {
-            // The system gives the same error for a program that is not
-            // there, for a program that needs another one that is not
-            // there, and for a folder that is not there.
-            let no_folder = command
-                .get_current_dir()
-                .filter(|folder| matches!(folder.try_exists(), Ok(false)));
-            let reason = match (no_folder, error.kind()) {
-                (Some(folder), _) => format!(
-                    "the harness `{program}` did not start: the folder `{}` is not there",
-                    folder.display()
-                ),
-                (None, ErrorKind::NotFound) => format!(
-                    "Lira can't find the harness `{program}` on this host, or a program that it needs to start"
-                ),
-                (None, _) => format!("the harness `{program}` did not start: {error}"),
-            };
-            Error::Start {
-                program: program.clone(),
-                reason,
-            }
-        })?;
         // Lira starts no harness that it can't stop when Lira itself is
-        // stopped.
-        let guard = match guard(child.id()) {
-            Ok(guard) => Some(guard),
+        // stopped. So the guard starts first, and the harness only after
+        // it. A harness that Lira stops in its first moments can leave its
+        // sandbox behind: `bwrap` can end before it makes the sandbox end
+        // with it.
+        let mut guard = guard().map_err(|error| Error::Start {
+            reason: format!(
+                "Lira can't start the process that guards the harness `{program}`. It is a `sh`, and it did not start: {error}"
+            ),
+            program: program.clone(),
+        })?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
             Err(error) => {
-                // This stops the harness, and not what the harness started
-                // in these first moments: Lira stops a process group with
-                // `sh`, and `sh` is what did not start here.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::Start {
-                    reason: format!(
-                        "Lira can't start the process that guards the harness `{program}`. It is a `sh`, and it did not start: {error}"
+                // The guard has no harness to stop.
+                let _ = guard.kill();
+                let _ = guard.wait();
+                // The system gives the same error for a program that is
+                // not there, for a program that needs another one that is
+                // not there, and for a folder that is not there.
+                let no_folder = command
+                    .get_current_dir()
+                    .filter(|folder| matches!(folder.try_exists(), Ok(false)));
+                let reason = match (no_folder, error.kind()) {
+                    (Some(folder), _) => format!(
+                        "the harness `{program}` did not start: the folder `{}` is not there",
+                        folder.display()
                     ),
-                    program,
-                });
+                    (None, ErrorKind::NotFound) => format!(
+                        "Lira can't find the harness `{program}` on this host, or a program that it needs to start"
+                    ),
+                    (None, _) => format!("the harness `{program}` did not start: {error}"),
+                };
+                return Err(Error::Start { program, reason });
             }
         };
+        // The guard learns the number of the process group of the harness.
+        // The pipe holds the line, so this does not wait for the guard.
+        let told = guard
+            .stdin
+            .as_mut()
+            .expect("the input of the guard is a pipe")
+            .write_all(format!("{}\n", child.id()).as_bytes());
+        if let Err(error) = told {
+            let _ = guard.kill();
+            let _ = guard.wait();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Start {
+                reason: format!(
+                    "Lira can't tell the process that guards the harness `{program}` which harness it guards: {error}"
+                ),
+                program,
+            });
+        }
+        let guard = Some(guard);
         let (input, input_failed) = write_lines(child.stdin.take().expect("the input is a pipe"));
         let lines = read_lines(child.stdout.take().expect("the output is a pipe"));
         let (errors, errors_ended) = keep(child.stderr.take().expect("the error output is a pipe"));
@@ -904,13 +920,17 @@ impl Drop for Harness {
 }
 
 /// Starts the process that guards a harness. It reads from a pipe that only
-/// Lira holds. The pipe ends when Lira ends, however that happens, and the
-/// guard then stops the process group of the harness. It has a process
-/// group of its own, so that Ctrl-C in the terminal does not reach it.
-fn guard(harness: u32) -> std::io::Result<Child> {
-    let wait_then_stop = r#"while IFS= read -r line; do :; done; kill -s KILL -- "$1""#;
+/// Lira holds. The first line is the number of the process group of the
+/// harness. The pipe ends when Lira ends, however that happens, and the
+/// guard then stops that process group. With no first line, there is no
+/// harness, and the guard stops nothing. It has a process group of its
+/// own, so that Ctrl-C in the terminal does not reach it.
+fn guard() -> std::io::Result<Child> {
+    let wait_then_stop = r#"IFS= read -r group || exit 0
+while IFS= read -r line; do :; done
+kill -s KILL -- "-$group""#;
     Command::new("sh")
-        .args(["-c", wait_then_stop, "sh", &format!("-{harness}")])
+        .args(["-c", wait_then_stop])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
