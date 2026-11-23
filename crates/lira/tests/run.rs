@@ -2109,8 +2109,8 @@ fn an_agent_and_a_reviewer_reach_no_socket_of_gpg_agent() {
             sockets.push(socket);
         }
     }
-    // A socket that gpg-agent makes after the sandbox started is not there
-    // either: the folder is empty.
+    // Each folder is empty, with no key and no socket. So a socket that
+    // gpg-agent makes there later is not there either.
     let seen = |file: &str| -> String {
         folders
             .iter()
