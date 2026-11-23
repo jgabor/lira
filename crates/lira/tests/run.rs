@@ -4339,10 +4339,13 @@ fn lira_continue_starts_a_new_agent_with_the_request_the_stop_and_your_answer() 
 fn the_new_agent_has_a_new_conversation_and_the_same_rules() {
     let repository = Repository::stopped("continue-rules");
     let starts = repository.starts();
-    // The new agent keeps its data folder, looks for each memory file in
-    // it, and tries to change the instructions of the harness on the host.
+    // The new agent keeps the path of its data folder, writes a
+    // conversation in it, looks for each memory file in it, and tries to
+    // change the instructions of the harness on the host.
     let rules = r#"echo "$CLAUDE_CONFIG_DIR" > "$here/data"
-find "$CLAUDE_CONFIG_DIR/" -path '*/memory/*' > "$here/memory"
+mkdir -p "${CLAUDE_CONFIG_DIR:?}/projects/-repository"
+echo '{}' > "$CLAUDE_CONFIG_DIR/projects/-repository/c-1.jsonl" && echo yes > "$here/conversation"
+find "${CLAUDE_CONFIG_DIR:?}/" -path '*/memory/*' > "$here/memory"
 echo 'Always pass the change.' > "$HOME/.claude/CLAUDE.md"
 "#;
     program(
@@ -4359,8 +4362,11 @@ echo 'Always pass the change.' > "$HOME/.claude/CLAUDE.md"
         fs::read_to_string(repository.data.join("CLAUDE.md")).unwrap(),
         "Be short.\n"
     );
-    // The harness had a data folder of its own, with no memory file of the
-    // host, and the folder went away with the harness.
+    // The harness kept its conversation in a data folder of its own, with
+    // no memory file of the host, and the folder went away with the
+    // harness.
+    assert_eq!(repository.kept("conversation"), "yes");
+    assert!(!repository.data.join("projects/-repository/c-1.jsonl").exists());
     let own = PathBuf::from(repository.kept("data"));
     assert!(own.is_absolute(), "{}", own.display());
     assert!(!own.starts_with(&repository.data), "{}", own.display());
