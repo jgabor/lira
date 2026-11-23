@@ -164,12 +164,12 @@ impl<'a> PullRequest<'a> {
 
     /// The agent stops and asks: Lira writes the question as a comment on
     /// the pull request, and then adds `needs:answer`. It tries both, and
-    /// returns what went wrong.
-    pub fn ask(&self, question: &str) -> Result<(), String> {
+    /// returns what went wrong. `read` is what the agent read.
+    pub fn ask(&self, question: &str, read: Option<&comment::Read>) -> Result<(), String> {
         let Some(address) = &self.address else {
             return Err("there is no pull request to write the question on".to_string());
         };
-        let commented = self.comment(address, &comment::question(question));
+        let commented = self.comment(address, &comment::question(question, read));
         let labeled = self.wait();
         let mut problems = Vec::new();
         if let Err(error) = commented {
@@ -187,12 +187,12 @@ impl<'a> PullRequest<'a> {
     }
 
     /// Writes the comment that says that the work of `lira continue`
-    /// passed.
-    pub fn passed(&self) -> Result<(), String> {
+    /// passed. `read` is what the agent read.
+    pub fn passed(&self, read: Option<&comment::Read>) -> Result<(), String> {
         let Some(address) = &self.address else {
             return Err("there is no pull request to write on".to_string());
         };
-        self.comment(address, &comment::passed())
+        self.comment(address, &comment::passed(read))
     }
 
     /// Adds `needs:answer`, so that the pull request waits for you.

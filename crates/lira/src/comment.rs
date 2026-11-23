@@ -20,12 +20,44 @@ const PASSED: &str = "<!-- lira passed -->";
 /// show that line.
 const STARTED: (&str, &str) = ("<!-- lira started on ", " -->");
 
+/// The start and the end of the line, in a question and in the comment
+/// that the work passed, that names what the agent read. GitHub does not
+/// show that line.
+const READ: (&str, &str) = ("<!-- lira read until ", " -->");
+
+/// What the line `READ` names when the agent read only the request.
+const THE_REQUEST: &str = "the request";
+
 /// One comment on a pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
+    /// What names the comment on GitHub, such as `comment 12`, when GitHub
+    /// gives it.
+    pub id: Option<String>,
     /// The login that wrote it.
     pub author: String,
     pub body: String,
+}
+
+/// What the agent read before Lira wrote a question, or the comment that
+/// the work passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Read {
+    /// The request only: the agent of `lira run` reads no comment.
+    Request,
+    /// Each comment until the one that this names: the comments that were
+    /// there when the agent of `lira continue` started.
+    Until(String),
+}
+
+/// The line that says what the agent read.
+fn read_line(read: Option<&Read>) -> String {
+    let (start, end) = READ;
+    match read {
+        None => String::new(),
+        Some(Read::Request) => format!("{start}{THE_REQUEST}{end}\n"),
+        Some(Read::Until(id)) => format!("{start}{id}{end}\n"),
+    }
 }
 
 /// The comment that keeps the request on the pull request. `branch` is
@@ -58,23 +90,25 @@ pub fn quote(text: &str) -> String {
         .collect()
 }
 
-/// The comment that says what stops the work.
-pub fn question(question: &str) -> String {
-    format!("{QUESTION}\n{question}")
+/// The comment that says what stops the work. `read` is what the agent
+/// read. A later `lira continue` reads what you wrote after that.
+pub fn question(question: &str, read: Option<&Read>) -> String {
+    format!("{QUESTION}\n{}{question}", read_line(read))
 }
 
 /// The comment that says that the check and a Reviewer passed the change
-/// of `lira continue`. A later `lira continue` reads only what you wrote
-/// after it.
-pub fn passed() -> String {
+/// of `lira continue`. `read` is what the agent read. A later `lira
+/// continue` reads only what you wrote after that.
+pub fn passed(read: Option<&Read>) -> String {
     format!(
-        "{PASSED}\nThe check and a Reviewer passed the change, and the pull request is ready for review."
+        "{PASSED}\n{}The check and a Reviewer passed the change, and the pull request is ready for review.",
+        read_line(read)
     )
 }
 
 /// What `lira continue` reads from the comments of a pull request.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Read {
+pub struct Comments {
     /// The request, from the first comment that has it.
     pub request: String,
     /// The branch that the worktree started on, when that comment names
@@ -84,13 +118,13 @@ pub struct Read {
     pub stopped: Option<String>,
     /// If the last comment of Lira says that the work passed.
     pub passed: bool,
-    /// Your answer: each comment of `login` after the last comment of
-    /// Lira, that Lira did not write.
+    /// Your answer: each comment of `login` after what the agent of the
+    /// last comment of Lira read, that Lira did not write.
     pub answer: Vec<String>,
-    /// Each comment of someone else after the last comment of Lira.
+    /// Each comment of someone else after what that agent read.
     pub others: Vec<Comment>,
-    /// Each comment of `login` after the request and before the last
-    /// comment of Lira, that Lira did not write.
+    /// Each comment of `login` after the request and before your answer,
+    /// that Lira did not write.
     pub earlier: Vec<String>,
 }
 
@@ -98,7 +132,12 @@ pub struct Read {
 /// comments of a pull request, the oldest first. `login` is the login of
 /// `gh`. Only a comment of that login can be a comment of Lira. It is
 /// `None` when no comment has the request.
-pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
+///
+/// Your answer starts after what the agent of the last comment of Lira
+/// read. So a comment that you wrote while that agent worked is part of
+/// it. When the last comment of Lira does not say what its agent read, or
+/// names a comment that is gone, your answer starts after that comment.
+pub fn read(comments: &[Comment], login: &str) -> Option<Comments> {
     let of_lira = |comment: &Comment| comment.author == login && marker(&comment.body).is_some();
     let (first, (request, started_on)) = comments
         .iter()
@@ -106,20 +145,35 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
         .filter(|(_, comment)| comment.author == login)
         .find_map(|(at, comment)| Some((at, request_in(&comment.body)?)))?;
     let last = comments.iter().rposition(of_lira)?;
-    let earlier = comments[first + 1..last.max(first + 1)]
+    let (read, said) = match marker(&comments[last].body) {
+        Some((QUESTION | PASSED, rest)) => read_in(rest),
+        Some((_, rest)) => (None, rest),
+        None => (None, ""),
+    };
+    // The last comment that the agent read.
+    let until = match read {
+        Some(Read::Request) => first,
+        Some(Read::Until(id)) => comments[..last]
+            .iter()
+            .rposition(|comment| comment.id.as_deref() == Some(id.as_str()))
+            .unwrap_or(last),
+        None => last,
+    };
+    let until = until.max(first);
+    let earlier = comments[first + 1..until + 1]
         .iter()
         .filter(|comment| comment.author == login && !of_lira(comment))
         .map(|comment| comment.body.trim().to_string())
         .collect();
     let (stopped, passed) = match marker(&comments[last].body) {
-        Some((QUESTION, rest)) => (Some(rest.trim().to_string()), false),
+        Some((QUESTION, _)) => (Some(said.trim().to_string()), false),
         Some((PASSED, _)) => (None, true),
         _ => (None, false),
     };
-    let after = &comments[last + 1..];
+    let after = &comments[until + 1..];
     let answer = after
         .iter()
-        .filter(|comment| comment.author == login)
+        .filter(|comment| comment.author == login && !of_lira(comment))
         .map(|comment| comment.body.trim().to_string())
         .collect();
     let others = after
@@ -127,7 +181,7 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
         .filter(|comment| comment.author != login)
         .cloned()
         .collect();
-    Some(Read {
+    Some(Comments {
         request,
         started_on,
         stopped,
@@ -146,6 +200,22 @@ fn marker(body: &str) -> Option<(&'static str, &str)> {
         .into_iter()
         .find(|marker| first.trim_end() == *marker)
         .map(|marker| (marker, rest))
+}
+
+/// What the line after the marker says that the agent read, when it is
+/// that line, and the text after it.
+fn read_in(rest: &str) -> (Option<Read>, &str) {
+    let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+    let (start, end) = READ;
+    match line
+        .trim_end()
+        .strip_prefix(start)
+        .and_then(|line| line.strip_suffix(end))
+    {
+        Some(THE_REQUEST) => (Some(Read::Request), after),
+        Some(id) if !id.is_empty() => (Some(Read::Until(id.to_string())), after),
+        _ => (None, rest),
+    }
 }
 
 /// The request in a comment that has it: the lines of its quote. And the
@@ -181,6 +251,7 @@ mod tests {
 
     fn of(author: &str, body: &str) -> Comment {
         Comment {
+            id: None,
             author: author.to_string(),
             body: body.to_string(),
         }
@@ -230,9 +301,9 @@ mod tests {
             of("you", "A remark before the request."),
             of("you", &request("Do it.", BRANCH)),
             of("you", "A remark."),
-            of("you", &question("The check failed.")),
+            of("you", &question("The check failed.", None)),
             of("you", "Do it in another way."),
-            of("someone", &question("Not Lira.")),
+            of("someone", &question("Not Lira.", None)),
             of("you", "And test it."),
         ];
         let read = read(&comments, "you").unwrap();
@@ -246,9 +317,9 @@ mod tests {
     fn the_answer_follows_the_comment_that_the_work_passed() {
         let comments = [
             of("you", &request("Do it.", BRANCH)),
-            of("you", &question("The check failed.")),
+            of("you", &question("The check failed.", None)),
             of("you", "Do it in another way."),
-            of("you", &passed()),
+            of("you", &passed(None)),
             of("you", "Now make it louder."),
         ];
         let read = read(&comments, "you").unwrap();
@@ -257,6 +328,66 @@ mod tests {
         assert!(read.passed);
         assert_eq!(read.answer, ["Now make it louder."]);
         assert_eq!(read.earlier, ["Do it in another way."]);
+    }
+
+    /// A comment with the number `id` on GitHub.
+    fn numbered(id: i64, author: &str, body: &str) -> Comment {
+        Comment {
+            id: Some(format!("comment {id}")),
+            ..of(author, body)
+        }
+    }
+
+    #[test]
+    fn the_answer_follows_what_the_agent_of_the_last_comment_of_lira_read() {
+        // The agent of `lira run` reads only the request. You write while
+        // it works.
+        let comments = [
+            numbered(1, "you", &request("Do it.", BRANCH)),
+            numbered(2, "you", "While it works."),
+            numbered(3, "someone", "Me too."),
+            numbered(
+                4,
+                "you",
+                &question("The check failed.", Some(&Read::Request)),
+            ),
+            numbered(5, "you", "After it stopped."),
+        ];
+        let read = read(&comments, "you").unwrap();
+        assert_eq!(read.stopped.as_deref(), Some("The check failed."));
+        assert_eq!(read.answer, ["While it works.", "After it stopped."]);
+        assert_eq!(read.others, [comments[2].clone()]);
+        assert!(read.earlier.is_empty());
+        // The agent of `lira continue` read each comment until the answer.
+        let until = Read::Until("comment 5".to_string());
+        let mut more = comments.to_vec();
+        more.extend([
+            numbered(6, "you", "While the next one works."),
+            numbered(
+                7,
+                "you",
+                &question("The Reviewer found something.", Some(&until)),
+            ),
+        ]);
+        let read = super::read(&more, "you").unwrap();
+        assert_eq!(
+            read.stopped.as_deref(),
+            Some("The Reviewer found something.")
+        );
+        assert_eq!(read.answer, ["While the next one works."]);
+        assert!(read.others.is_empty());
+        assert_eq!(read.earlier, ["While it works.", "After it stopped."]);
+        // And so does the comment that the work passed.
+        more[6] = numbered(7, "you", &passed(Some(&until)));
+        let read = super::read(&more, "you").unwrap();
+        assert!(read.passed);
+        assert_eq!(read.answer, ["While the next one works."]);
+        // When the comment that it names is gone, the answer follows the
+        // last comment of Lira.
+        more.remove(4);
+        more.push(numbered(8, "you", "Later."));
+        let read = super::read(&more, "you").unwrap();
+        assert_eq!(read.answer, ["Later."]);
     }
 
     #[test]

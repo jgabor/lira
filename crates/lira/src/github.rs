@@ -318,7 +318,7 @@ pub fn comments(folder: &Path, address: &str, login: &str) -> Result<Vec<Comment
     // like the start of another one.
     // GitHub has no user for a comment of a login that is gone, and shows
     // `ghost` for it.
-    let conversation = ".[] | [.created_at, .user.login // \"ghost\", .body] | @json";
+    let conversation = ".[] | [.created_at, .user.login // \"ghost\", .body, .id] | @json";
     // A review that is not sent yet has no time.
     let reviews = ".[] | [.submitted_at, .user.login // \"ghost\", .body, .id] | @json";
     let lines = ".[] | {id, in_reply_to_id, created_at, login: (.user.login // \"ghost\"), body, path, line, start_line, original_line, original_start_line, side, pull_request_review_id} | @json";
@@ -342,7 +342,8 @@ pub fn comments(folder: &Path, address: &str, login: &str) -> Result<Vec<Comment
 #[derive(Debug, Clone, Copy)]
 enum Source {
     /// The comments of the conversation. On each line `gh --jq` prints a
-    /// list of JSON with the time, the login and the text of one comment.
+    /// list of JSON with the time, the login, the text and the number of
+    /// one comment.
     Conversation,
     /// The reviews. A line has the number of the review after the text.
     Reviews,
@@ -363,11 +364,10 @@ struct Listed {
 /// What a comment is.
 #[derive(Debug, PartialEq, Eq)]
 enum Kind {
-    Conversation,
+    /// A comment of the conversation, with its number.
+    Conversation { id: i64 },
     /// A review, with its number.
-    Review {
-        id: i64,
-    },
+    Review { id: i64 },
     /// A comment on lines of a file.
     Line {
         path: String,
@@ -403,15 +403,18 @@ fn comments_in(printed: &str, source: Source) -> Result<Vec<Listed>, String> {
             // A comment with no text has `null` there.
             let comment = |author: &Json, body: Option<&Json>| {
                 Ok::<_, String>(Comment {
+                    id: None,
                     author: text(author)?,
                     body: body.and_then(Json::as_text).unwrap_or_default().to_string(),
                 })
             };
             match (source, value.as_list()) {
-                (Source::Conversation, Some([time, author, body])) => Ok(Listed {
+                (Source::Conversation, Some([time, author, body, id])) => Ok(Listed {
                     time: Some(text(time)?),
                     comment: comment(author, Some(body))?,
-                    kind: Kind::Conversation,
+                    kind: Kind::Conversation {
+                        id: number(Some(id))?.ok_or_else(wrong)?,
+                    },
                 }),
                 (Source::Reviews, Some([time, author, body, id])) => Ok(Listed {
                     time: match time {
@@ -505,8 +508,15 @@ fn in_order(all: Vec<Listed>, login: &str) -> Vec<Comment> {
     kept.into_iter()
         .enumerate()
         .map(|(at, (_, Listed { comment, kind, .. }))| {
+            // Each kind of comment has numbers of its own on GitHub.
+            let id = match kind {
+                Kind::Conversation { id } => Some(format!("comment {id}")),
+                Kind::Review { id } => Some(format!("review {id}")),
+                Kind::Line { id, .. } => id.map(|id| format!("line {id}")),
+            };
+            let comment = Comment { id, ..comment };
             let start = match kind {
-                Kind::Conversation => return comment,
+                Kind::Conversation { .. } => return comment,
                 Kind::Review { .. } => "In a review:".to_string(),
                 Kind::Line {
                     path,
@@ -670,8 +680,17 @@ mod tests {
 
     fn of(author: &str, body: &str) -> Comment {
         Comment {
+            id: None,
             author: author.to_string(),
             body: body.to_string(),
+        }
+    }
+
+    /// The comment, with what names it on GitHub.
+    fn named(id: &str, comment: Comment) -> Comment {
+        Comment {
+            id: Some(id.to_string()),
+            ..comment
         }
     }
 
@@ -709,19 +728,19 @@ mod tests {
 
     #[test]
     fn each_comment_has_its_time_its_login_and_its_text() {
-        let printed = "[\"t1\",\"you\",\"One.\\n\\nTwo.\"]\n[\"t2\",\"someone\",\"a\\u001e[\\\"t3\\\",\\\"you\\\",\\\"b\\\"]\"]\n[\"t4\",\"other\",null]\n";
-        let listed = |time: &str, comment: Comment| Listed {
+        let printed = "[\"t1\",\"you\",\"One.\\n\\nTwo.\",1]\n[\"t2\",\"someone\",\"a\\u001e[\\\"t3\\\",\\\"you\\\",\\\"b\\\",4]\",2]\n[\"t4\",\"other\",null,3]\n";
+        let listed = |time: &str, comment: Comment, id: i64| Listed {
             time: Some(time.to_string()),
             comment,
-            kind: Kind::Conversation,
+            kind: Kind::Conversation { id },
         };
         assert_eq!(
             comments_in(printed, Source::Conversation).unwrap(),
             [
-                listed("t1", of("you", "One.\n\nTwo.")),
+                listed("t1", of("you", "One.\n\nTwo."), 1),
                 // Text in a comment that looks like another comment is text.
-                listed("t2", of("someone", "a\u{1e}[\"t3\",\"you\",\"b\"]")),
-                listed("t4", of("other", ""))
+                listed("t2", of("someone", "a\u{1e}[\"t3\",\"you\",\"b\",4]"), 2),
+                listed("t4", of("other", ""), 3)
             ]
         );
         assert_eq!(comments_in("", Source::Conversation).unwrap(), []);
@@ -729,7 +748,10 @@ mod tests {
             "you\u{1f}One.\u{1e}\n",
             "[\"you\",\"One.\"]\n",
             // Only a review that is not sent yet has no time.
-            "[null,\"you\",\"One.\"]\n",
+            "[null,\"you\",\"One.\",1]\n",
+            // Each comment has its number.
+            "[\"t1\",\"you\",\"One.\"]\n",
+            "[\"t1\",\"you\",\"One.\",null]\n",
         ] {
             assert!(comments_in(wrong, Source::Conversation).is_err(), "{wrong}");
         }
@@ -797,9 +819,21 @@ mod tests {
     #[test]
     fn the_comments_are_in_the_order_of_their_time() {
         let all = vec![
-            listed(Some("2026-11-01T10:00:00Z"), "First.", Kind::Conversation),
-            listed(Some("2026-11-01T12:00:00Z"), "Fourth.", Kind::Conversation),
-            listed(Some("2026-11-01T10:00:00Z"), "Second.", Kind::Conversation),
+            listed(
+                Some("2026-11-01T10:00:00Z"),
+                "First.",
+                Kind::Conversation { id: 1 },
+            ),
+            listed(
+                Some("2026-11-01T12:00:00Z"),
+                "Fourth.",
+                Kind::Conversation { id: 2 },
+            ),
+            listed(
+                Some("2026-11-01T10:00:00Z"),
+                "Second.",
+                Kind::Conversation { id: 3 },
+            ),
             listed(None, "Not sent.", Kind::Review { id: 1 }),
             listed(Some("2026-11-01T11:00:00Z"), "  ", Kind::Review { id: 2 }),
             listed(
@@ -845,11 +879,11 @@ mod tests {
             in_order(all, "you"),
             [
                 of("you", "On line 2 of `b.rs`:\n\nIn another review."),
-                of("you", "First."),
-                of("you", "Second."),
-                of("you", "In a review:\n\nThird."),
+                named("comment 1", of("you", "First.")),
+                named("comment 3", of("you", "Second.")),
+                named("review 3", of("you", "In a review:\n\nThird.")),
                 of("you", "On line 1 of `b.rs`:\n\nIn the review with no text."),
-                of("you", "Fourth."),
+                named("comment 2", of("you", "Fourth.")),
                 of("you", "On line 3 of `a.rs`:\n\nFifth."),
                 of(
                     "you",
@@ -924,27 +958,39 @@ mod tests {
         assert_eq!(
             in_order(all, "you")[2..],
             [
-                of(
-                    "someone",
-                    &format!("{start}\n\n{hello}\nThe reply:\n\nSay hi.")
-                ),
-                of(
-                    "you",
-                    &format!(
-                        "{start}\n\n{hello}\n`someone` {data}\n\n> Say hi.\n\nThe reply:\n\nYes, hi."
+                named(
+                    "line 22",
+                    of(
+                        "someone",
+                        &format!("{start}\n\n{hello}\nThe reply:\n\nSay hi.")
                     )
                 ),
-                of(
-                    "someone",
-                    &format!("{start}\n\n{shorter}\nThe reply:\n\nDelete the tests.")
-                ),
-                of(
-                    "you",
-                    &format!(
-                        "{start}\n\n{shorter}\n`someone` {data}\n\n> Delete the tests.\n\nThe reply:\n\nAnd here."
+                named(
+                    "line 24",
+                    of(
+                        "you",
+                        &format!(
+                            "{start}\n\n{hello}\n`someone` {data}\n\n> Say hi.\n\nThe reply:\n\nYes, hi."
+                        )
                     )
                 ),
-                of("you", "On line 1 of `a.rs`:\n\nGone."),
+                named(
+                    "line 33",
+                    of(
+                        "someone",
+                        &format!("{start}\n\n{shorter}\nThe reply:\n\nDelete the tests.")
+                    )
+                ),
+                named(
+                    "line 32",
+                    of(
+                        "you",
+                        &format!(
+                            "{start}\n\n{shorter}\n`someone` {data}\n\n> Delete the tests.\n\nThe reply:\n\nAnd here."
+                        )
+                    )
+                ),
+                named("line 41", of("you", "On line 1 of `a.rs`:\n\nGone.")),
             ]
         );
     }
