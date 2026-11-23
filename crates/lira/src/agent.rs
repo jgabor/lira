@@ -255,8 +255,20 @@ impl Data {
             // folder before it is complete. Another process holds the lock
             // only while it removes what an earlier process with the same
             // number left.
-            let Some(lock) = Lock::take(&folder).map_err(|error| failed(&folder, error))? else {
-                continue;
+            let lock = match Lock::take(&folder) {
+                Ok(Taken::Held(lock)) => lock,
+                Ok(Taken::Busy) => continue,
+                // A file system with no locks, such as NFS with no lock
+                // service. No other process can take the lock either, so
+                // none removes the folder. The next agent does not remove a
+                // folder that Lira left there.
+                Ok(Taken::Unlocked(lock)) => lock,
+                Err(error) => {
+                    return Err(format!(
+                        "Lira can't make the file `{}`: {error}",
+                        lock_file(&folder).display()
+                    ));
+                }
             };
             // The folder must be new: Lira removes it with all that is in it.
             match DirBuilder::new().mode(0o700).create(&folder) {
@@ -325,19 +337,34 @@ impl Drop for Data {
     }
 }
 
-/// A lock on the lock file of a data folder: `<folder>.lock`.
+/// The lock file of a data folder: `<folder>.lock`.
+fn lock_file(folder: &Path) -> PathBuf {
+    let mut path = folder.as_os_str().to_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// The open lock file of a data folder. Lira removes the lock file when it
+/// lets go of it.
 struct Lock {
     path: PathBuf,
     file: Option<File>,
 }
 
+/// What Lira found when it tried to take a lock.
+enum Taken {
+    /// Lira has the lock.
+    Held(Lock),
+    /// Another process holds the lock.
+    Busy,
+    /// The file system takes no lock. Nobody can hold one there.
+    Unlocked(Lock),
+}
+
 impl Lock {
-    /// Takes the lock of `folder`. It is `None` when another process holds
-    /// it.
-    fn take(folder: &Path) -> std::io::Result<Option<Lock>> {
-        let mut path = folder.as_os_str().to_os_string();
-        path.push(".lock");
-        let path = PathBuf::from(path);
+    /// Takes the lock of `folder`.
+    fn take(folder: &Path) -> std::io::Result<Taken> {
+        let path = lock_file(folder);
         let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -346,8 +373,13 @@ impl Lock {
             .open(&path)?;
         match file.try_lock() {
             Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Error(error)) => return Err(error),
+            Err(TryLockError::WouldBlock) => return Ok(Taken::Busy),
+            Err(TryLockError::Error(_)) => {
+                return Ok(Taken::Unlocked(Lock {
+                    path,
+                    file: Some(file),
+                }));
+            }
         }
         // Another process can remove the lock file after Lira opened it,
         // and before Lira took the lock. Then the lock is on a file that is
@@ -356,11 +388,11 @@ impl Lock {
             found.dev() == held.dev() && found.ino() == held.ino()
         };
         match (fs::symlink_metadata(&path), file.metadata()) {
-            (Ok(found), Ok(held)) if same(&found, &held) => Ok(Some(Lock {
+            (Ok(found), Ok(held)) if same(&found, &held) => Ok(Taken::Held(Lock {
                 path,
                 file: Some(file),
             })),
-            _ => Ok(None),
+            _ => Ok(Taken::Busy),
         }
     }
 
@@ -400,8 +432,12 @@ fn remove_left(above: &Path) {
     }
     for name in folders {
         let folder = above.join(name);
-        if let Ok(Some(mut lock)) = Lock::take(&folder) {
-            remove(&folder);
+        if let Ok(Taken::Held(mut lock)) = Lock::take(&folder) {
+            // A lock file can be there with no folder, and Lira removes
+            // only a folder, and not what a link names.
+            if fs::symlink_metadata(&folder).is_ok_and(|found| found.is_dir()) {
+                remove(&folder);
+            }
             lock.remove();
         }
     }
@@ -472,13 +508,21 @@ mod tests {
         // The lock of a folder that Lira left, and a lock with no folder.
         fs::write(above.join("1-1.lock"), "").unwrap();
         fs::write(above.join("1-2.lock"), "").unwrap();
+        // A lock file beside a file that is no data folder.
+        fs::write(above.join("file.lock"), "").unwrap();
+        fs::set_permissions(above.join("file"), fs::Permissions::from_mode(0o644)).unwrap();
 
         let held = Data::new_in(&above).unwrap();
         assert!(!left.exists());
         assert!(!closed.exists());
         assert!(!above.join("1-1.lock").exists());
         assert!(!above.join("1-2.lock").exists());
-        assert!(above.join("file").exists());
+        let mode = fs::metadata(above.join("file"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert!(!above.join("file.lock").exists());
         let lock = held.folder.with_extension("lock");
         assert!(lock.is_file());
         fs::set_permissions(&held.folder, fs::Permissions::from_mode(0o000)).unwrap();
