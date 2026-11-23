@@ -4759,8 +4759,11 @@ fn a_link_to_another_worktree_of_lira_in_the_place_of_the_old_worktree_is_not_us
         ],
     );
     std::os::unix::fs::symlink(&other, &old).unwrap();
-    let error = failed(&repository.continue_work());
-    assert!(error.contains("already there"), "{error}");
+    passed(&repository.continue_work());
+    // The new worktree is beside the link.
+    let new = PathBuf::from(format!("{}~2", old.display()));
+    assert_eq!(PathBuf::from(repository.kept("folder")), new);
+    assert_eq!(fs::read_link(&old).unwrap(), other);
     assert_eq!(git_ok(&other, &["branch", "--show-current"]), "other");
 }
 
@@ -5395,6 +5398,61 @@ fn a_folder_that_git_does_not_list_in_the_place_of_the_old_worktree_is_not_used(
     }
 }
 
+// spec(lira continue): When something that git does not list as a worktree is in the folder of the branch, the new worktree is that folder with `~2` at the end of its name, or with `~3` when that is there too, and so on.
+#[test]
+fn a_folder_that_git_does_not_list_in_the_folder_of_the_branch_gets_a_new_worktree_beside_it() {
+    // The old worktree is gone. In the folder of the branch is a folder
+    // with a `.git` file of its own and a file of an agent. With `taken`,
+    // the folder with `~2` is there too.
+    for (test, taken) in [("unlisted-beside", false), ("unlisted-beside-2", true)] {
+        let repository = Repository::stopped(test);
+        let branch = repository.pull_request_branch();
+        let old = PathBuf::from(repository.kept("folder"));
+        git_ok(
+            &repository.root,
+            &["worktree", "remove", "--force", old.to_str().unwrap()],
+        );
+        fs::create_dir_all(&old).unwrap();
+        let fake = repository.top.join("fake-git");
+        fs::write(old.join(".git"), format!("gitdir: {}\n", fake.display())).unwrap();
+        fs::write(old.join("notes.txt"), "mine\n").unwrap();
+        let data = repository.top.join("xdg").join("lira");
+        let second = Repository::worktrees(&data).join(format!("{branch}~2"));
+        if taken {
+            fs::create_dir_all(&second).unwrap();
+        }
+        let starts = repository.starts();
+        passed(&repository.continue_work());
+        assert!(repository.starts() > starts, "{test}");
+        let new = match taken {
+            false => second.clone(),
+            true => Repository::worktrees(&data).join(format!("{branch}~3")),
+        };
+        // The agent worked in the new worktree, on the branch.
+        assert_eq!(PathBuf::from(repository.kept("folder")), new, "{test}");
+        assert_eq!(repository.kept("branch"), branch, "{test}");
+        assert_eq!(git_ok(&new, &["branch", "--show-current"]), branch);
+        assert!(new.join("greeting.txt").is_file(), "{test}");
+        // The folder in the folder of the branch is as it was.
+        let mut names: Vec<_> = fs::read_dir(&old)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, [".git", "notes.txt"], "{test}");
+        if taken {
+            assert_eq!(fs::read_dir(&second).unwrap().count(), 0, "{test}");
+        }
+        // A second `lira continue` finds the new worktree.
+        program(
+            &repository.harness.join("agent"),
+            &format!("{START}reply 'I looked again.'\n"),
+        );
+        passed(&repository.continue_work());
+        assert_eq!(PathBuf::from(repository.kept("folder")), new, "{test}");
+    }
+}
+
 #[test]
 fn a_link_in_the_place_of_the_old_worktree_is_not_used() {
     // A link in the folder of the worktree names the repository of the
@@ -5407,8 +5465,11 @@ fn a_link_in_the_place_of_the_old_worktree_is_not_used() {
         &["worktree", "remove", "--force", old.to_str().unwrap()],
     );
     std::os::unix::fs::symlink(&repository.root, &old).unwrap();
-    let error = failed(&repository.continue_work());
-    assert!(error.contains("already there"), "{error}");
+    passed(&repository.continue_work());
+    // The new worktree is beside the link.
+    let new = PathBuf::from(format!("{}~2", old.display()));
+    assert_eq!(PathBuf::from(repository.kept("folder")), new);
+    assert_eq!(fs::read_link(&old).unwrap(), repository.root);
     assert_eq!(
         git_ok(&repository.root, &["branch", "--show-current"]),
         "main"

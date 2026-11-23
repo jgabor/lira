@@ -63,7 +63,7 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
     // folder and making the branch each work for one call only. So after
     // these two steps the folder and the branch are this call's own, and it
     // can remove them when a later step fails.
-    let place = place(data, &[&owner, &name], branch)?;
+    let place = place(data, &[&owner, &name], branch, false)?;
     if let Err(error) = git::add_branch(repository, branch, &newest.commit) {
         let _ = fs::remove_dir(&place.folder);
         return Err(error);
@@ -101,7 +101,8 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
 /// `data`, and a new one from the branch of the remote when it does not.
 /// `started_on` is the branch that the old worktree started on, when Lira
 /// knows it. The old worktree is in the folder of that branch, also when
-/// the agent gave the branch another name.
+/// the agent gave the branch another name. When something that git does
+/// not list is in the folder of the branch, a new worktree is beside it.
 /// A commit that the remote has on the branch, and that the worktree does
 /// not have, is taken first. Then the `setup` command runs in a new
 /// worktree. It returns the worktree, and the commit that the remote has on
@@ -194,7 +195,10 @@ pub fn continued(
                 )?;
                 folder
             } else {
-                let place = place(data, &[&owner, &name], branch)?;
+                // Something that git does not list can be in the folder of
+                // the branch. Lira leaves it as it is, and makes the new
+                // worktree beside it.
+                let place = place(data, &[&owner, &name], branch, true)?;
                 new_for(repository, place, branch, &on_remote, remote, &file)?
             }
         }
@@ -394,11 +398,13 @@ impl Place {
 }
 
 /// Makes the folder for the worktree of a branch, and the folders above it.
-/// The folder of the worktree must be new.
+/// The folder of the worktree must be new. With `beside`, when something is
+/// in the folder of the branch already, the folder is the first new one of
+/// `<branch>~2`, `<branch>~3`, and so on.
 ///
 /// Each folder between the data folder and the worktree must be a real
 /// folder. A link there could put the worktree in another place.
-fn place(data: &Path, repository: &[&str], branch: &str) -> Result<Place, String> {
+fn place(data: &Path, repository: &[&str], branch: &str, beside: bool) -> Result<Place, String> {
     let failed = |folder: &Path, error: std::io::Error| {
         format!("Lira can't make the folder `{}`: {error}", folder.display())
     };
@@ -426,18 +432,37 @@ fn place(data: &Path, repository: &[&str], branch: &str) -> Result<Place, String
         inside.push(part);
         if parts.peek().is_none() {
             // Making the folder fails when something has the name already.
-            return match fs::create_dir(&folder) {
-                Ok(()) => Ok(Place {
-                    folder,
-                    data: real,
-                    inside,
-                }),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(format!(
-                    "the folder `{}` is already there. A new worktree needs a new folder",
-                    folder.display()
-                )),
-                Err(error) => Err(failed(&folder, error)),
-            };
+            // git allows no `~` in a branch, so a folder with `~<number>`
+            // is never the folder of another branch.
+            let mut number = 1;
+            loop {
+                let (folder, inside) = match number {
+                    1 => (folder.clone(), inside.clone()),
+                    _ => (
+                        folder.with_file_name(format!("{part}~{number}")),
+                        inside.with_file_name(format!("{part}~{number}")),
+                    ),
+                };
+                match fs::create_dir(&folder) {
+                    Ok(()) => {
+                        return Ok(Place {
+                            folder,
+                            data: real,
+                            inside,
+                        });
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists && beside => {
+                        number += 1;
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        return Err(format!(
+                            "the folder `{}` is already there. A new worktree needs a new folder",
+                            folder.display()
+                        ));
+                    }
+                    Err(error) => return Err(failed(&folder, error)),
+                }
+            }
         }
         match folder.symlink_metadata() {
             Ok(found) if found.is_dir() => {}

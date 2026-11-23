@@ -255,6 +255,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
 - When the pull request is ready for review, it becomes a draft again.
 - The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
+- When something that git does not list as a worktree is in the folder of the branch, the new worktree is that folder with `~2` at the end of its name, or with `~3` when that is there too, and so on.
 - A commit that is on the remote and not in the worktree is taken first.
 - A commit that is in the old worktree and not on the remote is pushed with the work of the new agent.
 - When the old worktree is on another branch, or on no branch, Lira puts it back on the branch of the pull request.
