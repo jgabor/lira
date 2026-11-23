@@ -284,7 +284,7 @@ impl Harness {
         // with it.
         let mut guard = guard().map_err(|error| Error::Start {
             reason: format!(
-                "Lira can't start the process that guards the harness `{program}`. It is a `sh`, and it did not start: {error}"
+                "Lira can't start the process that guards the harness `{program}`. It is a `sh`, and {error}"
             ),
             program: program.clone(),
         })?;
@@ -934,8 +934,9 @@ impl Drop for Harness {
 /// own, so that Ctrl-C in the terminal does not reach it.
 ///
 /// The guard says that it is ready before Lira starts the harness. So a
-/// `sh` that starts and ends at once guards no harness.
-fn guard() -> std::io::Result<Child> {
+/// `sh` that starts and ends at once guards no harness. The error says what
+/// the `sh` did, in a sentence that starts after "It is a `sh`, and".
+fn guard() -> Result<Child, String> {
     let wait_then_stop = r#"echo ready
 IFS= read -r group || exit 0
 while IFS= read -r line; do :; done
@@ -946,7 +947,8 @@ kill -s KILL -- "-$group""#;
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
-        .spawn()?;
+        .spawn()
+        .map_err(|error| format!("it did not start: {error}"))?;
     let mut ready = String::new();
     let read =
         BufReader::new(guard.stdout.take().expect("the output is a pipe")).read_line(&mut ready);
@@ -955,9 +957,10 @@ kill -s KILL -- "-$group""#;
     }
     let _ = guard.kill();
     let _ = guard.wait();
-    Err(read
-        .err()
-        .unwrap_or_else(|| std::io::Error::other("it ended before it was ready")))
+    Err(match read {
+        Err(error) => format!("Lira can't read from it: {error}"),
+        Ok(_) => "it started, and it ended before it was ready".to_string(),
+    })
 }
 
 /// Writes each line that it gets to the input of a harness, on a thread of

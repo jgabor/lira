@@ -3887,13 +3887,16 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
 #[test]
 fn a_harness_whose_guard_ends_at_once_does_not_start() {
     // This `sh` starts, and ends before it reads its script.
-    no_guard("guard-ends", Some("#!/bin/sh\nexit 0\n"));
+    let error = no_guard("guard-ends", Some("#!/bin/sh\nexit 0\n"));
+    // The `sh` started, so the error does not say that it did not start.
+    assert!(!error.contains("did not start"), "{error}");
+    assert!(error.contains("ended"), "{error}");
 }
 
 /// Runs Lira with a `PATH` where `sh` is the script `sh`, or where there is
 /// no `sh` at all. Lira can't guard the harness, so the run fails, and Lira
-/// starts no harness.
-fn no_guard(test: &str, sh: Option<&str>) {
+/// starts no harness. It gives the error of Lira.
+fn no_guard(test: &str, sh: Option<&str>) -> String {
     let repository = Repository::new(test, CHECK, REPLY);
     // This harness needs no other program, and it answers nothing.
     program(
@@ -3956,6 +3959,7 @@ fn no_guard(test: &str, sh: Option<&str>) {
     assert!(Repository::has_no_worktree(
         &repository.top.join("xdg").join("lira")
     ));
+    error
 }
 
 #[test]
