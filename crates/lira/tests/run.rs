@@ -302,6 +302,20 @@ fn program(path: &Path, script: &str) {
     assert!(writer.wait().unwrap().success());
 }
 
+/// Makes a socket for a stand-in of the ssh agent at `socket`.
+///
+/// A path for a socket must be shorter than 108 bytes, and the folder of a
+/// test can be longer than that. So the socket is made through a link with
+/// a short path in `/tmp`, to the folder of the socket.
+fn ssh_agent(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
+    let link = Path::new("/tmp").join(format!("lira-{}-{test}", std::process::id()));
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(socket.parent().unwrap(), &link).unwrap();
+    let agent = std::os::unix::net::UnixListener::bind(link.join(socket.file_name().unwrap()));
+    fs::remove_file(&link).unwrap();
+    agent.unwrap()
+}
+
 impl Repository {
     /// A repository whose main branch has one commit, with this Lira file.
     /// The stand-in for the harness does `work` when the message for the
@@ -1469,7 +1483,7 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
         fs::write(folder.join("login"), "secret\n").unwrap();
     }
     let socket = home.join("s");
-    let _agent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let _agent = ssh_agent("logins", &socket);
     let output = repository
         .lira()
         .env("GH_CONFIG_DIR", &folders[0])
@@ -1534,7 +1548,7 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     let ssh = repository.top.join("home").join(".ssh");
     fs::create_dir_all(&ssh).unwrap();
     let socket = ssh.join("s");
-    let _agent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let _agent = ssh_agent("hidden-logins", &socket);
     let gh = Path::new("/tmp").join(format!("lira-test-{}", std::process::id()));
     fs::create_dir_all(gh.join("gh")).unwrap();
     fs::write(gh.join("gh").join("login"), "secret\n").unwrap();
