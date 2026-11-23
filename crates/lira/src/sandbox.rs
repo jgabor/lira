@@ -175,11 +175,14 @@ fn homes() -> Vec<PathBuf> {
 /// The runtime folder of the user, which `XDG_RUNTIME_DIR` names, has the
 /// sockets of the session bus and of the ssh agents of the keyring and of
 /// gpg-agent. It is in `/run` on most hosts, and the sandbox has its own
-/// `/run`. When it is not in `/run`, it is here.
+/// `/run`. When it is not in `/run`, it is here. A relative path names no
+/// runtime folder, as the XDG specification says.
 fn login_folders() -> Vec<PathBuf> {
     let mut folders = Vec::new();
-    if let Some(folder) = set("XDG_RUNTIME_DIR") {
-        folders.push(PathBuf::from(folder));
+    if let Some(folder) = set("XDG_RUNTIME_DIR").map(PathBuf::from)
+        && folder.is_absolute()
+    {
+        folders.push(folder);
     }
     if let Some(folder) = set("GH_CONFIG_DIR") {
         folders.push(PathBuf::from(folder));

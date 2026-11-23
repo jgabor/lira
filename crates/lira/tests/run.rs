@@ -2034,6 +2034,24 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
 }
 
 #[test]
+fn a_relative_runtime_folder_hides_nothing() {
+    // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
+    // in the repository, so `.` is the repository, and the worktree of the
+    // agent needs its `.git`.
+    let work = r#"git status --short > "$here/status"
+"#;
+    let repository = Repository::new("relative-runtime", CHECK, &format!("{work}{WORK}"));
+    let output = repository
+        .lira()
+        .env("XDG_RUNTIME_DIR", ".")
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("status"), "");
+}
+
+#[test]
 fn an_ssh_agent_of_dev_null_leaves_dev_null_as_it_is() {
     // A host turns the ssh agent off with `SSH_AUTH_SOCK=/dev/null`. The
     // sandbox has its own `/dev`, so `/dev/null` takes what a program writes.
