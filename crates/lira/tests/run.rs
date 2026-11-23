@@ -4715,6 +4715,27 @@ fn it_is_an_error_when_the_worktree_and_the_remote_both_have_their_own_commits()
     }
 }
 
+// spec(lira continue): It is an error when the remote no longer has the branch of the pull request.
+#[test]
+fn it_is_an_error_when_the_remote_no_longer_has_the_branch() {
+    let repository = Repository::stopped("branch-gone");
+    let branch = repository.pull_request_branch();
+    let starts = repository.starts();
+    let old = PathBuf::from(repository.kept("folder"));
+    let head = git_ok(&old, &["rev-parse", "HEAD"]);
+    git_ok(&repository.remote, &["branch", "--quiet", "-D", &branch]);
+    let error = failed(&repository.continue_work());
+    assert!(error.contains(&format!("`{branch}`")), "{error}");
+    assert!(error.contains("can't get the branch"), "{error}");
+    assert_eq!(repository.starts(), starts);
+    assert_eq!(repository.on_remote(&branch), None);
+    assert_eq!(git_ok(&old, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn a_link_to_another_worktree_of_lira_in_the_place_of_the_old_worktree_is_not_used() {
     let repository = Repository::stopped("continue-link-inside");
@@ -4744,6 +4765,8 @@ fn a_link_to_another_worktree_of_lira_in_the_place_of_the_old_worktree_is_not_us
 }
 
 // spec(lira continue): It does not need the label: you can remove it yourself on GitHub.
+// spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
+// spec(lira continue): When you wrote no answer after a stop, the agent is told to try again.
 #[test]
 fn lira_continue_does_not_need_the_label() {
     let repository = Repository::stopped("no-label-needed");
@@ -4756,6 +4779,8 @@ fn lira_continue_does_not_need_the_label() {
     // With no answer, the agent is told to try again.
     let message = repository.message();
     assert!(message.contains("The user wrote no answer"), "{message}");
+    assert!(message.contains("read its newest commits"), "{message}");
+    assert!(message.contains("Then try again."), "{message}");
 }
 
 // spec(lira continue): When the pull request is ready for review, it becomes a draft again.
@@ -4832,6 +4857,29 @@ fn the_agent_works_in_the_old_worktree_or_in_a_new_one_with_the_commits_of_the_r
     }
 }
 
+// spec(lira continue): A commit that is in the old worktree and not on the remote is pushed with the work of the new agent.
+#[test]
+fn a_commit_that_only_the_old_worktree_has_is_pushed_with_the_new_work() {
+    let repository = Repository::stopped("worktree-ahead");
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    fs::write(old.join("mine.txt"), "mine\n").unwrap();
+    git_ok(&old, &["add", "--all"]);
+    git_ok(
+        &old,
+        &["commit", "--quiet", "--message", "A commit of the worktree"],
+    );
+    let mine = git_ok(&old, &["rev-parse", "HEAD"]);
+    assert_ne!(repository.on_remote(&branch), Some(mine.clone()));
+    passed(&repository.continue_work());
+    assert_eq!(PathBuf::from(repository.kept("folder")), old);
+    assert_eq!(git_ok(&old, &["rev-parse", "HEAD~1"]), mine);
+    assert_eq!(
+        repository.on_remote(&branch),
+        Some(git_ok(&old, &["rev-parse", "HEAD"]))
+    );
+}
+
 // spec(lira continue): Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again.
 #[test]
 fn the_check_runs_again_with_its_limit_at_0() {
@@ -4896,14 +4944,23 @@ fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
     assert_eq!(repository.calls("pr ready"), Vec::<String>::new());
 }
 
+// spec(lira continue): When the old worktree is on another branch, or on no branch, Lira puts it back on the branch of the pull request.
 #[test]
-fn an_old_worktree_on_no_branch_goes_back_to_the_branch() {
-    // The worktree is on no branch, and its branch can be gone too.
-    for (test, branch_too) in [("continue-detached", false), ("continue-no-branch", true)] {
+fn an_old_worktree_on_another_branch_or_on_no_branch_goes_back_to_the_branch() {
+    // The worktree is on another branch, or on no branch, and its branch
+    // can be gone too.
+    for (test, other, branch_too) in [
+        ("continue-other-branch", true, false),
+        ("continue-detached", false, false),
+        ("continue-no-branch", false, true),
+    ] {
         let repository = Repository::stopped(test);
         let branch = repository.pull_request_branch();
         let old = PathBuf::from(repository.kept("folder"));
-        git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+        match other {
+            true => git_ok(&old, &["checkout", "--quiet", "-b", "other", "HEAD~1"]),
+            false => git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]),
+        };
         if branch_too {
             git_ok(&repository.root, &["branch", "--quiet", "-D", &branch]);
         }
@@ -5130,6 +5187,7 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     assert!(earlier < newest, "{review}");
 }
 
+// spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
 #[test]
 fn after_a_pass_and_no_new_comment_the_agent_is_not_told_to_try_again() {
     let repository = Repository::stopped("continue-no-new-comment");
@@ -5215,14 +5273,30 @@ fn a_continue_that_passes_and_can_not_write_its_comment_still_passes() {
     );
 }
 
+// spec(lira continue): When the branch is in no worktree whose folder is there, Lira removes from `git worktree list` each worktree of Lira whose folder is gone.
+// spec(lira continue): A worktree of yours stays in `git worktree list`, also when its folder is gone.
 #[test]
 fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
     // The folder of the old worktree went away without git, and so did
     // the folder of a worktree of yours, such as one on a drive that is not
-    // there now.
+    // there now, and the folder of another worktree of Lira.
     let repository = Repository::stopped("yours-gone");
     let old = PathBuf::from(repository.kept("folder"));
     fs::remove_dir_all(&old).unwrap();
+    let data = repository.top.join("xdg").join("lira");
+    let other = Repository::worktrees(&data).join("other");
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "other",
+            other.to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(&other).unwrap();
     let mine = repository.top.join("drive").join("mine");
     git_ok(
         &repository.root,
@@ -5240,6 +5314,8 @@ fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
     assert_eq!(PathBuf::from(repository.kept("folder")), old);
     let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
     assert!(listed.contains(mine.to_str().unwrap()), "{listed}");
+    assert!(!listed.contains(other.to_str().unwrap()), "{listed}");
+    assert!(listed.contains(old.to_str().unwrap()), "{listed}");
 }
 
 // spec(lira continue): The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
@@ -5372,6 +5448,39 @@ done
             "api repos/{owner}/{repo}/issues/7/labels --method POST -f labels[]=needs:answer"
         ]
     );
+}
+
+// spec(lira continue): Under `Decisions`, the progress note has only what the new agent wrote.
+#[test]
+fn the_progress_note_has_only_what_the_new_agent_wrote() {
+    let repository = Repository::stopped("continue-decisions");
+    let note = repository.gh("edited");
+    let decisions = note.split("## Decisions").nth(1).unwrap();
+    assert!(decisions.contains("I do not agree."), "{note}");
+    repository.reviewer("reply 'It is wrong again.\\n\\nReview: findings'\n");
+    program(
+        &repository.harness.join("agent"),
+        &format!(
+            "{START}{}",
+            r#"commit answer 'Use the answer'
+reply 'I used the answer.'
+while :; do
+  next
+  reply 'The answer does not change my mind.'
+done
+"#
+        ),
+    );
+    failed(&repository.continue_work());
+    let note = repository.gh("edited");
+    let decisions = note.split("## Decisions").nth(1).unwrap();
+    assert!(
+        decisions.contains("The answer does not change my mind."),
+        "{note}"
+    );
+    for old in ["I made the file.", "I do not agree."] {
+        assert!(!decisions.contains(old), "{note}");
+    }
 }
 
 // spec(lira continue): It is an error when the pull request is not open, or has no comment with the request.
