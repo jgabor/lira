@@ -240,7 +240,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - `lira run` writes the request as the first comment of the draft pull request.
 - `lira run` fails before an agent starts when the request is too long for a comment on GitHub.
 - `lira continue <number>` starts a new agent on the branch of that pull request. The agent gets the request, what stopped the work, and your answer.
-- Your answer is each comment that the login of `gh` wrote after the last comment of Lira, and that Lira did not write.
+- Your answer is each comment that the login of `gh` wrote after the comments that the last comment of Lira says its agent read, and that Lira did not write.
+- A comment that you write while the agent works is part of your answer for the next `lira continue`.
 - A review with a text, and a comment on a line of the change, are comments too, in the order of their time.
 - A comment on a line in a review has the time when the review was sent.
 - A review that is not sent yet is not part of your answer.
