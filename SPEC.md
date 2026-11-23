@@ -248,12 +248,14 @@ is success, 1 is a failure, and 2 is bad usage.
 - After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 - After a `lira continue` that fails with no question, the next one gets the same question and the same answer again.
 - When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.
+- When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
 - When the pull request is ready for review, it becomes a draft again.
 - The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
 - A commit that is on the remote and not in the worktree is taken first.
 - The new agent has a new conversation, and it runs under the same rules as an agent of `lira run`.
 - Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again. The work can stop and ask again.
 - The Reviewer gets the request and your answer.
+- The Reviewer also gets each comment that you wrote after the request and before your answer.
 - It is an error when the pull request is not open, or has no comment with the request.
 - It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
 - It is an error when the worktree and the remote both have commits on the branch that the other does not have.

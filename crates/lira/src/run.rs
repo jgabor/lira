@@ -99,7 +99,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         agent,
         sandbox,
         pull_request: PullRequest::new(&made, request)?,
-        continued: false,
+        continued: None,
         said: String::new(),
         outputs: 0,
     };
@@ -160,19 +160,31 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
             format!("Lira could not remove `{NEEDS_ANSWER}`: {error}\nThe worktree {place} stays")
         })?;
     }
-    // A Reviewer reads the change for the request and your answer.
-    let request = match read.answer.is_empty() {
-        true => read.request.clone(),
-        false => format!(
-            "{}\n\nThe answer on the pull request:\n\n{}",
-            read.request,
-            read.answer
-                .iter()
-                .map(|answer| quote(answer))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
+    // A Reviewer reads the change for the request and your answer, and
+    // for the comments of yours before it. The branch has the work for them
+    // too.
+    let quotes = |texts: &[String]| {
+        texts
+            .iter()
+            .map(|text| quote(text))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
+    let mut request = read.request.clone();
+    if !read.earlier.is_empty() {
+        let _ = write!(
+            request,
+            "\n\nThe earlier comments of the user on the pull request:\n\n{}",
+            quotes(&read.earlier)
+        );
+    }
+    if !read.answer.is_empty() {
+        let _ = write!(
+            request,
+            "\n\nThe answer on the pull request:\n\n{}",
+            quotes(&read.answer)
+        );
+    }
     let run = Run {
         started: folder,
         made: &made,
@@ -180,7 +192,10 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         agent,
         sandbox,
         pull_request,
-        continued: true,
+        continued: Some(Continued {
+            login,
+            answers: read.answer.len(),
+        }),
         said: String::new(),
         outputs: 0,
     };
@@ -197,6 +212,7 @@ fn continuation(branch: &str, read: &comment::Read) -> String {
         (None, false) => "Lira did not write what stopped the work.\n".to_string(),
     };
     let answer = match read.answer.is_empty() {
+        true if read.passed => "The user wrote no answer. The user can have pushed commits to the branch, so read its newest commits, and continue the work.\n".to_string(),
         true => "The user wrote no answer. The user can have pushed commits to the branch, so read its newest commits. Then try again.\n".to_string(),
         false => read.answer.iter().map(|answer| quote(answer)).collect::<Vec<_>>().join("\n"),
     };
@@ -240,11 +256,11 @@ impl Run<'_> {
         // A later `lira continue` reads only what you wrote after this
         // comment. The work passed already, so a failure here does not
         // change that.
-        if self.continued
-            && let Err(error) = self.pull_request.passed()
+        if let Some(continued) = &self.continued
+            && let Err(error) = self.write_passed(continued)
         {
             eprintln!(
-                "lira: Lira could not write on the pull request that the work passed: {error}\nSo the next `lira continue` gets the old question and the old answer again"
+                "lira: Lira did not write on the pull request that the work passed: {error}\nSo the next `lira continue` gets the old question and the old answer again"
             );
         }
         eprintln!("{}", wrote(&self.said));
@@ -352,8 +368,9 @@ struct Run<'a> {
     /// the code of the change, and that is code of the agent.
     sandbox: Sandbox,
     pull_request: PullRequest<'a>,
-    /// If the run is of `lira continue`.
-    continued: bool,
+    /// What the agent of `lira continue` got, when the run is of `lira
+    /// continue`.
+    continued: Option<Continued>,
     /// The newest reply of the agent.
     said: String,
     /// How many files Lira wrote with the whole output of a failed check.
@@ -362,7 +379,34 @@ struct Run<'a> {
     outputs: usize,
 }
 
+/// What the agent of `lira continue` got from the comments.
+struct Continued {
+    /// The login of `gh`.
+    login: String,
+    /// How many comments your answer had.
+    answers: usize,
+}
+
 impl Run<'_> {
+    /// Writes the comment that the work of `lira continue` passed. Lira
+    /// reads the comments again first. When you wrote a comment while the
+    /// agent worked, no agent got it, so Lira writes no such comment: then
+    /// the next `lira continue` gets your comment too.
+    fn write_passed(&self, continued: &Continued) -> Result<(), String> {
+        let address = self.address()?;
+        let comments = github::comments(self.started, &address)?;
+        let answers = comment::read(&comments, &continued.login)
+            .map(|read| read.answer.len())
+            .unwrap_or_default();
+        if answers > continued.answers {
+            return Err(
+                "you wrote a comment while the agent worked, and the agent did not get it"
+                    .to_string(),
+            );
+        }
+        self.pull_request.passed()
+    }
+
     /// The steps after the start: the work of the agent, the check and the
     /// review, until the check and a Reviewer pass the change. It returns
     /// the address of the pull request.
@@ -598,7 +642,7 @@ impl Run<'_> {
         // again.
         let waits = match question {
             Some(question) => self.pull_request.ask(&question),
-            None if self.continued => self.pull_request.wait(),
+            None if self.continued.is_some() => self.pull_request.wait(),
             None => Ok(()),
         };
         match waits {

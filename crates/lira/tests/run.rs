@@ -213,6 +213,10 @@ if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/labels$'; then
 fi
 if [ "$1 $2" = "pr ready" ]; then
   [ -n "$ORDER" ] && echo ready >> "$ORDER"
+  # You write a comment of one line while the agent works.
+  if [ -e "$here/comment-at-ready" ]; then
+    printf '["2026-11-01T10:00:00Z","you","%s"]\n' "$(cat "$here/comment-at-ready")" >> "$here/listed"
+  fi
   cp "$here/edited" "$here/description-when-ready" 2>/dev/null || cp "$here/created" "$here/description-when-ready"
   exit 0
 fi
@@ -4763,6 +4767,7 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
 // spec(lira continue): When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
 // spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after it.
 // spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
+// spec(lira continue): The Reviewer also gets each comment that you wrote after the request and before your answer.
 #[test]
 fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     let repository = Repository::stopped("second-continue");
@@ -4779,6 +4784,7 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
         &repository.harness.join("agent"),
         &format!("{START}commit louder 'Make it louder'\nreply 'It is louder.'\n"),
     );
+    let starts = repository.starts();
     passed(&repository.continue_work());
     let message = repository.message();
     assert!(message.contains("Make it louder."), "{message}");
@@ -4786,6 +4792,58 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     assert!(!message.contains("3 rounds of review"), "{message}");
     assert!(message.contains("sent it back"), "{message}");
     assert_eq!(repository.calls("pr comment").len(), 4);
+    // The Reviewer reads the change for the request and all your answers,
+    // the earlier one first.
+    let review = repository.first_message(starts + 2);
+    let earlier = review.find(ANSWER).expect(&review);
+    let newest = review.find("Make it louder.").expect(&review);
+    assert!(earlier < newest, "{review}");
+}
+
+#[test]
+fn after_a_pass_and_no_new_comment_the_agent_is_not_told_to_try_again() {
+    let repository = Repository::stopped("continue-no-new-comment");
+    repository.comment("you", ANSWER);
+    passed(&repository.continue_work());
+    // You send the pull request back with commits, and with no comment.
+    repository.view(false, &[]);
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}commit quieter 'Make it quieter'\nreply 'It is quieter.'\n"),
+    );
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(message.contains("The user wrote no answer."), "{message}");
+    assert!(message.contains("newest commits"), "{message}");
+    assert!(!message.contains("try again"), "{message}");
+}
+
+// spec(lira continue): When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
+#[test]
+fn a_comment_that_you_wrote_while_the_agent_worked_is_not_lost() {
+    let repository = Repository::stopped("continue-comment-meanwhile");
+    repository.comment("you", ANSWER);
+    let meanwhile = repository.shared.join("bin").join("comment-at-ready");
+    fs::write(&meanwhile, "Also rename the file.").unwrap();
+    let output = repository.continue_work();
+    passed(&output);
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("you wrote a comment"), "{said}");
+    // The request and the question, and no comment that the work passed.
+    assert_eq!(repository.calls("pr comment").len(), 2);
+    // The next `lira continue` gets the old question, the old answer, and
+    // the comment that you wrote while the agent worked.
+    fs::remove_file(&meanwhile).unwrap();
+    repository.view(false, &[]);
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}commit renamed 'Rename the file'\nreply 'I renamed it.'\n"),
+    );
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(message.contains("3 rounds of review"), "{message}");
+    assert!(message.contains(ANSWER), "{message}");
+    assert!(message.contains("Also rename the file."), "{message}");
 }
 
 // spec(lira continue): After a `lira continue` that fails with no question, the next one gets the same question and the same answer again.
@@ -4819,7 +4877,7 @@ fn a_continue_that_passes_and_can_not_write_its_comment_still_passes() {
     let output = repository.continue_work();
     passed(&output);
     let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("could not write"), "{said}");
+    assert!(said.contains("did not write"), "{said}");
     assert!(said.contains("writes no comment"), "{said}");
     assert_eq!(
         repository.calls("pr ready"),

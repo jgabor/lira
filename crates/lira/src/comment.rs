@@ -89,6 +89,9 @@ pub struct Read {
     pub answer: Vec<String>,
     /// Each comment of someone else after the last comment of Lira.
     pub others: Vec<Comment>,
+    /// Each comment of `login` after the request and before the last
+    /// comment of Lira, that Lira did not write.
+    pub earlier: Vec<String>,
 }
 
 /// Reads the request, what stopped the work, and your answer from the
@@ -97,11 +100,17 @@ pub struct Read {
 /// `None` when no comment has the request.
 pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
     let of_lira = |comment: &Comment| comment.author == login && marker(&comment.body).is_some();
-    let (request, started_on) = comments
+    let (first, (request, started_on)) = comments
         .iter()
-        .filter(|comment| comment.author == login)
-        .find_map(|comment| request_in(&comment.body))?;
+        .enumerate()
+        .filter(|(_, comment)| comment.author == login)
+        .find_map(|(at, comment)| Some((at, request_in(&comment.body)?)))?;
     let last = comments.iter().rposition(of_lira)?;
+    let earlier = comments[first + 1..last.max(first + 1)]
+        .iter()
+        .filter(|comment| comment.author == login && !of_lira(comment))
+        .map(|comment| comment.body.trim().to_string())
+        .collect();
     let (stopped, passed) = match marker(&comments[last].body) {
         Some((QUESTION, rest)) => (Some(rest.trim().to_string()), false),
         Some((PASSED, _)) => (None, true),
@@ -125,6 +134,7 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
         passed,
         answer,
         others,
+        earlier,
     })
 }
 
@@ -246,6 +256,7 @@ mod tests {
         assert_eq!(read.stopped, None);
         assert!(read.passed);
         assert_eq!(read.answer, ["Now make it louder."]);
+        assert_eq!(read.earlier, ["Do it in another way."]);
     }
 
     #[test]
