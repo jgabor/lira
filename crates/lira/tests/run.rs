@@ -5187,6 +5187,7 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     assert!(earlier < newest, "{review}");
 }
 
+// spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
 #[test]
 fn after_a_pass_and_no_new_comment_the_agent_is_not_told_to_try_again() {
     let repository = Repository::stopped("continue-no-new-comment");
