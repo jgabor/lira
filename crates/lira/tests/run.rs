@@ -968,6 +968,32 @@ ls -A /run > "$here/run-files"
     );
 }
 
+// spec(Steps): An agent works only in its own worktree.
+#[test]
+fn an_agent_sees_no_process_of_the_host() {
+    // With a setuid `bwrap`, the sandbox has no user namespace of its own.
+    // Then `/proc/<number>/root` of a process of the host would show the
+    // files of the host, with the logins, and the agent could change them.
+    // The agent writes the command line of each process that it sees.
+    let work = r#"for process in /proc/[0-9]*; do
+  tr '\0' ' ' < "$process/cmdline" 2>/dev/null; echo
+done > "$here/processes"
+"#;
+    let repository = Repository::new("processes", CHECK, &format!("{work}{WORK}"));
+    passed(&repository.run());
+    let seen = repository.kept("processes");
+    // The agent sees its harness, and no process outside the sandbox: not
+    // Lira, not this test, and not the first process of the host.
+    let harness = repository.harness.join("agent");
+    assert!(seen.contains(harness.to_str().unwrap()), "{seen}");
+    assert!(!seen.contains(env!("CARGO_BIN_EXE_lira")), "{seen}");
+    let test = std::env::current_exe().unwrap();
+    assert!(!seen.contains(test.to_str().unwrap()), "{seen}");
+    let first = fs::read("/proc/1/cmdline").unwrap();
+    let first = String::from_utf8_lossy(&first).replace('\0', " ");
+    assert!(!seen.lines().any(|seen| seen == first), "{seen}");
+}
+
 #[test]
 fn the_hooks_and_the_configuration_of_git_stay_as_they_are() {
     let work = r#"common="$(git rev-parse --path-format=absolute --git-common-dir)"
