@@ -4529,7 +4529,8 @@ reply 'I repaired it.'
     repository.reviewer("echo review >> \"$here/../order\"\nreply 'Review: pass'\n");
     fs::remove_file(repository.shared.join("order")).unwrap();
     passed(&repository.continue_work());
-    assert_eq!(repository.order(), "check check check review ready");
+    // The comment that the work passed comes after the pull request is ready.
+    assert_eq!(repository.order(), "check check check review ready comment");
     assert!(
         repository
             .kept("second-message")
@@ -4753,6 +4754,56 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
         // nothing.
         assert_eq!(repository.calls("pr comment").len(), 2, "{test}");
     }
+}
+
+// spec(lira continue): When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
+// spec(lira continue): A second `lira continue` gets only the answer that you wrote after the first.
+// spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
+#[test]
+fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
+    let repository = Repository::stopped("second-continue");
+    repository.comment("you", ANSWER);
+    passed(&repository.continue_work());
+    // The request, the question, and the comment that the work passed.
+    assert_eq!(repository.calls("pr comment").len(), 3);
+    let comment = repository.gh("commented");
+    assert!(comment.contains("passed the change"), "{comment}");
+    // You send the pull request back with a new answer.
+    repository.view(false, &[]);
+    repository.comment("you", "Make it louder.");
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}commit louder 'Make it louder'\nreply 'It is louder.'\n"),
+    );
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(message.contains("Make it louder."), "{message}");
+    assert!(!message.contains(ANSWER), "{message}");
+    assert!(!message.contains("3 rounds of review"), "{message}");
+    assert!(message.contains("sent it back"), "{message}");
+    assert_eq!(repository.calls("pr comment").len(), 4);
+}
+
+// spec(lira continue): After a `lira continue` that fails, the next one gets the same question and the same answer again.
+#[test]
+fn after_a_continue_that_fails_the_next_gets_the_question_and_the_answer_again() {
+    let repository = Repository::stopped("continue-again");
+    repository.comment("you", ANSWER);
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}exit 9\n"),
+    );
+    failed(&repository.continue_work());
+    // The continue that failed wrote no comment.
+    assert_eq!(repository.calls("pr comment").len(), 2);
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{CONTINUE}"),
+    );
+    passed(&repository.continue_work());
+    let message = repository.message();
+    assert!(message.contains("3 rounds of review"), "{message}");
+    assert!(message.contains(ANSWER), "{message}");
 }
 
 #[test]

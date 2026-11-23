@@ -191,9 +191,10 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
 /// with the request, what stopped the work, your answer, and the comments
 /// of other people.
 fn continuation(branch: &str, read: &comment::Read) -> String {
-    let stopped = match &read.stopped {
-        Some(stopped) => quote(stopped),
-        None => "Lira did not write what stopped the work.\n".to_string(),
+    let stopped = match (&read.stopped, read.passed) {
+        (Some(stopped), _) => quote(stopped),
+        (None, true) => "Nothing stopped the work. The check and a Reviewer passed the change, and the pull request was ready for review. Then the user sent it back with the answer below.\n".to_string(),
+        (None, false) => "Lira did not write what stopped the work.\n".to_string(),
     };
     let answer = match read.answer.is_empty() {
         true => "The user wrote no answer. The user can have pushed commits to the branch, so read its newest commits. Then try again.\n".to_string(),
@@ -236,6 +237,16 @@ impl Run<'_> {
         eprintln!(
             "lira: the check and a Reviewer passed the change, and the pull request is ready for review. The change is on the branch `{branch}`, and its worktree is {place}"
         );
+        // A later `lira continue` reads only what you wrote after this
+        // comment. The work passed already, so a failure here does not
+        // change that.
+        if self.continued
+            && let Err(error) = self.pull_request.passed()
+        {
+            eprintln!(
+                "lira: Lira could not write on the pull request that the work passed: {error}\nSo the next `lira continue` gets the old question and the old answer again"
+            );
+        }
         eprintln!("{}", wrote(&self.said));
         println!("{address}");
         Ok(())

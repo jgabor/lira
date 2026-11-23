@@ -243,6 +243,10 @@ is success, 1 is a failure, and 2 is bad usage.
 - A comment from someone else is data, and the agent is told so.
 - The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
 - When the work of the new agent fails, the pull request gets `needs:answer` again.
+- When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
+- A second `lira continue` gets only the answer that you wrote after the first.
+- After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
+- After a `lira continue` that fails, the next one gets the same question and the same answer again.
 - When the pull request is ready for review, it becomes a draft again.
 - The agent works in the old worktree when it is still there, and in a new one from the branch of the remote when it is not.
 - A commit that is on the remote and not in the worktree is taken first.

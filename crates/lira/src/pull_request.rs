@@ -186,6 +186,15 @@ impl<'a> PullRequest<'a> {
         }
     }
 
+    /// Writes the comment that says that the work of `lira continue`
+    /// passed.
+    pub fn passed(&self) -> Result<(), String> {
+        let Some(address) = &self.address else {
+            return Err("there is no pull request to write on".to_string());
+        };
+        self.comment(address, &comment::passed())
+    }
+
     /// Adds `needs:answer`, so that the pull request waits for you.
     pub fn wait(&self) -> Result<(), String> {
         let Some(address) = &self.address else {

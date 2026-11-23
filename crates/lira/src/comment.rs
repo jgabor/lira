@@ -11,6 +11,10 @@ const REQUEST: &str = "<!-- lira request -->";
 /// The first line of a comment that says what stops the work.
 const QUESTION: &str = "<!-- lira question -->";
 
+/// The first line of the comment that says that the work of `lira
+/// continue` passed.
+const PASSED: &str = "<!-- lira passed -->";
+
 /// The start and the end of the line, in the comment with the request,
 /// that names the branch that the worktree started on. GitHub does not
 /// show that line.
@@ -59,6 +63,15 @@ pub fn question(question: &str) -> String {
     format!("{QUESTION}\n{question}")
 }
 
+/// The comment that says that the check and a Reviewer passed the change
+/// after your answer. A later `lira continue` reads only what you wrote
+/// after it.
+pub fn passed() -> String {
+    format!(
+        "{PASSED}\nThe check and a Reviewer passed the change after your answer, and the pull request is ready for review."
+    )
+}
+
 /// What `lira continue` reads from the comments of a pull request.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Read {
@@ -67,8 +80,10 @@ pub struct Read {
     /// The branch that the worktree started on, when that comment names
     /// it.
     pub started_on: Option<String>,
-    /// What the last comment of Lira says, when it is not the request.
+    /// What the last comment of Lira says, when it is a question.
     pub stopped: Option<String>,
+    /// If the last comment of Lira says that the work passed.
+    pub passed: bool,
     /// Your answer: each comment of `login` after the last comment of
     /// Lira, that Lira did not write.
     pub answer: Vec<String>,
@@ -87,9 +102,10 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
         .filter(|comment| comment.author == login)
         .find_map(|comment| request_in(&comment.body))?;
     let last = comments.iter().rposition(of_lira)?;
-    let stopped = match marker(&comments[last].body) {
-        Some((QUESTION, rest)) => Some(rest.trim().to_string()),
-        _ => None,
+    let (stopped, passed) = match marker(&comments[last].body) {
+        Some((QUESTION, rest)) => (Some(rest.trim().to_string()), false),
+        Some((PASSED, _)) => (None, true),
+        _ => (None, false),
     };
     let after = &comments[last + 1..];
     let answer = after
@@ -106,6 +122,7 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
         request,
         started_on,
         stopped,
+        passed,
         answer,
         others,
     })
@@ -115,7 +132,7 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
 /// that line.
 fn marker(body: &str) -> Option<(&'static str, &str)> {
     let (first, rest) = body.split_once('\n').unwrap_or((body, ""));
-    [REQUEST, QUESTION]
+    [REQUEST, QUESTION, PASSED]
         .into_iter()
         .find(|marker| first.trim_end() == *marker)
         .map(|marker| (marker, rest))
@@ -213,6 +230,22 @@ mod tests {
         assert_eq!(read.stopped.as_deref(), Some("The check failed."));
         assert_eq!(read.answer, ["Do it in another way.", "And test it."]);
         assert_eq!(read.others, [comments[5].clone()]);
+    }
+
+    #[test]
+    fn the_answer_follows_the_comment_that_the_work_passed() {
+        let comments = [
+            of("you", &request("Do it.", BRANCH)),
+            of("you", &question("The check failed.")),
+            of("you", "Do it in another way."),
+            of("you", &passed()),
+            of("you", "Now make it louder."),
+        ];
+        let read = read(&comments, "you").unwrap();
+        assert_eq!(read.request, "Do it.");
+        assert_eq!(read.stopped, None);
+        assert!(read.passed);
+        assert_eq!(read.answer, ["Now make it louder."]);
     }
 
     #[test]
