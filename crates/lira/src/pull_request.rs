@@ -169,9 +169,8 @@ impl<'a> PullRequest<'a> {
         let Some(address) = &self.address else {
             return Err("there is no pull request to write the question on".to_string());
         };
-        let folder = &self.worktree.folder;
         let commented = self.comment(address, &comment::question(question));
-        let labeled = github::add_label(folder, address, NEEDS_ANSWER);
+        let labeled = self.wait();
         let mut problems = Vec::new();
         if let Err(error) = commented {
             problems.push(format!(
@@ -179,14 +178,24 @@ impl<'a> PullRequest<'a> {
             ));
         }
         if let Err(error) = labeled {
-            problems.push(format!(
-                "Lira could not add `{NEEDS_ANSWER}` to the pull request: {error}"
-            ));
+            problems.push(error);
         }
         match problems.is_empty() {
             true => Ok(()),
             false => Err(problems.join("\n")),
         }
+    }
+
+    /// Adds `needs:answer`, so that the pull request waits for you.
+    pub fn wait(&self) -> Result<(), String> {
+        let Some(address) = &self.address else {
+            return Err(format!(
+                "there is no pull request to add `{NEEDS_ANSWER}` to"
+            ));
+        };
+        github::add_label(&self.worktree.folder, address, NEEDS_ANSWER).map_err(|error| {
+            format!("Lira could not add `{NEEDS_ANSWER}` to the pull request: {error}")
+        })
     }
 
     /// Writes a comment on the pull request at `address`.

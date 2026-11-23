@@ -4180,6 +4180,54 @@ fn a_pull_request_that_can_not_become_a_draft_keeps_needs_answer() {
     );
 }
 
+// spec(lira continue): When the work of the new agent fails, the pull request gets `needs:answer` again.
+#[test]
+fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
+    // The harness ends with an error while the agent works. And the remote
+    // takes no push, after you removed the label yourself.
+    for (test, labels) in [
+        ("continue-harness-ends", &["needs:answer"][..]),
+        ("continue-no-push", &[][..]),
+    ] {
+        let repository = Repository::stopped(test);
+        repository.view(true, labels);
+        let error = match labels.is_empty() {
+            false => {
+                program(
+                    &repository.harness.join("agent"),
+                    &format!("{START}exit 9\n"),
+                );
+                failed(&repository.continue_work())
+            }
+            true => {
+                program(
+                    &repository.remote.join("hooks").join("pre-receive"),
+                    "#!/bin/sh\necho 'this remote takes no push' >&2\nexit 1\n",
+                );
+                let error = failed(&repository.continue_work());
+                assert!(error.contains("this remote takes no push"), "{error}");
+                error
+            }
+        };
+        assert!(error.contains(ADDRESS), "{error}");
+        // The first run added the label, and this run adds it again.
+        let add = "api repos/{owner}/{repo}/issues/7/labels --method POST -f labels[]=needs:answer";
+        let remove = "api repos/{owner}/{repo}/issues/7/labels/needs:answer --method DELETE";
+        let expected = match labels.is_empty() {
+            false => vec![add, remove, add],
+            true => vec![add, add],
+        };
+        assert_eq!(
+            repository.calls("api repos/{owner}/{repo}/issues/7/labels"),
+            expected,
+            "{test}"
+        );
+        // The first run stopped and asked one time, and this run asked
+        // nothing.
+        assert_eq!(repository.calls("pr comment").len(), 2, "{test}");
+    }
+}
+
 #[test]
 fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
     // The folder of the old worktree went away without git, and so did
