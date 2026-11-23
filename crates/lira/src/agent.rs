@@ -397,12 +397,15 @@ impl Lock {
         let same = |found: &fs::Metadata, held: &fs::Metadata| {
             found.dev() == held.dev() && found.ino() == held.ino()
         };
-        match (fs::symlink_metadata(&path), file.metadata()) {
-            (Ok(found), Ok(held)) if same(&found, &held) => Ok(Taken::Held(Lock {
+        let held = file.metadata()?;
+        match fs::symlink_metadata(&path) {
+            Ok(found) if same(&found, &held) => Ok(Taken::Held(Lock {
                 path,
                 file: Some(file),
             })),
-            _ => Ok(Taken::Busy),
+            Ok(_) => Ok(Taken::Busy),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Taken::Busy),
+            Err(error) => Err(error),
         }
     }
 
