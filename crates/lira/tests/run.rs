@@ -1476,14 +1476,18 @@ fn token_in(folder: &Path, token: &str) -> PathBuf {
 }
 
 /// The work of an agent that keeps the token that it got, and the files of
-/// its data folder. Then it writes a login of its own there.
+/// its data folder. It reads the login of the host, and the file of a token
+/// in `~/.config`. Then it writes a login of its own in its data folder.
 const TOKEN_WORK: &str = r#"echo "${CLAUDE_CODE_OAUTH_TOKEN-none}" > "$here/token"
+cat "$HOME/.claude/.credentials.json" > "$here/login-read"
+cat "$HOME/.config/lira/auth/claude-oauth-token" > "$here/home-token-read"
 ls -A "$CLAUDE_CONFIG_DIR" > "$here/data-files"
 echo '{"renewed":true}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
 "#;
 
 // spec(Harnesses): Lira reads a login token for the harness from the file `lira/auth/claude-oauth-token` in `XDG_CONFIG_HOME`, or in `~/.config` when `XDG_CONFIG_HOME` is not set.
 // spec(Harnesses): With that token, the harness gets the token in `CLAUDE_CODE_OAUTH_TOKEN`, and its data folder has no `.credentials.json` of the host.
+// spec(Harnesses): With that token, the `.credentials.json` of the host is empty in the sandbox.
 #[test]
 fn with_a_token_the_harness_gets_the_token_and_not_the_login_of_the_host() {
     let repository = Repository::new("token-home", CHECK, &format!("{TOKEN_WORK}{WORK}"));
@@ -1507,7 +1511,9 @@ reply 'Review: pass'
             "{files}"
         );
     }
-    // The login that the harness wrote stays in its own data folder.
+    // The login of the host is empty for the agent, and the login that the
+    // harness wrote stays in its own data folder.
+    assert_eq!(repository.kept("login-read"), "");
     assert_eq!(fs::read_to_string(&login).unwrap(), "{}\n");
 
     // A token in `XDG_CONFIG_HOME` comes before the one in `~/.config`.
@@ -1523,6 +1529,8 @@ reply 'Review: pass'
         .unwrap();
     passed(&output);
     assert_eq!(repository.kept("token"), TOKEN);
+    // The file in `~/.config` is empty in the sandbox too.
+    assert_eq!(repository.kept("home-token-read"), "");
 }
 
 // spec(Harnesses): An `XDG_CONFIG_HOME` that is empty, or that is not an absolute path, counts as not set.
@@ -1581,7 +1589,7 @@ fn all_files(folder: &Path) -> Vec<PathBuf> {
     files
 }
 
-// spec(Harnesses): In the sandbox, the file of the token is empty.
+// spec(Harnesses): In the sandbox, the file of the token is empty, in `XDG_CONFIG_HOME` and in `~/.config`.
 #[test]
 fn in_the_sandbox_the_file_of_the_token_is_empty() {
     // The agent, the check and the Reviewer each read the file.

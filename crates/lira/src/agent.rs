@@ -65,13 +65,14 @@ pub fn start(
             "Lira can't find the harness `{shown}` on this host, or a program that it needs to start"
         ))
     })?;
+    // The harness gets the token in its environment. In the sandbox, the
+    // file of the token is empty, also in the place that Lira does not
+    // read. The commands that the harness runs get the environment too.
+    for file in token_files() {
+        sandbox.hidden(&file);
+    }
     let token = match token_file() {
-        Some(file) => {
-            // The harness gets the token in its environment. What it runs,
-            // and the check, find the file empty.
-            sandbox.hidden(&file);
-            token(&file)?
-        }
+        Some(file) => token(&file)?,
         None => None,
     };
     let data = Data::new()?;
@@ -146,12 +147,26 @@ fn token_file() -> Option<PathBuf> {
     Some(TOKEN_FILE.iter().fold(folder, |path, name| path.join(name)))
 }
 
+/// The places of the file of the login token: in `XDG_CONFIG_HOME`, and in
+/// `~/.config`.
+fn token_files() -> Vec<PathBuf> {
+    let folders = [
+        absolute("XDG_CONFIG_HOME"),
+        absolute("HOME").map(|home| home.join(".config")),
+    ];
+    let files = folders.into_iter().flatten();
+    files
+        .map(|folder| TOKEN_FILE.iter().fold(folder, |path, name| path.join(name)))
+        .collect()
+}
+
 /// The login token for the harness in `file`, or `None` when the file is
 /// not there.
 ///
 /// `claude setup-token` makes the token. The harness does not renew it, so
 /// it keeps working when Claude Code on the host renews its own login.
-/// Lira gives the token only to the harness, and writes it nowhere.
+/// Lira gives the token to the harness in its environment, and writes it
+/// nowhere.
 fn token(file: &Path) -> Result<Option<String>, String> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
@@ -225,7 +240,8 @@ impl Data {
 
     /// Puts in the data folder what the harness needs from the data folder
     /// of the host, and makes it writable in `sandbox`. The login of the
-    /// host is there only with `login`.
+    /// host is there only with `login`. Without it, the login of the host
+    /// is empty in `sandbox`.
     fn prepare(&self, sandbox: &mut Sandbox, login: bool) -> Result<(), String> {
         sandbox.writable(&self.folder);
         if let Some(host) = host_data().filter(|folder| folder.is_dir()) {
@@ -240,8 +256,11 @@ impl Data {
                         .read_only_at(&found, &self.folder.join(name));
                 }
             }
-            if login
-                && let Ok(file) = host.join(LOGIN).canonicalize()
+            if !login {
+                // With a token, the harness can renew no login of the host,
+                // and nothing in the sandbox can read the login.
+                sandbox.hidden(&host.join(LOGIN));
+            } else if let Ok(file) = host.join(LOGIN).canonicalize()
                 && file.is_file()
             {
                 sandbox.writable_at(&file, &self.folder.join(LOGIN));
