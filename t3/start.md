@@ -7,7 +7,7 @@ question.
 
 The rules are those of SPEC.md, "Issues".
 
-Agent limit: 3
+Agent limit: 5
 
 Model of the agent: `claude-opus-5-5`, at high effort
 
