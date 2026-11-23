@@ -220,8 +220,8 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 ///   change, and the copy goes away with the folder.
 struct Data {
     folder: PathBuf,
-    /// The open folder, with the lock on it. It comes after the folder, so
-    /// that the lock goes away after the folder.
+    /// The open folder, with the lock on it. `drop` removes the folder
+    /// before the lock goes away.
     _lock: File,
 }
 
@@ -334,7 +334,15 @@ fn remove_left(above: &Path) {
             continue;
         }
         let folder = entry.path();
-        if let Ok(lock) = File::open(&folder)
+        let opened = File::open(&folder).or_else(|error| {
+            // The harness can take the right to read away from its folder.
+            if error.kind() != ErrorKind::PermissionDenied {
+                return Err(error);
+            }
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
+            File::open(&folder)
+        });
+        if let Ok(lock) = opened
             && lock.try_lock().is_ok()
         {
             remove(&folder);
@@ -400,12 +408,18 @@ mod tests {
         let left = above.join("1-0");
         fs::create_dir_all(left.join("projects")).unwrap();
         fs::write(above.join("file"), "").unwrap();
+        // A harness can take the right to read away from its data folder.
+        let closed = above.join("1-1");
+        fs::create_dir_all(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
 
         let held = Data::new_in(&above).unwrap();
         assert!(!left.exists());
+        assert!(!closed.exists());
         assert!(above.join("file").exists());
+        fs::set_permissions(&held.folder, fs::Permissions::from_mode(0o000)).unwrap();
         let other = Data::new_in(&above).unwrap();
-        assert!(held.folder.is_dir());
+        assert!(held.folder.exists());
         assert_ne!(held.folder, other.folder);
 
         let folder = held.folder.clone();

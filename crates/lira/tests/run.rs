@@ -3547,7 +3547,9 @@ fi
     let harness = repository.harness.join("agent");
     let harness = harness.to_str().unwrap();
     wait_for("the start of the agent", || {
-        repository.harness.join("first-data").exists() && !processes_with(harness).is_empty()
+        fs::read_to_string(repository.harness.join("first-data"))
+            .is_ok_and(|text| text.ends_with('\n'))
+            && !processes_with(harness).is_empty()
     });
     let first = PathBuf::from(repository.kept("first-data"));
     assert!(first.is_dir(), "{}", first.display());
