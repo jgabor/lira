@@ -5443,13 +5443,16 @@ fn a_folder_that_git_does_not_list_in_the_folder_of_the_branch_gets_a_new_worktr
         if taken {
             assert_eq!(fs::read_dir(&second).unwrap().count(), 0, "{test}");
         }
-        // A second `lira continue` finds the new worktree.
+        // A second `lira continue` finds the new worktree, also when it is
+        // on no branch.
+        git_ok(&new, &["checkout", "--quiet", "--detach"]);
         program(
             &repository.harness.join("agent"),
             &format!("{START}reply 'I looked again.'\n"),
         );
         passed(&repository.continue_work());
         assert_eq!(PathBuf::from(repository.kept("folder")), new, "{test}");
+        assert_eq!(repository.kept("branch"), branch, "{test}");
     }
 }
 

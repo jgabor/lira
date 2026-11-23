@@ -172,11 +172,17 @@ pub fn continued(
             // repository can have no such branch any more, when the agent
             // gave it another name. The folder that it started on comes
             // first: the folder of the branch can hold the worktree of an
-            // earlier pull request on a branch with the same name.
+            // earlier pull request on a branch with the same name. After
+            // each folder comes the worktree beside it, `<name>~2` and so
+            // on, that Lira made when something else was in the folder.
             let mut old = None;
             for name in [started_on, Some(branch)].into_iter().flatten() {
                 let folder = ours.join(name);
                 if is_at(&folder, &ours, name) && is_a_worktree_of(&folder, repository)? {
+                    old = Some(folder);
+                    break;
+                }
+                if let Some(folder) = beside(repository, &ours, name)? {
                     old = Some(folder);
                     break;
                 }
@@ -308,6 +314,36 @@ fn is_a_worktree_of(folder: &Path, repository: &Path) -> Result<bool, String> {
         .any(|worktree| worktree.canonicalize().is_ok_and(|real| real == folder)))
 }
 
+/// The worktree with the lowest number of those in the folders
+/// `<name>~2`, `<name>~3`, and so on, in the folder `ours`, that git has in
+/// its list of worktrees of the repository in `repository`. Lira runs no
+/// git in these folders to know it.
+fn beside(repository: &Path, ours: &Path, name: &str) -> Result<Option<PathBuf>, String> {
+    let mut found = None;
+    for listed in git::worktrees(repository)? {
+        let Some(number) = listed
+            .file_name()
+            .and_then(|last| last.to_str())
+            .and_then(|last| last.rsplit_once('~'))
+            .and_then(|(_, number)| number.parse::<u64>().ok())
+            .filter(|number| *number >= 2)
+        else {
+            continue;
+        };
+        let numbered = format!("{name}~{number}");
+        let folder = ours.join(&numbered);
+        let same = matches!(
+            (listed.canonicalize(), folder.canonicalize()),
+            (Ok(listed), Ok(real)) if listed == real
+        );
+        let lower = found.as_ref().is_none_or(|(lowest, _)| number < *lowest);
+        if same && lower && is_at(&folder, ours, &numbered) {
+            found = Some((number, folder));
+        }
+    }
+    Ok(found.map(|(_, folder)| folder))
+}
+
 /// Takes the commits that the remote has on the branch, up to the commit
 /// `on_remote`, and that the worktree in `folder` does not have. The
 /// worktree is on the branch. `whose` names where the commits of the branch
@@ -434,7 +470,7 @@ fn place(data: &Path, repository: &[&str], branch: &str, beside: bool) -> Result
             // Making the folder fails when something has the name already.
             // git allows no `~` in a branch, so a folder with `~<number>`
             // is never the folder of another branch.
-            let mut number = 1;
+            let mut number: u64 = 1;
             loop {
                 let (folder, inside) = match number {
                     1 => (folder.clone(), inside.clone()),
