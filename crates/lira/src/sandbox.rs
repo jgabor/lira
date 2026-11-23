@@ -102,6 +102,14 @@ const TOKENS: [&str; 4] = [
 /// The variable that names the socket of the ssh agent.
 const SSH_AGENT: &str = "SSH_AUTH_SOCK";
 
+/// The sockets of gpg-agent.
+const GPG_AGENT: [&str; 4] = [
+    "S.gpg-agent",
+    "S.gpg-agent.ssh",
+    "S.gpg-agent.extra",
+    "S.gpg-agent.browser",
+];
+
 /// The variable that names the session bus of D-Bus. The keyring of the
 /// system answers there, and `gh` keeps its token in the keyring on some
 /// hosts.
@@ -219,16 +227,24 @@ fn login_folders() -> Vec<PathBuf> {
 /// credential-store` keeps its logins in `~/.git-credentials`, or in
 /// `git/credentials` in `XDG_CONFIG_HOME` or `~/.config`. git also reads
 /// `~/.netrc`. The ssh agent answers at the socket that `SSH_AUTH_SOCK`
-/// names, and the keyring at the socket of the session bus.
+/// names, and the keyring at the socket of the session bus. gpg-agent
+/// answers at its sockets, and with its ssh support on, one of them leads
+/// to the keys of ssh. It keeps them in `/run/user/<uid>/gnupg`, or, when
+/// the host has no such folder, in `GNUPGHOME` or in `~/.gnupg`.
 fn login_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Some(folder) = set("XDG_CONFIG_HOME") {
         files.push(Path::new(&folder).join("git").join("credentials"));
     }
+    let mut gnupg: Vec<PathBuf> = set("GNUPGHOME").map(PathBuf::from).into_iter().collect();
     for home in homes() {
         files.push(home.join(".git-credentials"));
         files.push(home.join(".config").join("git").join("credentials"));
         files.push(home.join(".netrc"));
+        gnupg.push(home.join(".gnupg"));
+    }
+    for folder in gnupg {
+        files.extend(GPG_AGENT.iter().map(|name| folder.join(name)));
     }
     files.extend(set(SSH_AGENT).map(PathBuf::from));
     files.extend(session_buses());
