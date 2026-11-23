@@ -74,15 +74,22 @@ impl Sandbox {
     /// folder that the command is given.
     pub fn command(&self, program: &OsStr) -> Command {
         let mut command = base();
+        let user_folder = user_folder();
+        if let Some(folder) = &user_folder {
+            command.arg("--tmpfs").arg(folder);
+        }
         for (path, place, writable) in &self.paths {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
-        hide_logins(&mut command, &self.hidden);
+        hide_logins(&mut command, &self.hidden, user_folder);
         command.arg("--").arg(program);
         command
     }
 }
+
+/// The folders that the sandbox has of its own. See `base`.
+const OWN: [&str; 4] = ["/dev", "/proc", "/tmp", "/run"];
 
 /// The variables that can hold a token for GitHub, for `gh` and for git.
 const TOKENS: [&str; 4] = [
@@ -113,17 +120,15 @@ const SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 /// there goes nowhere, and not to the file of the host.
 ///
 /// A login in a folder that the sandbox has of its own is hidden already:
-/// in `/dev`, `/proc`, `/tmp`, `/run`, or a folder of logins. `bwrap` would
-/// make the folders of its path there, or hide a file of the sandbox, such
-/// as `/dev/null`. So it is left out.
+/// in `/dev`, `/proc`, `/tmp`, `/run`, the folder of `XDG_RUNTIME_DIR`, or
+/// a folder of logins. `bwrap` would make the folders of its path there, or
+/// hide a file of the sandbox, such as `/dev/null`. So it is left out.
 ///
 /// `others` are other files of logins, which are hidden as the files of
-/// logins for GitHub.
-fn hide_logins(command: &mut Command, others: &[PathBuf]) {
-    let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+/// logins for GitHub. `user_folder` is the folder of `XDG_RUNTIME_DIR`,
+/// when the sandbox has its own.
+fn hide_logins(command: &mut Command, others: &[PathBuf], user_folder: Option<PathBuf>) {
+    let mut hidden: Vec<PathBuf> = OWN.iter().map(PathBuf::from).chain(user_folder).collect();
     let is_hidden =
         |path: &Path, hidden: &[PathBuf]| hidden.iter().any(|folder| path.starts_with(folder));
     for folder in login_folders() {
@@ -154,6 +159,24 @@ fn set(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
+/// The folder that `XDG_RUNTIME_DIR` names, when the sandbox needs to make
+/// it empty. It has the sockets of the session bus and of the ssh agent of
+/// the keyring. It is in `/run` on most hosts, and the sandbox has its own
+/// `/run`, so then it is `None`. A relative path names no folder, as the
+/// XDG specification says.
+///
+/// The sandbox makes it empty before it adds the paths that Lira names, as
+/// it does `/tmp` and `/run`. So a path that Lira names in it is there.
+fn user_folder() -> Option<PathBuf> {
+    let folder = PathBuf::from(set("XDG_RUNTIME_DIR")?);
+    let folder = folder
+        .is_absolute()
+        .then_some(folder)?
+        .canonicalize()
+        .ok()?;
+    (folder.is_dir() && !OWN.iter().any(|path| folder.starts_with(path))).then_some(folder)
+}
+
 /// The home folders of the user: the one that `HOME` names, and the one
 /// that the system names. They can differ, and ssh reads its keys from the
 /// one that the system names.
@@ -169,7 +192,8 @@ fn homes() -> Vec<PathBuf> {
 /// when it sets the variables in another way. `git push` gets its password
 /// from `gh` too. ssh keeps its keys in `~/.ssh`. `git credential-cache`
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
-/// in `XDG_CACHE_HOME` or `~/.cache`.
+/// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
+/// plain store in `~/.gcm/store`.
 fn login_folders() -> Vec<PathBuf> {
     let mut folders = Vec::new();
     if let Some(folder) = set("GH_CONFIG_DIR") {
@@ -186,6 +210,7 @@ fn login_folders() -> Vec<PathBuf> {
         folders.push(home.join(".ssh"));
         folders.push(home.join(".git-credential-cache"));
         folders.push(home.join(".cache").join("git").join("credential"));
+        folders.push(home.join(".gcm").join("store"));
     }
     folders
 }
@@ -211,18 +236,14 @@ fn login_files() -> Vec<PathBuf> {
 }
 
 /// The sockets of the session bus of D-Bus: each `unix:path=` of
-/// `DBUS_SESSION_BUS_ADDRESS`, and `bus` in `XDG_RUNTIME_DIR`, where a
-/// program looks when the variable is not set. A bus on an abstract socket
-/// or on the network has no path, so it is not here.
+/// `DBUS_SESSION_BUS_ADDRESS`. A bus on an abstract socket or on the
+/// network has no path, so it is not here. A program looks for `bus` in
+/// `XDG_RUNTIME_DIR` when the variable is not set, and the sandbox hides
+/// that folder.
 fn session_buses() -> Vec<PathBuf> {
-    let mut buses = Vec::new();
-    if let Some(addresses) = set(SESSION_BUS) {
-        buses.extend(socket_paths(addresses.as_bytes()));
-    }
-    if let Some(folder) = set("XDG_RUNTIME_DIR") {
-        buses.push(Path::new(&folder).join("bus"));
-    }
-    buses
+    set(SESSION_BUS)
+        .map(|addresses| socket_paths(addresses.as_bytes()))
+        .unwrap_or_default()
 }
 
 /// The paths of the sockets in a list of D-Bus addresses, such as
