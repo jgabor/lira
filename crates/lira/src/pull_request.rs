@@ -278,8 +278,8 @@ impl<'a> PullRequest<'a> {
         }
         let branch = self.branch.as_deref().expect("the branch was pushed");
         let main = &self.worktree.main;
-        let opened =
-            github::open_draft(folder, main, branch, &subjects[0], &description).and_then(|draft| {
+        let opened = github::open_draft(folder, main, branch, &subjects[0], &description).and_then(
+            |draft| {
                 // A pull request that is not new got its description in a call
                 // before, and that can be an older one.
                 let described = if draft.new {
@@ -289,7 +289,8 @@ impl<'a> PullRequest<'a> {
                 };
                 self.address = Some(draft.address);
                 described
-            });
+            },
+        );
         opened?;
         self.described = description;
         Ok(())

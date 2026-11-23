@@ -96,11 +96,7 @@ fn pull_request_with_text(folder: &Path, args: &[&OsStr], text: &str) -> Result<
 
 /// Runs `gh pr` in `folder` with these arguments, and gives it `text` on its
 /// input when there is a text.
-fn run_pr(
-    folder: &Path,
-    args: &[&OsStr],
-    text: Option<&str>,
-) -> Result<String, String> {
+fn run_pr(folder: &Path, args: &[&OsStr], text: Option<&str>) -> Result<String, String> {
     let mut child = Command::new("gh")
         .arg("pr")
         .args(args)
