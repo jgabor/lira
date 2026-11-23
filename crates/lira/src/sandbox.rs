@@ -224,18 +224,14 @@ fn login_files() -> Vec<PathBuf> {
 }
 
 /// The sockets of the session bus of D-Bus: each `unix:path=` of
-/// `DBUS_SESSION_BUS_ADDRESS`, and `bus` in `XDG_RUNTIME_DIR`, where a
-/// program looks when the variable is not set. A bus on an abstract socket
-/// or on the network has no path, so it is not here.
+/// `DBUS_SESSION_BUS_ADDRESS`. A bus on an abstract socket or on the
+/// network has no path, so it is not here. A program looks for `bus` in
+/// `XDG_RUNTIME_DIR` when the variable is not set, and the sandbox hides
+/// that folder.
 fn session_buses() -> Vec<PathBuf> {
-    let mut buses = Vec::new();
-    if let Some(addresses) = set(SESSION_BUS) {
-        buses.extend(socket_paths(addresses.as_bytes()));
-    }
-    if let Some(folder) = set("XDG_RUNTIME_DIR") {
-        buses.push(Path::new(&folder).join("bus"));
-    }
-    buses
+    set(SESSION_BUS)
+        .map(|addresses| socket_paths(addresses.as_bytes()))
+        .unwrap_or_default()
 }
 
 /// The paths of the sockets in a list of D-Bus addresses, such as

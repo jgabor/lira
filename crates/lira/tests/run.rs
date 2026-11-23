@@ -2037,10 +2037,17 @@ fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
 fn a_relative_runtime_folder_hides_nothing() {
     // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
     // in the repository, so `.` is the repository, and the worktree of the
-    // agent needs its `.git`.
-    let work = r#"git status --short > "$here/status"
-"#;
+    // agent needs its `.git`. The file `bus` there is no session bus.
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("run")
+        .join("relative-runtime")
+        .join("repository");
+    let work = format!(
+        "git status --short > \"$here/status\"\ncat '{}' > \"$here/bus\"\n",
+        root.join("bus").display()
+    );
     let repository = Repository::new("relative-runtime", CHECK, &format!("{work}{WORK}"));
+    fs::write(repository.root.join("bus"), "text\n").unwrap();
     let output = repository
         .lira()
         .env("XDG_RUNTIME_DIR", ".")
@@ -2049,6 +2056,7 @@ fn a_relative_runtime_folder_hides_nothing() {
         .unwrap();
     passed(&output);
     assert_eq!(repository.kept("status"), "");
+    assert_eq!(repository.kept("bus"), "text");
 }
 
 #[test]
