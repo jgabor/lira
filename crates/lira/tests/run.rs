@@ -6154,10 +6154,7 @@ fi
 {CONTINUE}"#,
         lock = lock.display(),
     );
-    program(
-        &repository.harness.join("agent"),
-        &format!("{START}{work}"),
-    );
+    program(&repository.harness.join("agent"), &format!("{START}{work}"));
     let mut run = repository.lira().args(["run", REQUEST]).spawn().unwrap();
     wait_for("the work of the agent", || {
         repository.harness.join("working").exists()
