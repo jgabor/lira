@@ -260,7 +260,7 @@ impl Run<'_> {
             && let Err(error) = self.write_passed(continued)
         {
             eprintln!(
-                "lira: Lira did not write on the pull request that the work passed: {error}\nSo the next `lira continue` gets the old question and the old answer again"
+                "lira: Lira did not write on the pull request that the work passed: {error}\nSo the next `lira continue` gets again what this one got"
             );
         }
         eprintln!("{}", wrote(&self.said));
