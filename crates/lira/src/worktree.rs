@@ -143,13 +143,15 @@ pub fn continued(
                 .flatten()
                 .collect();
             git::prune_worktrees(repository, &inside)?;
-            // The old worktree can be in the folder of the branch, or in
-            // the folder of the branch that it started on, and on another
+            // The old worktree can be in the folder of the branch that it
+            // started on, or in the folder of the branch, and on another
             // branch or on no branch. Then it goes back to the branch. The
             // repository can have no such branch any more, when the agent
-            // gave it another name.
+            // gave it another name. The folder that it started on comes
+            // first: the folder of the branch can hold the worktree of an
+            // earlier pull request on a branch with the same name.
             let mut old = None;
-            for name in [Some(branch), started_on].into_iter().flatten() {
+            for name in [started_on, Some(branch)].into_iter().flatten() {
                 let folder = ours.join(name);
                 if is_at(&folder, &ours, name) && is_a_worktree_of(&folder, repository)? {
                     old = Some(folder);
@@ -201,9 +203,10 @@ fn is_inside(folder: &Path, ours: &Path) -> bool {
 /// in both paths followed. A link there to another folder is not. Each
 /// part of `branch` is one name, and it does not go up.
 fn is_at(folder: &Path, ours: &Path, branch: &str) -> bool {
-    let names = Path::new(branch)
-        .components()
-        .all(|part| matches!(part, Component::Normal(_)));
+    let names = !branch.is_empty()
+        && Path::new(branch)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
     if !names {
         return false;
     }

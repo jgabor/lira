@@ -4275,6 +4275,32 @@ fn an_old_worktree_whose_branch_has_a_new_name_is_found_on_no_branch() {
 }
 
 #[test]
+fn the_folder_that_the_worktree_started_in_comes_before_an_old_folder_of_the_branch() {
+    // A worktree of an earlier pull request on a branch with the same name
+    // stays in the folder of that name, on no branch.
+    let repository =
+        Repository::stopped_after("started-first", CHECK, "git branch -m fix/greeting\n");
+    let branch = repository.pull_request_branch();
+    let old = PathBuf::from(repository.kept("folder"));
+    git_ok(&old, &["checkout", "--quiet", "--detach", "HEAD~1"]);
+    let data = repository.top.join("xdg").join("lira");
+    let earlier = Repository::worktrees(&data).join(&branch);
+    git_ok(
+        &repository.root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            earlier.to_str().unwrap(),
+        ],
+    );
+    passed(&repository.continue_work());
+    assert_eq!(PathBuf::from(repository.kept("folder")), old);
+    assert_eq!(git_ok(&earlier, &["branch", "--show-current"]), "");
+}
+
+#[test]
 fn a_started_on_branch_that_names_a_folder_outside_the_data_folder_is_not_used() {
     let repository =
         Repository::stopped_after("started-outside", CHECK, "git branch -m fix/greeting\n");
