@@ -23,6 +23,9 @@ pub struct Sandbox {
     /// Each path of the host, the path where the agent sees it, and if the
     /// agent can change it. A later path inside an earlier one wins there.
     paths: Vec<(PathBuf, PathBuf, bool)>,
+    /// Other files of logins, which the agent finds empty, as the logins
+    /// for GitHub.
+    hidden: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -61,6 +64,12 @@ impl Sandbox {
         self
     }
 
+    /// The agent finds this file of a login empty, and can't change it.
+    pub fn hidden(&mut self, file: &Path) -> &mut Sandbox {
+        self.hidden.push(file.to_path_buf());
+        self
+    }
+
     /// A command that runs `program` in the sandbox. Its folder is the
     /// folder that the command is given.
     pub fn command(&self, program: &OsStr) -> Command {
@@ -69,7 +78,7 @@ impl Sandbox {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
-        hide_logins(&mut command);
+        hide_logins(&mut command, &self.hidden);
         command.arg("--").arg(program);
         command
     }
@@ -107,7 +116,10 @@ const SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
 /// in `/dev`, `/proc`, `/tmp`, `/run`, or a folder of logins. `bwrap` would
 /// make the folders of its path there, or hide a file of the sandbox, such
 /// as `/dev/null`. So it is left out.
-fn hide_logins(command: &mut Command) {
+///
+/// `others` are other files of logins, which are hidden as the files of
+/// logins for GitHub.
+fn hide_logins(command: &mut Command, others: &[PathBuf]) {
     let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
         .iter()
         .map(PathBuf::from)
@@ -123,7 +135,7 @@ fn hide_logins(command: &mut Command) {
             hidden.push(folder);
         }
     }
-    for file in login_files() {
+    for file in login_files().iter().chain(others) {
         if let Ok(file) = file.canonicalize()
             && !file.is_dir()
             && !is_hidden(&file, &hidden)

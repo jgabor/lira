@@ -312,8 +312,9 @@ is success, 1 is a failure, and 2 is bad usage.
 - An `XDG_CONFIG_HOME` that is empty, or that is not an absolute path, counts as not set.
 - With that token, the harness gets the token in `CLAUDE_CODE_OAUTH_TOKEN`, and its data folder has no `.credentials.json` of the host.
 - With no such file, the harness can renew the login in `.credentials.json` of the host.
-- When that file holds no token, Lira starts no harness, and the error names the file.
-- Lira writes the token in no file, no comment and no description, and it prints the token nowhere.
+- When Lira can't read a token from that file, Lira starts no harness, and the error names the file.
+- In the sandbox, the file of the token is empty.
+- Lira writes the token in no file, no comment and no description, and it prints the token nowhere, other than in what an agent wrote.
 - *Proposed:* The first harness is Claude Code.
 - When a harness stops at a usage limit, Lira keeps the work in Now, and continues when the limit ends.
 

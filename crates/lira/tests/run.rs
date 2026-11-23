@@ -1544,7 +1544,7 @@ fn an_xdg_config_home_that_is_empty_or_not_absolute_is_not_used() {
     }
 }
 
-// spec(Harnesses): When that file holds no token, Lira starts no harness, and the error names the file.
+// spec(Harnesses): When Lira can't read a token from that file, Lira starts no harness, and the error names the file.
 #[test]
 fn a_file_with_no_token_is_an_error() {
     for (test, text) in [("token-empty", ""), ("token-blank", " \n\n")] {
@@ -1556,6 +1556,14 @@ fn a_file_with_no_token_is_an_error() {
         assert!(error.contains("`claude setup-token`"), "{error}");
         assert!(!repository.harness.join("starts").exists());
     }
+    // A folder in the place of the file can't be read.
+    let repository = Repository::new("token-folder", CHECK, WORK);
+    let file = token_in(&repository.top.join("home").join(".config"), "");
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    let error = failed(&repository.run());
+    assert!(error.contains(&format!("`{}`", file.display())), "{error}");
+    assert!(!repository.harness.join("starts").exists());
 }
 
 /// Each file in `folder` and in the folders in it. It does not follow
@@ -1573,14 +1581,39 @@ fn all_files(folder: &Path) -> Vec<PathBuf> {
     files
 }
 
-// spec(Harnesses): Lira writes the token in no file, no comment and no description, and it prints the token nowhere.
+// spec(Harnesses): In the sandbox, the file of the token is empty.
+#[test]
+fn in_the_sandbox_the_file_of_the_token_is_empty() {
+    // The agent, the check and the Reviewer each read the file.
+    let read = |file: &str| {
+        format!("cat \"$HOME/.config/lira/auth/claude-oauth-token\" > \"$here/{file}\"\n")
+    };
+    let check = r#"root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+cat "$HOME/.config/lira/auth/claude-oauth-token" > "$root/../stand-in/check-read"
+"#;
+    let work = format!("{}{TOKEN_WORK}{WORK}", read("agent-read"));
+    let repository = Repository::checked("token-hidden", check, &work);
+    repository.reviewer(&format!("{}reply 'Review: pass'\n", read("review-read")));
+    token_in(&repository.top.join("home").join(".config"), TOKEN);
+    passed(&repository.run());
+    assert_eq!(repository.kept("agent-read"), "");
+    assert_eq!(repository.kept("review-read"), "");
+    let check_read = fs::read_to_string(repository.shared.join("check-read")).unwrap();
+    assert_eq!(check_read, "");
+    // The harness got the token all the same.
+    assert_eq!(repository.kept("token"), TOKEN);
+}
+
+// spec(Harnesses): Lira writes the token in no file, no comment and no description, and it prints the token nowhere, other than in what an agent wrote.
 #[test]
 fn lira_writes_the_token_nowhere() {
     // The agent stops and asks, so Lira writes a comment as well as the
-    // description.
-    let check = "echo 'The test failed.'\nexit 1\n";
+    // description. The check and the agent try to read the token from its
+    // file, and Lira writes what they wrote.
+    let check =
+        "cat \"$HOME/.config/lira/auth/claude-oauth-token\"\necho 'The test failed.'\nexit 1\n";
     let work = r#"commit greeting 'Add a greeting'
-reply 'I made the file.'
+reply "I read $(cat "$HOME/.config/lira/auth/claude-oauth-token")."
 while :; do
   next
   reply 'I can not repair it.'

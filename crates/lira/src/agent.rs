@@ -65,7 +65,15 @@ pub fn start(
             "Lira can't find the harness `{shown}` on this host, or a program that it needs to start"
         ))
     })?;
-    let token = token()?;
+    let token = match token_file() {
+        Some(file) => {
+            // The harness gets the token in its environment. What it runs,
+            // and the check, find the file empty.
+            sandbox.hidden(&file);
+            token(&file)?
+        }
+        None => None,
+    };
     let data = Data::new()?;
     data.prepare(sandbox, token.is_none())?;
     let mut command = sandbox.command(found.as_os_str());
@@ -128,22 +136,24 @@ const TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// The file of the login token, in the configuration folder of the host.
 const TOKEN_FILE: [&str; 3] = ["lira", "auth", "claude-oauth-token"];
 
-/// The login token for the harness, or `None` when its file is not there.
-/// The file is in `XDG_CONFIG_HOME`, or in `~/.config` when that is not
-/// set. A value that is empty, or that is no absolute path, counts as not
-/// set, as for `XDG_DATA_HOME`.
+/// The file of the login token for the harness. It is in
+/// `XDG_CONFIG_HOME`, or in `~/.config` when that is not set. A value that
+/// is empty, or that is no absolute path, counts as not set, as for
+/// `XDG_DATA_HOME`.
+fn token_file() -> Option<PathBuf> {
+    let folder = absolute("XDG_CONFIG_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".config")))?;
+    Some(TOKEN_FILE.iter().fold(folder, |path, name| path.join(name)))
+}
+
+/// The login token for the harness in `file`, or `None` when the file is
+/// not there.
 ///
 /// `claude setup-token` makes the token. The harness does not renew it, so
 /// it keeps working when Claude Code on the host renews its own login.
 /// Lira gives the token only to the harness, and writes it nowhere.
-fn token() -> Result<Option<String>, String> {
-    let Some(folder) =
-        absolute("XDG_CONFIG_HOME").or_else(|| absolute("HOME").map(|home| home.join(".config")))
-    else {
-        return Ok(None);
-    };
-    let file = TOKEN_FILE.iter().fold(folder, |path, name| path.join(name));
-    let text = match fs::read_to_string(&file) {
+fn token(file: &Path) -> Result<Option<String>, String> {
+    let text = match fs::read_to_string(file) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
