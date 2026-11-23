@@ -3392,13 +3392,26 @@ fi
 
 #[test]
 fn a_harness_that_lira_can_not_guard_does_not_start() {
-    let repository = Repository::new("no-guard", CHECK, REPLY);
+    no_guard("no-guard", None);
+}
+
+#[test]
+fn a_harness_whose_guard_ends_at_once_does_not_start() {
+    // This `sh` starts, and ends before it reads its script.
+    no_guard("guard-ends", Some("#!/bin/sh\nexit 0\n"));
+}
+
+/// Runs Lira with a `PATH` where `sh` is the script `sh`, or where there is
+/// no `sh` at all. Lira can't guard the harness, so the run fails, and Lira
+/// starts no harness.
+fn no_guard(test: &str, sh: Option<&str>) {
+    let repository = Repository::new(test, CHECK, REPLY);
     // This harness needs no other program, and it answers nothing.
     program(
         &repository.harness.join("agent"),
         "#!/bin/sh\nwhile :; do /bin/sleep 1; done\n",
     );
-    // A `PATH` with git and `gh`, and with no `sh` for the guard.
+    // A `PATH` with git and `gh`, and with no `sh` that can guard.
     let only = repository.top.join("only");
     fs::create_dir_all(&only).unwrap();
     let git = Command::new("sh")
@@ -3407,14 +3420,18 @@ fn a_harness_that_lira_can_not_guard_does_not_start() {
         .unwrap();
     let git = String::from_utf8_lossy(&git.stdout).trim().to_string();
     std::os::unix::fs::symlink(git, only.join("git")).unwrap();
-    // The stand-in for `bwrap`, so that the harness can keep its number.
-    // It keeps a sign each time that Lira starts a sandbox with it.
+    if let Some(sh) = sh {
+        program(&only.join("sh"), sh);
+    }
+    // The stand-in for `bwrap`. It keeps a sign each time that Lira starts
+    // a sandbox with it. Lira tries `bwrap` with `bwrap --version` in the
+    // sandbox, and that one makes no sandbox.
     let bwrap = repository.shared.join("sandbox").join("bwrap");
     let sandboxes = repository.top.join("sandboxes");
     program(
         &only.join("bwrap"),
         &format!(
-            "#!/bin/sh\necho started >> '{}'\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\n[ \"$*\" = --version ] || echo started >> '{}'\nexec '{}' \"$@\"\n",
             sandboxes.display(),
             bwrap.display()
         ),

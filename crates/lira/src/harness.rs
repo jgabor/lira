@@ -320,19 +320,14 @@ impl Harness {
             .as_mut()
             .expect("the input of the guard is a pipe")
             .write_all(format!("{}\n", child.id()).as_bytes());
-        if let Err(error) = told {
-            let _ = guard.kill();
-            let _ = guard.wait();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::Start {
-                reason: format!(
-                    "Lira can't tell the process that guards the harness `{program}` which harness it guards: {error}"
-                ),
-                program,
-            });
-        }
-        let guard = Some(guard);
+        let guard = match told {
+            Ok(()) => Some(guard),
+            Err(_) => {
+                let _ = guard.kill();
+                let _ = guard.wait();
+                None
+            }
+        };
         let (input, input_failed) = write_lines(child.stdin.take().expect("the input is a pipe"));
         let lines = read_lines(child.stdout.take().expect("the output is a pipe"));
         let (errors, errors_ended) = keep(child.stderr.take().expect("the error output is a pipe"));
@@ -351,6 +346,18 @@ impl Harness {
             next: 1,
             gone: None,
         };
+        if let Err(error) = told {
+            // The harness runs with no guard. Lira stops it as it stops
+            // each harness, and not with one signal in its first moments.
+            let program = harness.program.clone();
+            drop(harness);
+            return Err(Error::Start {
+                reason: format!(
+                    "Lira can't tell the process that guards the harness `{program}` which harness it guards: {error}"
+                ),
+                program,
+            });
+        }
 
         let params = Json::object([
             ("protocolVersion", Json::number(VERSION)),
@@ -925,17 +932,32 @@ impl Drop for Harness {
 /// guard then stops that process group. With no first line, there is no
 /// harness, and the guard stops nothing. It has a process group of its
 /// own, so that Ctrl-C in the terminal does not reach it.
+///
+/// The guard says that it is ready before Lira starts the harness. So a
+/// `sh` that starts and ends at once guards no harness.
 fn guard() -> std::io::Result<Child> {
-    let wait_then_stop = r#"IFS= read -r group || exit 0
+    let wait_then_stop = r#"echo ready
+IFS= read -r group || exit 0
 while IFS= read -r line; do :; done
 kill -s KILL -- "-$group""#;
-    Command::new("sh")
+    let mut guard = Command::new("sh")
         .args(["-c", wait_then_stop])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
-        .spawn()
+        .spawn()?;
+    let mut ready = String::new();
+    let read =
+        BufReader::new(guard.stdout.take().expect("the output is a pipe")).read_line(&mut ready);
+    if read.is_ok() && ready == "ready\n" {
+        return Ok(guard);
+    }
+    let _ = guard.kill();
+    let _ = guard.wait();
+    Err(read
+        .err()
+        .unwrap_or_else(|| std::io::Error::other("it ended before it was ready")))
 }
 
 /// Writes each line that it gets to the input of a harness, on a thread of
