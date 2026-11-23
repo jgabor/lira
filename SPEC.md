@@ -125,10 +125,9 @@ Lira does these steps for each issue, in this order.
 - When Lira ends before it can remove that folder, Lira removes it when the next agent on the same host starts.
 - When Lira can't lock the folder of a harness, it runs no agent.
 - The harness of an agent reads no memory file of the host.
-- The sandbox of an agent hides the logins of the host for each server, and not only the logins for GitHub.
-- In the sandbox, `~/.ssh`, `~/.netrc` and `~/.git-credentials` are empty.
-- In the sandbox, `SSH_AUTH_SOCK` and `DBUS_SESSION_BUS_ADDRESS` are not set, and the sockets that they name are not there.
-- In the sandbox, the folder of `XDG_RUNTIME_DIR` is empty, except for the paths that Lira gives the sandbox.
+- In the sandbox of an agent, `~/.ssh`, `~/.gnupg`, `~/.netrc` and `~/.git-credentials` are empty, with no login for GitHub or for another site.
+- In the sandbox, `SSH_AUTH_SOCK` and `DBUS_SESSION_BUS_ADDRESS` are not set, and a socket file that they name is not a socket there.
+- In the sandbox, the folder of `XDG_RUNTIME_DIR` has no file of the host, other than the paths that Lira gives the sandbox.
 - An `XDG_RUNTIME_DIR` that is not an absolute path counts as not set.
 - When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
 - When `bwrap` makes no sandbox, Lira runs no agent, and the error shows what `bwrap` wrote.
