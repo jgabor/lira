@@ -1576,6 +1576,138 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
     }
 }
 
+/// A shell function that prints each other login for GitHub that a program
+/// in the sandbox sees: the ones of the credential helpers of git, of
+/// `~/.netrc`, of the home folder that the system names for the user, which
+/// is `$system`, and of the keyring. `$HOME/bus` is the socket of the
+/// session bus of D-Bus.
+const OTHER_LOGINS: &str = r#"other_logins() {
+  for file in "$HOME/.git-credentials" "$XDG_CONFIG_HOME/git/credentials" "$HOME/.config/git/credentials" "$HOME/.netrc"; do
+    echo "$file: $(cat "$file" 2>/dev/null)"
+  done
+  for folder in "$HOME/.git-credential-cache" "$XDG_CACHE_HOME/git/credential" "$HOME/.cache/git/credential" "$system/.ssh" "$system/.config/gh"; do
+    echo "$folder: $(ls -A "$folder" 2>&1)"
+  done
+  [ -S "$HOME/bus" ] && echo "the session bus is there"
+  env | grep '^DBUS_SESSION_BUS_ADDRESS=' || true
+}
+"#;
+
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
+    let repository = Repository::new("other-logins", CHECK, "");
+    let system = repository.top.join("system");
+    let logins = format!("system='{}'\n{OTHER_LOGINS}", system.display());
+    let work = format!("{logins}other_logins > \"$here/agent-logins\"\n{WORK}");
+    program(&repository.harness.join("agent"), &format!("{START}{work}"));
+    repository.reviewer(&format!(
+        "{logins}other_logins > \"$here/reviewer-logins\"\nreply 'Review: pass'\n"
+    ));
+    // The host keeps a login in each of these places.
+    let home = repository.top.join("home");
+    let xdg_config = repository.top.join("xdg-config");
+    let xdg_cache = repository.top.join("xdg-cache");
+    let files = [
+        home.join(".git-credentials"),
+        xdg_config.join("git").join("credentials"),
+        home.join(".config").join("git").join("credentials"),
+        home.join(".netrc"),
+    ];
+    let folders = [
+        home.join(".git-credential-cache"),
+        xdg_cache.join("git").join("credential"),
+        home.join(".cache").join("git").join("credential"),
+        system.join(".ssh"),
+        system.join(".config").join("gh"),
+    ];
+    for file in &files {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "secret\n").unwrap();
+    }
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    // The session bus of D-Bus is at a path that is not in `/run`. An
+    // address of D-Bus can escape each byte of the path.
+    let bus = home.join("bus");
+    let _bus = ssh_agent("other-logins", &bus);
+    let address = format!(
+        "unix:path={}%2fbus,guid=0123456789abcdef0123456789abcdef",
+        home.display()
+    );
+    // The system names `system` as the home folder of the user, and
+    // `HOME` names another folder.
+    let lira = repository.lira();
+    let mut command = with_home(&lira, &system, &repository.top.join("passwd"));
+    let output = command
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env("DBUS_SESSION_BUS_ADDRESS", &address)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    // Each file is empty or not there, each folder is empty, and the bus is
+    // out of reach.
+    let empty: String = files
+        .iter()
+        .chain(&folders)
+        .map(|path| format!("{}: \n", path.display()))
+        .collect();
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("agent-logins")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("reviewer-logins")).unwrap(),
+        empty
+    );
+    // The logins of the host are as they were.
+    for file in files
+        .iter()
+        .cloned()
+        .chain(folders.map(|f| f.join("login")))
+    {
+        assert_eq!(fs::read_to_string(&file).unwrap(), "secret\n");
+    }
+}
+
+/// `lira` on a host where the system names `home` as the home folder of the
+/// user. `bwrap` gives it a file `/etc/passwd` that says so, which it writes
+/// at `passwd`.
+fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
+    use std::os::unix::fs::MetadataExt;
+    let me = fs::metadata("/proc/self").unwrap();
+    fs::write(
+        passwd,
+        format!(
+            "lira:x:{}:{}::{}:/bin/sh\n",
+            me.uid(),
+            me.gid(),
+            home.display()
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new("bwrap");
+    command
+        .args(["--dev-bind", "/", "/", "--ro-bind"])
+        .arg(passwd)
+        .args(["/etc/passwd", "--"])
+        .arg(lira.get_program());
+    if let Some(folder) = lira.get_current_dir() {
+        command.current_dir(folder);
+    }
+    for (name, value) in lira.get_envs() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
 #[test]
 fn a_login_in_a_folder_that_the_sandbox_hides_adds_nothing_to_the_sandbox() {
     // The socket of the ssh agent is in `~/.ssh`, and the folder of `gh` is
