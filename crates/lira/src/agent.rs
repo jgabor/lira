@@ -205,7 +205,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 /// The process of Lira that made the folder holds a lock on it until the
 /// folder is gone. A process that ends with no time to remove the folder,
 /// as after `SIGKILL`, loses the lock all the same. So a folder with no lock
-/// is one that Lira left, and the next agent removes it.
+/// is one that Lira left, and the next agent removes it. On a file system
+/// where a folder takes no lock, such as NFS, no folder has a lock, and no
+/// agent removes a folder that Lira left.
 ///
 /// The harness reads its data folder in each later conversation, also
 /// outside a sandbox. So in the sandbox, the data folder of the host is
