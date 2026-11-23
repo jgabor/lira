@@ -132,7 +132,7 @@ Lira does these steps for each issue, in this order.
 - Lira runs the `setup` command with `sh -c`.
 - When the `setup` command fails, Lira removes the new worktree and its branch, and the error shows what the command wrote.
 - A new worktree starts from the newest main branch.
-- A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder.
+- A new worktree is the folder `worktrees/<owner>/<repository>/<branch>` in the data folder, except as `lira continue` says.
 - When the check fails, Lira gives the output of the check to the agent.
 - After 3 failed tries at the same check, the agent stops and asks.
 - A Reviewer reads the change after the check passes.
