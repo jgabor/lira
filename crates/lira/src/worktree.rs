@@ -54,15 +54,15 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
             "the branch `{branch}` is already there. A new worktree needs a new branch"
         ));
     }
-    // Two calls can ask for the same branch at the same time. Making the
-    // folder and making the branch each work for one call only. So after
-    // these two steps the folder and the branch are this call's own, and it
-    // can remove them when a later step fails.
     let Some(lock) = lock(data, &[&owner, &name], branch)? else {
         return Err(format!(
             "an agent of Lira works on the branch `{branch}` already. A new worktree needs a new branch"
         ));
     };
+    // Two calls can ask for the same branch at the same time. Making the
+    // folder and making the branch each work for one call only. So after
+    // these two steps the folder and the branch are this call's own, and it
+    // can remove them when a later step fails.
     let place = place(data, &[&owner, &name], branch)?;
     if let Err(error) = git::add_branch(repository, branch, &newest.commit) {
         let _ = fs::remove_dir(&place.folder);
