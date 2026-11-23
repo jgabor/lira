@@ -1,7 +1,7 @@
 //! A new worktree for a branch, in the data folder of Lira.
 
 use crate::lira_file::LiraFile;
-use crate::{git, process};
+use crate::{data, git, process};
 use std::fs::{self, File, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -227,12 +227,13 @@ pub fn continued(
 /// a repository. It is `None` when another Lira holds the lock. The lock
 /// is the file `locks/<owner>/<repository>/<started_on>.lock` in `data`.
 /// The system takes the lock away when the file closes: when Lira ends,
-/// also when it is killed. A child of Lira does not get the file.
+/// also when it is killed. A child of Lira does not get the file, and an
+/// agent does not see the folder of the locks.
 fn lock(data: &Path, repository: &[&str], started_on: &str) -> Result<Option<File>, String> {
     let failed = |path: &Path, error: std::io::Error| {
         format!("Lira can't lock the file `{}`: {error}", path.display())
     };
-    let mut path = data.join("locks");
+    let mut path = data::locks(data);
     let parts: Vec<&str> = repository
         .iter()
         .copied()

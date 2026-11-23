@@ -2,13 +2,14 @@
 //! the change of the agent. What runs in it can change files only in the
 //! folders that Lira names. It can read all files of the host, except the
 //! places where ssh, gpg, git and `gh` keep logins, for GitHub and for
-//! other sites.
+//! other sites, and the locks of the work of agents.
 //!
 //! This is the one place that knows how the sandbox works. Lira makes it
 //! with the program `bwrap` (bubblewrap), so it runs on Linux only.
 
-use crate::process;
+use crate::{data, process};
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -83,6 +84,7 @@ impl Sandbox {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
+        hide_locks(&mut command);
         hide_logins(&mut command, &self.hidden, user_folder);
         command.arg("--").arg(program);
         command
@@ -91,6 +93,31 @@ impl Sandbox {
 
 /// The folders that the sandbox has of its own. See `base`.
 const OWN: [&str; 4] = ["/dev", "/proc", "/tmp", "/run"];
+
+/// Hides the locks that Lira takes on the work of agents: their folder is
+/// empty in the sandbox, and read-only. A lock works on a file that is open
+/// for reading, so an agent that saw the lock of other work could take it,
+/// and Lira would then start no agent on that work. This comes after the
+/// other paths, so that it wins over them.
+///
+/// Lira makes the folder when it is not there yet. A folder that the host
+/// makes later would show in the sandbox.
+fn hide_locks(command: &mut Command) {
+    let Ok(data) = data::folder() else {
+        return;
+    };
+    let locks = data::locks(&data);
+    let _ = fs::create_dir_all(&locks);
+    if let Ok(locks) = locks.canonicalize()
+        && locks.is_dir()
+    {
+        command
+            .arg("--tmpfs")
+            .arg(&locks)
+            .arg("--remount-ro")
+            .arg(&locks);
+    }
+}
 
 /// The variables that can hold a token for GitHub, for `gh` and for git.
 const TOKENS: [&str; 4] = [
