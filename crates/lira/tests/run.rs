@@ -3532,6 +3532,38 @@ while :; do sleep 1; done
     });
 }
 
+// spec(Steps): The harness of each agent keeps its conversations in a folder of its own, and Lira removes the folder when the agent ends.
+#[test]
+fn lira_removes_the_data_folder_of_a_harness_that_it_left_when_it_was_killed() {
+    // The first agent keeps its data folder and never ends its reply. The
+    // agent of the second run does its work.
+    let work = r#"if [ ! -e "$here/first-data" ]; then
+  echo "$CLAUDE_CONFIG_DIR" > "$here/first-data"
+  while :; do sleep 1; done
+fi
+"#;
+    let repository = Repository::new("killed", CHECK, &format!("{work}{WORK}"));
+    let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    wait_for("the start of the agent", || {
+        repository.harness.join("first-data").exists() && !processes_with(harness).is_empty()
+    });
+    let first = PathBuf::from(repository.kept("first-data"));
+    assert!(first.is_dir(), "{}", first.display());
+
+    // Lira can do nothing after this signal.
+    lira.kill().unwrap();
+    assert!(!lira.wait().unwrap().success());
+    wait_for("the end of the harness", || {
+        processes_with(harness).is_empty()
+    });
+    assert!(first.is_dir(), "{}", first.display());
+
+    passed(&repository.run());
+    assert!(!first.exists(), "{}", first.display());
+}
+
 #[test]
 fn the_pull_request_keeps_the_work_of_the_agent_when_the_worktree_goes_to_another_branch() {
     // After the draft is there, the agent looks at another branch, with a

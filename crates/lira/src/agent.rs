@@ -5,7 +5,7 @@ use crate::data;
 use crate::harness::{Harness, Stop};
 use crate::lira_file::LiraFile;
 use crate::sandbox::Sandbox;
-use std::fs::{self, DirBuilder};
+use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -202,6 +202,11 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 /// conversations. Each agent has a new one, in the folder `harness` of the
 /// data folder of Lira, and Lira removes it when the agent ends.
 ///
+/// The process of Lira that made the folder holds a lock on it until the
+/// folder is gone. A process that ends with no time to remove the folder,
+/// as after `SIGKILL`, loses the lock all the same. So a folder with no lock
+/// is one that Lira left, and the next agent removes it.
+///
 /// The harness reads its data folder in each later conversation, also
 /// outside a sandbox. So in the sandbox, the data folder of the host is
 /// read-only, with all that is in it, and the harness has this one. Lira
@@ -215,16 +220,25 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 ///   change, and the copy goes away with the folder.
 struct Data {
     folder: PathBuf,
+    /// The open folder, with the lock on it. It comes after the folder, so
+    /// that the lock goes away after the folder.
+    _lock: File,
 }
 
 impl Data {
     /// Makes a new data folder, which only you can read.
     fn new() -> Result<Data, String> {
-        let above = data::folder()?.join("harness");
+        Data::new_in(&data::folder()?.join("harness"))
+    }
+
+    /// Makes a new data folder in `above`. First it removes each folder
+    /// there that Lira left.
+    fn new_in(above: &Path) -> Result<Data, String> {
         let failed = |folder: &Path, error| {
             format!("Lira can't make the folder `{}`: {error}", folder.display())
         };
-        fs::create_dir_all(&above).map_err(|error| failed(&above, error))?;
+        fs::create_dir_all(above).map_err(|error| failed(above, error))?;
+        remove_left(above);
         loop {
             let name = format!(
                 "{}-{}",
@@ -234,10 +248,27 @@ impl Data {
             let folder = above.join(name);
             // The folder must be new: Lira removes it with all that is in it.
             match DirBuilder::new().mode(0o700).create(&folder) {
-                Ok(()) => return Ok(Data { folder }),
+                Ok(()) => {}
                 // A folder of an earlier process with the same number.
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(failed(&folder, error)),
+            }
+            // Another process of Lira can find the folder before the lock
+            // is on it, and remove it. Then Lira makes another one.
+            let lock = match File::open(&folder) {
+                Ok(lock) => lock,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(failed(&folder, error)),
+            };
+            match lock.try_lock() {
+                Ok(()) if folder.is_dir() => {
+                    return Ok(Data {
+                        folder,
+                        _lock: lock,
+                    });
+                }
+                Ok(()) | Err(TryLockError::WouldBlock) => continue,
+                Err(TryLockError::Error(error)) => return Err(failed(&folder, error)),
             }
         }
     }
@@ -290,12 +321,34 @@ impl Data {
 
 impl Drop for Data {
     fn drop(&mut self) {
-        if fs::remove_dir_all(&self.folder).is_err() {
-            // The harness can take the right to write away from a folder in
-            // it, and then nothing in that folder can go.
-            open(&self.folder);
-            let _ = fs::remove_dir_all(&self.folder);
+        remove(&self.folder);
+    }
+}
+
+/// Removes each folder in `above` that no process of Lira holds a lock on.
+/// Lira holds the lock while it removes the folder, so that no other
+/// process takes it.
+fn remove_left(above: &Path) {
+    for entry in fs::read_dir(above).into_iter().flatten().flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
         }
+        let folder = entry.path();
+        if let Ok(lock) = File::open(&folder)
+            && lock.try_lock().is_ok()
+        {
+            remove(&folder);
+        }
+    }
+}
+
+/// Removes a data folder with all that is in it.
+fn remove(folder: &Path) {
+    if fs::remove_dir_all(folder).is_err() {
+        // The harness can take the right to write away from a folder in it,
+        // and then nothing in that folder can go.
+        open(folder);
+        let _ = fs::remove_dir_all(folder);
     }
 }
 
@@ -334,4 +387,32 @@ pub fn stopped(stop: &Stop) -> Option<String> {
         Stop::Cancelled => "the message was stopped".to_string(),
         Stop::Other(reason) => format!("the harness gave the reason `{reason}`"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_data_folder_removes_the_left_ones_and_keeps_the_held_ones() {
+        let above = std::env::temp_dir().join(format!("lira-data-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&above);
+        let left = above.join("1-0");
+        fs::create_dir_all(left.join("projects")).unwrap();
+        fs::write(above.join("file"), "").unwrap();
+
+        let held = Data::new_in(&above).unwrap();
+        assert!(!left.exists());
+        assert!(above.join("file").exists());
+        let other = Data::new_in(&above).unwrap();
+        assert!(held.folder.is_dir());
+        assert_ne!(held.folder, other.folder);
+
+        let folder = held.folder.clone();
+        drop(held);
+        assert!(!folder.exists());
+        assert!(other.folder.is_dir());
+        drop(other);
+        fs::remove_dir_all(&above).unwrap();
+    }
 }
