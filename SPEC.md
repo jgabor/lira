@@ -122,7 +122,7 @@ Lira does these steps for each issue, in this order.
 - An agent works only in its own worktree.
 - An agent can change no file of its harness on the host, other than the login of the harness.
 - The harness of each agent keeps its conversations in a folder of its own, and Lira removes the folder when the agent ends.
-- When Lira ends before it can remove that folder, Lira removes it when the next agent starts.
+- When Lira ends before it can remove that folder, Lira removes it when the next agent on the same host starts.
 - When Lira can't lock the folder of a harness, it runs no agent.
 - The harness of an agent reads no memory file of the host.
 - When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.

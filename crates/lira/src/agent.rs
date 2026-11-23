@@ -209,11 +209,11 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 /// `<folder>.lock` beside it, until the folder is gone. A process that ends
 /// with no time to remove the folder, as after `SIGKILL`, loses the lock all
 /// the same. So a folder with no lock is one that Lira left, and the next
-/// agent on the same host removes it. The lock is on a file that Lira opens to write, and
-/// not on the folder, because NFS takes only such a lock. The harness can't
-/// remove a lock file, because the folder `harness` is read-only in its
-/// sandbox. It can take the lock of a folder that Lira left, which keeps
-/// that folder only while the harness runs.
+/// agent on the same host removes it. The lock is on a file that Lira opens
+/// to write, and not on the folder, because NFS takes only such a lock. The
+/// harness can't remove a lock file, because the folder `harness` is
+/// read-only in its sandbox. It can take the lock of a folder that Lira
+/// left, which keeps that folder only while the harness runs.
 ///
 /// The harness reads its data folder in each later conversation, also
 /// outside a sandbox. So in the sandbox, the data folder of the host is
@@ -362,19 +362,34 @@ enum Taken {
 
 impl Lock {
     /// Takes the lock of `folder`. It is an error when the file system
-    /// takes no lock. Then Lira removes no lock file.
+    /// takes no lock. Then Lira removes only a lock file that it made.
     fn take(folder: &Path) -> std::io::Result<Taken> {
         let path = lock_file(folder);
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)?;
+        let open = |new: bool| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .create_new(new)
+                .truncate(false)
+                .mode(0o600)
+                .open(&path)
+        };
+        // If this call made the lock file, so that it can remove it again.
+        let (file, made) = match open(true) {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => (open(false)?, false),
+            Err(error) => return Err(error),
+        };
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(Taken::Busy),
-            Err(TryLockError::Error(error)) => return Err(error),
+            Err(TryLockError::Error(error)) => {
+                // A file system that takes no lock gets no new lock files.
+                if made {
+                    let _ = fs::remove_file(&path);
+                }
+                return Err(error);
+            }
         }
         // Another process can remove the lock file after Lira opened it,
         // and before Lira took the lock. Then the lock is on a file that is
@@ -412,8 +427,8 @@ impl Drop for Lock {
 }
 
 /// Removes each data folder of the host `host` in `above` that no process
-/// of Lira holds a lock on, and its lock file. Lira holds the lock while it removes them, so that
-/// no other process takes them.
+/// of Lira holds a lock on, and its lock file. Lira holds the lock while it
+/// removes them, so that no other process takes them.
 fn remove_left(above: &Path, host: &str) {
     let mut folders = BTreeSet::new();
     for entry in fs::read_dir(above).into_iter().flatten().flatten() {

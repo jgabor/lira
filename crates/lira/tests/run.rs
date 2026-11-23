@@ -3532,7 +3532,7 @@ while :; do sleep 1; done
     });
 }
 
-// spec(Steps): When Lira ends before it can remove that folder, Lira removes it when the next agent starts.
+// spec(Steps): When Lira ends before it can remove that folder, Lira removes it when the next agent on the same host starts.
 #[test]
 fn lira_removes_the_data_folder_of_a_harness_that_it_left_when_it_was_killed() {
     // The first agent keeps its data folder and never ends its reply. The
