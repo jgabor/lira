@@ -169,9 +169,18 @@ fn homes() -> Vec<PathBuf> {
 /// when it sets the variables in another way. `git push` gets its password
 /// from `gh` too. ssh keeps its keys in `~/.ssh`. `git credential-cache`
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
-/// in `XDG_CACHE_HOME` or `~/.cache`.
+/// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
+/// plain store in `~/.gcm/store`.
+///
+/// The runtime folder of the user, which `XDG_RUNTIME_DIR` names, has the
+/// sockets of the session bus and of the ssh agents of the keyring and of
+/// gpg-agent. It is in `/run` on most hosts, and the sandbox has its own
+/// `/run`. When it is not in `/run`, it is here.
 fn login_folders() -> Vec<PathBuf> {
     let mut folders = Vec::new();
+    if let Some(folder) = set("XDG_RUNTIME_DIR") {
+        folders.push(PathBuf::from(folder));
+    }
     if let Some(folder) = set("GH_CONFIG_DIR") {
         folders.push(PathBuf::from(folder));
     }
@@ -186,6 +195,7 @@ fn login_folders() -> Vec<PathBuf> {
         folders.push(home.join(".ssh"));
         folders.push(home.join(".git-credential-cache"));
         folders.push(home.join(".cache").join("git").join("credential"));
+        folders.push(home.join(".gcm").join("store"));
     }
     folders
 }
