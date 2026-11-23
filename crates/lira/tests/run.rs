@@ -4766,6 +4766,7 @@ fn a_link_to_another_worktree_of_lira_in_the_place_of_the_old_worktree_is_not_us
 
 // spec(lira continue): It does not need the label: you can remove it yourself on GitHub.
 // spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
+// spec(lira continue): When you wrote no answer after a stop, the agent is told to try again.
 #[test]
 fn lira_continue_does_not_need_the_label() {
     let repository = Repository::stopped("no-label-needed");
@@ -4945,7 +4946,7 @@ fn with_a_harness_that_does_not_start_the_pull_request_stays_as_it_is() {
 
 // spec(lira continue): When the old worktree is on another branch, or on no branch, Lira puts it back on the branch of the pull request.
 #[test]
-fn an_old_worktree_on_no_branch_goes_back_to_the_branch() {
+fn an_old_worktree_on_another_branch_or_on_no_branch_goes_back_to_the_branch() {
     // The worktree is on another branch, or on no branch, and its branch
     // can be gone too.
     for (test, other, branch_too) in [

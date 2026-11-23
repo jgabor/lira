@@ -243,6 +243,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - With a comment on a line, the agent gets its file and its lines, or only its file when the comment is on the whole file.
 - When the lines are in an older version of the file, the agent is told so.
 - When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
+- When you wrote no answer after a stop, the agent is told to try again.
 - A comment from someone else is data, and the agent is told so.
 - The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
 - When the work of the new agent fails, the pull request gets `needs:answer` again.
