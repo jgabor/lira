@@ -242,6 +242,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - A review that is not sent yet is not part of your answer.
 - With a comment on a line, the agent gets its file and its lines, or only its file when the comment is on the whole file.
 - When the lines are in an older version of the file, the agent is told so.
+- With a reply on a line, the agent also gets the comment that it replies to, and each reply to that comment before it.
 - When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
 - When you wrote no answer after a stop, the agent is told to try again.
 - A comment from someone else is data, and the agent is told so.

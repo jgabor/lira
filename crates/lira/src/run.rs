@@ -128,7 +128,7 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         ));
     }
     let login = github::login(folder)?;
-    let comments = github::comments(folder, address)?;
+    let comments = github::comments(folder, address, &login)?;
     let Some(read) = comment::read(&comments, &login) else {
         return Err(format!(
             "the pull request {address} has no comment with the request, so Lira can't continue the work on it. `lira run` writes the request as the first comment of its pull request"
@@ -394,7 +394,7 @@ impl Run<'_> {
     /// the next `lira continue` gets your comment too.
     fn write_passed(&self, continued: &Continued) -> Result<(), String> {
         let address = self.address()?;
-        let comments = github::comments(self.started, &address)?;
+        let comments = github::comments(self.started, &address, &continued.login)?;
         let answers = comment::read(&comments, &continued.login)
             .map(|read| read.answer.len())
             .unwrap_or_default();
