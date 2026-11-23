@@ -54,7 +54,12 @@ Model of the agent: `claude-opus-5-5`, at high effort
     "options": [{"id": "effort", "value": "high"}]}
    ```
 
-   `clientRequestId` is `issue-<number>-<today's date>`.
+   `clientRequestId` is `issue-<number>-<time>`. `<time>` is what
+   `date -u +%Y%m%dT%H%MZ` prints. Run it one time for each issue in this
+   run, before the first call for that issue. So
+   each start of an issue has a new `clientRequestId`, also a second start on
+   one day. T3 Code reads the same `clientRequestId` as a retry, and gives
+   back the thread of the call before it.
 
    `workspaceStrategy`, when `git worktree list` shows a worktree whose
    branch starts with `lira/<number>-`:
@@ -86,8 +91,9 @@ Model of the agent: `claude-opus-5-5`, at high effort
    instructions with `git show origin/main:t3/agent.md`, and follow them.
    ```
 
-   If the call fails, make it one more time with the same fields. If it
-   fails again, remove the assignee with
+   If the call fails, make it one more time with the same fields, and the
+   same `clientRequestId`: do not run `date` again. If it fails again,
+   remove the assignee with
    `gh issue edit <number> --remove-assignee @me`, so that the issue can
    start at the next run.
 
