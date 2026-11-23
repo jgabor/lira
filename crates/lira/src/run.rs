@@ -564,9 +564,10 @@ impl Run<'_> {
     /// Says in the progress note that Lira stopped, and why. GitHub is
     /// where the person reads how far the work is. When the agent stops and
     /// asks, Lira also writes the question as a comment, and adds
-    /// `needs:answer`. It returns the error of the run, with what went
-    /// wrong here. The run failed already, so a failure of the progress
-    /// note changes nothing.
+    /// `needs:answer`. A run of `lira continue` adds `needs:answer` also
+    /// when it fails with no question. It returns the error of the run,
+    /// with what went wrong here. The run failed already, so a failure of
+    /// the progress note changes nothing.
     fn stop(&mut self, stopped: Stopped) -> String {
         let (error, question) = match stopped {
             Stopped::Failed(error) => (error, None),
