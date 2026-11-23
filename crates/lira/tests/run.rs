@@ -2371,7 +2371,7 @@ while :; do next; reply 'No.'; done
         })
         .collect();
     assert_eq!(changed, Vec::<&str>::new());
-    // Lira wrote each file all the same, and in the git folder.
+    // Lira wrote the file all the same, and in the git folder.
     let second = kept_message(&repository, "second-message");
     let file = second
         .split('`')
@@ -2411,7 +2411,7 @@ for name in lira-comment.md lira-description.md; do ln -sf "$here/host-file" "$o
     program(&bin.join("gh"), &gh);
     fs::write(bin.join("host-file"), "the file of the host\n").unwrap();
     failed(&repository.run());
-    for file in ["created", "commented"] {
+    for file in ["created", "edited", "commented"] {
         let sent = repository.gh(file);
         assert!(!sent.contains("the file of the host"), "{file}: {sent}");
     }
