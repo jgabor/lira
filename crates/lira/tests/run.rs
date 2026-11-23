@@ -2091,30 +2091,37 @@ const GPG_AGENT: [&str; 4] = [
 #[test]
 fn an_agent_and_a_reviewer_reach_no_socket_of_gpg_agent() {
     // The host has no `/run/user/<uid>`, so gpg-agent keeps its sockets in
-    // `~/.gnupg`, or in the folder that `GNUPGHOME` names.
+    // `~/.gnupg`, or in the folder that `GNUPGHOME` names. Its keys are
+    // there too.
     let repository = Repository::new("gpg-agent", CHECK, "");
     let home = repository.top.join("home").join(".gnupg");
     let named = repository.top.join("gnupg");
+    let folders = [&home, &named];
     let mut _agents = Vec::new();
     let mut sockets = Vec::new();
-    for (index, folder) in [&home, &named].into_iter().enumerate() {
-        fs::create_dir_all(folder).unwrap();
+    for (index, folder) in folders.into_iter().enumerate() {
+        let keys = folder.join("private-keys-v1.d");
+        fs::create_dir_all(&keys).unwrap();
+        fs::write(keys.join("key"), "secret\n").unwrap();
         for name in GPG_AGENT {
             let socket = folder.join(name);
             _agents.push(listen(&format!("gpg-agent-{index}"), &socket));
             sockets.push(socket);
         }
     }
+    // A socket that gpg-agent makes after the sandbox started is not there
+    // either: the folder is empty.
     let seen = |file: &str| -> String {
-        sockets
+        folders
             .iter()
-            .map(|socket| {
+            .map(|folder| format!("ls -A '{}' >> \"$here/{file}\" 2>&1\n", folder.display()))
+            .chain(sockets.iter().map(|socket| {
                 format!(
                     "[ -S '{}' ] && echo '{}' >> \"$here/{file}\"\n",
                     socket.display(),
                     socket.display()
                 )
-            })
+            }))
             .chain([format!("touch \"$here/{file}\"\n")])
             .collect()
     };
@@ -2135,10 +2142,14 @@ fn an_agent_and_a_reviewer_reach_no_socket_of_gpg_agent() {
     passed(&output);
     assert_eq!(repository.kept("agent-sockets"), "");
     assert_eq!(repository.kept("reviewer-sockets"), "");
-    // The sockets of the host are as they were.
+    // The sockets and the keys of the host are as they were.
     for socket in &sockets {
         use std::os::unix::fs::FileTypeExt;
         assert!(fs::metadata(socket).unwrap().file_type().is_socket());
+    }
+    for folder in folders {
+        let key = folder.join("private-keys-v1.d").join("key");
+        assert_eq!(fs::read_to_string(key).unwrap(), "secret\n");
     }
 }
 
