@@ -3564,6 +3564,8 @@ fi
 
     passed(&repository.run());
     assert!(!first.exists(), "{}", first.display());
+    let lock = first.with_extension("lock");
+    assert!(!lock.exists(), "{}", lock.display());
 }
 
 #[test]
