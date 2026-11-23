@@ -3390,11 +3390,13 @@ fi
     assert!(second.contains("score"), "{second}");
 }
 
+// spec(Steps): When Lira can't start a `sh` that stops the harness if Lira ends, Lira starts no harness, and the error names `sh`.
 #[test]
 fn a_harness_that_lira_can_not_guard_does_not_start() {
     no_guard("no-guard", None);
 }
 
+// spec(Steps): When Lira can't start a `sh` that stops the harness if Lira ends, Lira starts no harness, and the error names `sh`.
 #[test]
 fn a_harness_whose_guard_ends_at_once_does_not_start() {
     // This `sh` starts, and ends before it reads its script.
