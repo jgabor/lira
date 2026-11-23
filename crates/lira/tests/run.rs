@@ -6139,9 +6139,10 @@ fn an_agent_can_not_lock_the_work_on_another_pull_request() {
     // The agent of a new run tries to lock the work on the pull request,
     // and holds the lock while it works. The next start is the agent of
     // `lira continue`.
-    let attempt = format!(
+    let work = format!(
         r#"if [ ! -e "$here/tried" ]; then
   echo tried > "$here/tried"
+  [ -e '{lock}' ] && echo seen > "$here/lock-seen"
   export here
   if flock --nonblock '{lock}' sh -c 'echo locked > "$here/locked"; {HOLD}'; then :; else
     echo failed > "$here/lock-failed"
@@ -6155,7 +6156,7 @@ fi
     );
     program(
         &repository.harness.join("agent"),
-        &format!("{START}{attempt}"),
+        &format!("{START}{work}"),
     );
     let mut run = repository.lira().args(["run", REQUEST]).spawn().unwrap();
     wait_for("the work of the agent", || {
@@ -6168,6 +6169,7 @@ fi
     let _ = run.wait();
     passed(&continued);
     assert!(repository.starts() > starts);
+    assert!(!repository.harness.join("lock-seen").exists());
     assert!(!repository.harness.join("locked").exists());
     assert!(repository.harness.join("lock-failed").exists());
 }
