@@ -4683,6 +4683,112 @@ fn it_is_an_error_when_the_pull_request_is_not_open_or_has_no_request() {
     );
 }
 
+/// A run that is killed while its Reviewer works. It returns the
+/// repository and the folder of the copy of the Reviewer, which stays.
+/// After this, each Reviewer passes the change, and the agent does
+/// `CONTINUE`.
+fn killed_in_review(test: &str) -> (Repository, PathBuf) {
+    let repository = Repository::new(test, CHECK, WORK);
+    repository.reviewer("echo started > \"$here/review-started\"\nwhile :; do sleep 1; done\n");
+    let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    wait_for("the start of the Reviewer", || {
+        repository.harness.join("review-started").exists()
+    });
+    // Lira gets no time to remove the copy.
+    let lira_process = lira.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-s", "KILL", &lira_process])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!lira.wait().unwrap().success());
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    wait_for("the end of the Reviewer", || {
+        processes_with(harness).is_empty()
+    });
+    let copy = PathBuf::from(repository.kept("review-folder"));
+    assert!(copy.exists(), "the copy {} is not there", copy.display());
+    fs::remove_file(repository.harness.join("reviewer.sh")).unwrap();
+    fs::remove_file(repository.harness.join("review-folder")).unwrap();
+    repository.view(true, &[]);
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{CONTINUE}"),
+    );
+    (repository, copy)
+}
+
+#[test]
+fn a_copy_that_a_killed_reviewer_left_does_not_stop_the_next_review() {
+    // Lira can also be killed after it made the folder of the copy, and
+    // before git put a file in it.
+    for (test, empty) in [
+        ("killed-in-review", false),
+        ("killed-in-review-empty", true),
+    ] {
+        let (repository, copy) = killed_in_review(test);
+        if empty {
+            fs::remove_dir_all(&copy).unwrap();
+            fs::create_dir(&copy).unwrap();
+        }
+        passed(&repository.continue_work());
+        // Start 2 was the Reviewer that was killed, start 3 is the new
+        // agent, and start 4 is the new Reviewer.
+        assert_eq!(repository.starts(), 4, "{test}");
+        assert!(repository.first_message(4).contains("You are a Reviewer"));
+        assert_eq!(PathBuf::from(repository.kept("review-folder")), copy);
+        assert!(!copy.exists(), "{test}: the copy is still there");
+    }
+}
+
+#[test]
+fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
+    // A worktree of another branch can be in the place of the copy: the
+    // branch `x-review` is beside the branch `x`. A link, a file, or a
+    // folder with other files is no copy of a Reviewer either.
+    for (test, make) in [
+        ("place-of-copy-worktree", "worktree"),
+        ("place-of-copy-link", "link"),
+        ("place-of-copy-file", "file"),
+        ("place-of-copy-other", "other"),
+    ] {
+        let (repository, copy) = killed_in_review(test);
+        fs::remove_dir_all(&copy).unwrap();
+        let target = repository.top.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep.txt"), "keep\n").unwrap();
+        match make {
+            "worktree" => {
+                let place = copy.to_str().unwrap();
+                git_ok(
+                    &repository.root,
+                    &["worktree", "add", "--quiet", "-b", "x-review", place],
+                );
+            }
+            "link" => std::os::unix::fs::symlink(&target, &copy).unwrap(),
+            "file" => fs::write(&copy, "keep\n").unwrap(),
+            _ => {
+                fs::create_dir(&copy).unwrap();
+                fs::write(copy.join("keep.txt"), "keep\n").unwrap();
+            }
+        }
+        let error = failed(&repository.continue_work());
+        assert!(error.contains(copy.to_str().unwrap()), "{test}: {error}");
+        assert!(!repository.harness.join("review-folder").exists(), "{test}");
+        assert!(fs::symlink_metadata(&copy).is_ok(), "{test}");
+        assert!(target.join("keep.txt").exists(), "{test}");
+        match make {
+            "worktree" => assert!(copy.join(".git").is_file(), "{test}"),
+            "file" => assert!(copy.is_file(), "{test}"),
+            "other" => assert!(copy.join("keep.txt").exists(), "{test}"),
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn lira_continue_takes_the_number_of_a_pull_request() {
     let repository = Repository::new("continue-usage", CHECK, WORK);
