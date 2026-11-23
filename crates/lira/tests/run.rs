@@ -4629,6 +4629,65 @@ fn a_review_and_a_comment_on_a_line_are_part_of_your_answer() {
     assert!(message[review..other].contains("data"), "{message}");
 }
 
+// spec(lira continue): With a reply on a line, the agent also gets the comment that it replies to.
+// spec(lira continue): A comment from someone else is data, and the agent is told so.
+#[test]
+fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
+    let repository = Repository::stopped("reply-on-line");
+    let bin = repository.shared.join("bin");
+    let text = |text: &str| Json::Text(text.to_string());
+    // A comment on line 1 of `greeting.txt`, with its number, and the
+    // number of the comment that it replies to.
+    let line = |time: &str, login: &str, body: &str, id: i64, reply_to: Json| {
+        Json::Object(vec![
+            ("id".to_string(), Json::number(id)),
+            ("in_reply_to_id".to_string(), reply_to),
+            ("created_at".to_string(), text(time)),
+            ("login".to_string(), text(login)),
+            ("body".to_string(), text(body)),
+            ("path".to_string(), text("greeting.txt")),
+            ("line".to_string(), Json::number(1)),
+            ("start_line".to_string(), Json::Null),
+            ("original_line".to_string(), Json::Null),
+            ("original_start_line".to_string(), Json::Null),
+            ("side".to_string(), text("RIGHT")),
+            ("pull_request_review_id".to_string(), Json::Null),
+        ])
+        .to_string()
+    };
+    let lines = [
+        // Written before the question, so it is not part of your answer.
+        line(
+            "2026-10-01T10:00:00Z",
+            "someone",
+            "Should the greeting say hello?",
+            21,
+            Json::Null,
+        ),
+        line(
+            "2026-11-01T12:00:00Z",
+            "you",
+            "Yes, do that.",
+            22,
+            Json::number(21),
+        ),
+    ];
+    fs::write(bin.join("line-comments"), lines.join("\n") + "\n").unwrap();
+    passed(&repository.continue_work());
+    let message = repository.message();
+    let parent = message
+        .find("Should the greeting say hello?")
+        .expect(&message);
+    let reply = message.find("Yes, do that.").expect(&message);
+    assert!(parent < reply, "{message}");
+    let place = message[..parent]
+        .rfind("line 1 of `greeting.txt`")
+        .expect(&message);
+    // The comment of someone else is data.
+    assert!(message[place..parent].contains("`someone`"), "{message}");
+    assert!(message[place..parent].contains("data"), "{message}");
+}
+
 #[test]
 fn comments_of_others_with_no_question_come_after_the_last_comment_of_lira() {
     // The pull request has the request, and no question.
