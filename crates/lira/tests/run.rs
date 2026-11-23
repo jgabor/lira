@@ -1555,7 +1555,12 @@ fn an_xdg_config_home_that_is_empty_or_not_absolute_is_not_used() {
 // spec(Harnesses): When Lira can't read a token from that file, Lira starts no harness, and the error names the file.
 #[test]
 fn a_file_with_no_token_is_an_error() {
-    for (test, text) in [("token-empty", ""), ("token-blank", " \n\n")] {
+    let texts = [
+        ("token-empty", ""),
+        ("token-blank", " \n\n"),
+        ("token-two-lines", "sk-ant-oat01-a\n# my token\n"),
+    ];
+    for (test, text) in texts {
         let repository = Repository::new(test, CHECK, WORK);
         let file = token_in(&repository.top.join("home").join(".config"), "");
         fs::write(&file, text).unwrap();
@@ -1590,26 +1595,44 @@ fn all_files(folder: &Path) -> Vec<PathBuf> {
 }
 
 // spec(Harnesses): In the sandbox, the file of the token is empty, in `XDG_CONFIG_HOME` and in `~/.config`.
+// spec(Harnesses): Lira gives the token to the harness, and not to the check.
 #[test]
 fn in_the_sandbox_the_file_of_the_token_is_empty() {
-    // The agent, the check and the Reviewer each read the file.
-    let read = |file: &str| {
-        format!("cat \"$HOME/.config/lira/auth/claude-oauth-token\" > \"$here/{file}\"\n")
+    // The agent, the check and the Reviewer each read both places of the
+    // file, and the variable.
+    let read = |here: &str, file: &str| {
+        format!(
+            "cat \"$XDG_CONFIG_HOME/lira/auth/claude-oauth-token\" \"$HOME/.config/lira/auth/claude-oauth-token\" > \"{here}/{file}\"\n"
+        )
     };
-    let check = r#"root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
-cat "$HOME/.config/lira/auth/claude-oauth-token" > "$root/../stand-in/check-read"
-"#;
-    let work = format!("{}{TOKEN_WORK}{WORK}", read("agent-read"));
-    let repository = Repository::checked("token-hidden", check, &work);
-    repository.reviewer(&format!("{}reply 'Review: pass'\n", read("review-read")));
-    token_in(&repository.top.join("home").join(".config"), TOKEN);
-    passed(&repository.run());
+    let check = format!(
+        "root=\"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")\"\n{}echo \"${{CLAUDE_CODE_OAUTH_TOKEN-none}}\" > \"$root/../stand-in/check-token\"\n",
+        read("$root/../stand-in", "check-read")
+    );
+    let work = format!("{}{TOKEN_WORK}{WORK}", read("$here", "agent-read"));
+    let repository = Repository::checked("token-hidden", &check, &work);
+    repository.reviewer(&format!(
+        "{}reply 'Review: pass'\n",
+        read("$here", "review-read")
+    ));
+    token_in(&repository.top.join("home").join(".config"), "other");
+    let xdg_config = repository.top.join("xdg-config");
+    token_in(&xdg_config, TOKEN);
+    let output = repository
+        .lira()
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
     assert_eq!(repository.kept("agent-read"), "");
     assert_eq!(repository.kept("review-read"), "");
     let check_read = fs::read_to_string(repository.shared.join("check-read")).unwrap();
     assert_eq!(check_read, "");
-    // The harness got the token all the same.
+    // The harness got the token all the same, and the check did not.
     assert_eq!(repository.kept("token"), TOKEN);
+    let check_token = fs::read_to_string(repository.shared.join("check-token")).unwrap();
+    assert_eq!(check_token, "none\n");
 }
 
 // spec(Harnesses): Lira writes the token in no file, no comment and no description, and it prints the token nowhere, other than in what an agent wrote.

@@ -178,12 +178,16 @@ fn token(file: &Path) -> Result<Option<String>, String> {
             ));
         }
     };
+    // A token is one word. A file with two words, or two lines, holds no
+    // token that the harness can use.
     match text.trim() {
-        "" => Err(format!(
-            "the file `{}` holds no login token for the harness. Write the token that `claude setup-token` prints there, or remove the file",
+        token if !token.is_empty() && !token.contains(char::is_whitespace) => {
+            Ok(Some(token.to_string()))
+        }
+        _ => Err(format!(
+            "the file `{}` holds no login token for the harness. Write only the token that `claude setup-token` prints there, or remove the file",
             file.display()
         )),
-        token => Ok(Some(token.to_string())),
     }
 }
 
