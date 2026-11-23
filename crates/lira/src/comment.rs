@@ -11,6 +11,11 @@ const REQUEST: &str = "<!-- lira request -->";
 /// The first line of a comment that says what stops the work.
 const QUESTION: &str = "<!-- lira question -->";
 
+/// The start and the end of the line, in the comment with the request,
+/// that names the branch that the worktree started on. GitHub does not
+/// show that line.
+const STARTED: (&str, &str) = ("<!-- lira started on ", " -->");
+
 /// One comment on a pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
@@ -19,10 +24,13 @@ pub struct Comment {
     pub body: String,
 }
 
-/// The comment that keeps the request on the pull request.
-pub fn request(request: &str) -> String {
+/// The comment that keeps the request on the pull request. `branch` is
+/// the branch that the worktree started on. The folder of the worktree has
+/// its name, also when the agent gives the branch another name.
+pub fn request(request: &str, branch: &str) -> String {
+    let (start, end) = STARTED;
     format!(
-        "{REQUEST}\nThe request that the agent works on:\n\n{}",
+        "{REQUEST}\n{start}{branch}{end}\nThe request that the agent works on:\n\n{}",
         quote(request)
     )
 }
@@ -31,8 +39,8 @@ pub fn request(request: &str) -> String {
 pub const LONGEST: usize = 65_536;
 
 /// If the comment with the request fits in a comment on GitHub.
-pub fn request_fits(request: &str) -> bool {
-    self::request(request).chars().count() <= LONGEST
+pub fn request_fits(request: &str, branch: &str) -> bool {
+    self::request(request, branch).chars().count() <= LONGEST
 }
 
 /// A text as a quote of Markdown.
@@ -56,6 +64,9 @@ pub fn question(question: &str) -> String {
 pub struct Read {
     /// The request, from the first comment that has it.
     pub request: String,
+    /// The branch that the worktree started on, when that comment names
+    /// it.
+    pub started_on: Option<String>,
     /// What the last comment of Lira says, when it is not the request.
     pub stopped: Option<String>,
     /// Your answer: each comment of `login` after the last comment of
@@ -71,7 +82,7 @@ pub struct Read {
 /// `None` when no comment has the request.
 pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
     let of_lira = |comment: &Comment| comment.author == login && marker(&comment.body).is_some();
-    let request = comments
+    let (request, started_on) = comments
         .iter()
         .filter(|comment| comment.author == login)
         .find_map(|comment| request_in(&comment.body))?;
@@ -93,6 +104,7 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Read> {
         .collect();
     Some(Read {
         request,
+        started_on,
         stopped,
         answer,
         others,
@@ -109,11 +121,20 @@ fn marker(body: &str) -> Option<(&'static str, &str)> {
         .map(|marker| (marker, rest))
 }
 
-/// The request in a comment that has it: the lines of its quote.
-fn request_in(body: &str) -> Option<String> {
+/// The request in a comment that has it: the lines of its quote. And the
+/// branch that the worktree started on, when the line after the marker
+/// names it.
+fn request_in(body: &str) -> Option<(String, Option<String>)> {
     let (REQUEST, rest) = marker(body)? else {
         return None;
     };
+    let (start, end) = STARTED;
+    let started_on = rest
+        .lines()
+        .next()
+        .and_then(|line| line.trim_end().strip_prefix(start)?.strip_suffix(end))
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string);
     let lines: Vec<&str> = rest
         .lines()
         .skip_while(|line| !line.starts_with('>'))
@@ -121,12 +142,15 @@ fn request_in(body: &str) -> Option<String> {
         .map(|line| line.strip_prefix("> ").unwrap_or(&line[1..]))
         .collect();
     let request = lines.join("\n");
-    (!request.trim().is_empty()).then_some(request)
+    (!request.trim().is_empty()).then_some((request, started_on))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A branch that a worktree started on.
+    const BRANCH: &str = "lira/run-1a2b3c4d";
 
     fn of(author: &str, body: &str) -> Comment {
         Comment {
@@ -137,12 +161,12 @@ mod tests {
 
     #[test]
     fn a_request_fits_when_its_comment_has_at_most_the_longest_count_of_characters() {
-        let around = request("x").chars().count() - 1;
+        let around = request("x", BRANCH).chars().count() - 1;
         // Each character here is more than one byte, and counts as one.
         let fits = "é".repeat(LONGEST - around);
-        assert_eq!(request(&fits).chars().count(), LONGEST);
-        assert!(request_fits(&fits));
-        assert!(!request_fits(&format!("{fits}é")));
+        assert_eq!(request(&fits, BRANCH).chars().count(), LONGEST);
+        assert!(request_fits(&fits, BRANCH));
+        assert!(!request_fits(&format!("{fits}é"), BRANCH));
     }
 
     #[test]
@@ -151,20 +175,33 @@ mod tests {
             "Add a file.",
             "Add a file.\n\n  Make it `short`.\n> Quoted.",
         ] {
-            let comments = [of("you", &request(text))];
+            let comments = [of("you", &request(text, BRANCH))];
             assert_eq!(read(&comments, "you").unwrap().request, text);
         }
         // GitHub can give the lines of a comment with a carriage return.
-        let body = request("One.\n\nTwo.").replace('\n', "\r\n");
+        let body = request("One.\n\nTwo.", BRANCH).replace('\n', "\r\n");
         let read = read(&[of("you", &body)], "you").unwrap();
         assert_eq!(read.request, "One.\n\nTwo.");
+        assert_eq!(read.started_on.as_deref(), Some(BRANCH));
+    }
+
+    #[test]
+    fn the_comment_with_the_request_names_the_branch_that_the_worktree_started_on() {
+        let comments = [of("you", &request("Do it.", BRANCH))];
+        let read = read(&comments, "you").unwrap();
+        assert_eq!(read.started_on.as_deref(), Some(BRANCH));
+        // A comment with the request and no such line names no branch.
+        let body = format!("{REQUEST}\nThe request that the agent works on:\n\n> Do it.\n");
+        let read = super::read(&[of("you", &body)], "you").unwrap();
+        assert_eq!(read.request, "Do it.");
+        assert_eq!(read.started_on, None);
     }
 
     #[test]
     fn the_answer_follows_the_last_comment_of_lira() {
         let comments = [
             of("you", "A remark before the request."),
-            of("you", &request("Do it.")),
+            of("you", &request("Do it.", BRANCH)),
             of("you", "A remark."),
             of("you", &question("The check failed.")),
             of("you", "Do it in another way."),
@@ -180,7 +217,7 @@ mod tests {
 
     #[test]
     fn with_only_the_request_nothing_says_what_stopped_the_work() {
-        let comments = [of("you", &request("Do it.")), of("you", "Go on.")];
+        let comments = [of("you", &request("Do it.", BRANCH)), of("you", "Go on.")];
         let read = read(&comments, "you").unwrap();
         assert_eq!(read.stopped, None);
         assert_eq!(read.answer, ["Go on."]);
@@ -189,10 +226,13 @@ mod tests {
     #[test]
     fn with_no_request_of_the_login_there_is_nothing_to_read() {
         assert_eq!(read(&[], "you"), None);
-        let comments = [of("someone", &request("Do it.")), of("you", "Go on.")];
+        let comments = [
+            of("someone", &request("Do it.", BRANCH)),
+            of("you", "Go on."),
+        ];
         assert_eq!(read(&comments, "you"), None);
         // A quote of the marker is no comment of Lira.
-        let quoted = format!("> {}", request("Do it."));
+        let quoted = format!("> {}", request("Do it.", BRANCH));
         assert_eq!(read(&[of("you", &quoted)], "you"), None);
     }
 }
