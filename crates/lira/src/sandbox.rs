@@ -194,9 +194,19 @@ fn homes() -> Vec<PathBuf> {
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
 /// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
 /// plain store in `~/.gcm/store`.
+///
+/// gpg keeps its keys in `GNUPGHOME`, or in `~/.gnupg`. gpg-agent answers
+/// at its sockets, and with its ssh support on, one of them leads to the
+/// keys of ssh. It keeps them in `/run/user/<uid>/gnupg`, or, when the host
+/// has no such folder, in the folder of the keys. That folder is empty in
+/// the sandbox, so a socket that gpg-agent makes there later is not there
+/// either.
 fn login_folders() -> Vec<PathBuf> {
     let mut folders = Vec::new();
     if let Some(folder) = set("GH_CONFIG_DIR") {
+        folders.push(PathBuf::from(folder));
+    }
+    if let Some(folder) = set("GNUPGHOME") {
         folders.push(PathBuf::from(folder));
     }
     if let Some(folder) = set("XDG_CONFIG_HOME") {
@@ -211,6 +221,7 @@ fn login_folders() -> Vec<PathBuf> {
         folders.push(home.join(".git-credential-cache"));
         folders.push(home.join(".cache").join("git").join("credential"));
         folders.push(home.join(".gcm").join("store"));
+        folders.push(home.join(".gnupg"));
     }
     folders
 }

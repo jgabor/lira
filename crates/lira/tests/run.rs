@@ -2078,6 +2078,81 @@ fn a_file_that_lira_gives_the_sandbox_in_the_hidden_xdg_runtime_dir_is_there() {
     passed(&output);
 }
 
+/// The sockets of gpg-agent. With its ssh support on, `S.gpg-agent.ssh`
+/// leads to the keys of ssh, also when `SSH_AUTH_SOCK` does not name it.
+const GPG_AGENT: [&str; 4] = [
+    "S.gpg-agent",
+    "S.gpg-agent.ssh",
+    "S.gpg-agent.extra",
+    "S.gpg-agent.browser",
+];
+
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_reach_no_socket_of_gpg_agent() {
+    // The host has no `/run/user/<uid>`, so gpg-agent keeps its sockets in
+    // `~/.gnupg`, or in the folder that `GNUPGHOME` names. Its keys are
+    // there too.
+    let repository = Repository::new("gpg-agent", CHECK, "");
+    let home = repository.top.join("home").join(".gnupg");
+    let named = repository.top.join("gnupg");
+    let folders = [&home, &named];
+    let mut _agents = Vec::new();
+    let mut sockets = Vec::new();
+    for (index, folder) in folders.into_iter().enumerate() {
+        let keys = folder.join("private-keys-v1.d");
+        fs::create_dir_all(&keys).unwrap();
+        fs::write(keys.join("key"), "secret\n").unwrap();
+        for name in GPG_AGENT {
+            let socket = folder.join(name);
+            _agents.push(listen(&format!("gpg-agent-{index}"), &socket));
+            sockets.push(socket);
+        }
+    }
+    // Each folder is empty, with no key and no socket. So a socket that
+    // gpg-agent makes there later is not there either.
+    let seen = |file: &str| -> String {
+        folders
+            .iter()
+            .map(|folder| format!("ls -A '{}' >> \"$here/{file}\" 2>&1\n", folder.display()))
+            .chain(sockets.iter().map(|socket| {
+                format!(
+                    "[ -S '{}' ] && echo '{}' >> \"$here/{file}\"\n",
+                    socket.display(),
+                    socket.display()
+                )
+            }))
+            .chain([format!("touch \"$here/{file}\"\n")])
+            .collect()
+    };
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{}{WORK}", seen("agent-sockets")),
+    );
+    repository.reviewer(&format!(
+        "{}reply 'Review: pass'\n",
+        seen("reviewer-sockets")
+    ));
+    let output = repository
+        .lira()
+        .env("GNUPGHOME", &named)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("agent-sockets"), "");
+    assert_eq!(repository.kept("reviewer-sockets"), "");
+    // The sockets and the keys of the host are as they were.
+    for socket in &sockets {
+        use std::os::unix::fs::FileTypeExt;
+        assert!(fs::metadata(socket).unwrap().file_type().is_socket());
+    }
+    for folder in folders {
+        let key = folder.join("private-keys-v1.d").join("key");
+        assert_eq!(fs::read_to_string(key).unwrap(), "secret\n");
+    }
+}
+
 #[test]
 fn an_ssh_agent_of_dev_null_leaves_dev_null_as_it_is() {
     // A host turns the ssh agent off with `SSH_AUTH_SOCK=/dev/null`. The
