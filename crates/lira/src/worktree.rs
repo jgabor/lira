@@ -221,20 +221,18 @@ fn worktree_named(folder: &Path) -> String {
     format!("the worktree `{}`", folder.display())
 }
 
-/// If `folder` is the top folder of a worktree of the repository in
-/// `repository`.
+/// If `folder` is the top folder of a worktree that git has in its list of
+/// worktrees of the repository in `repository`. Lira runs no git in
+/// `folder` to know it: an agent can make a folder with a `.git` file and a
+/// git folder of its own there.
 fn is_a_worktree_of(folder: &Path, repository: &Path) -> Result<bool, String> {
-    if !folder.join(".git").exists() {
+    let Ok(folder) = folder.canonicalize() else {
         return Ok(false);
-    }
-    let same = |one: PathBuf, other: PathBuf| match (one.canonicalize(), other.canonicalize()) {
-        (Ok(one), Ok(other)) => one == other,
-        _ => false,
     };
-    Ok(same(
-        git::common_folder(folder)?,
-        git::common_folder(repository)?,
-    ))
+    let listed = git::worktrees(repository)?;
+    Ok(listed
+        .iter()
+        .any(|worktree| worktree.canonicalize().is_ok_and(|real| real == folder)))
 }
 
 /// Takes the commits that the remote has on the branch, up to the commit
