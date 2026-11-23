@@ -65,10 +65,23 @@ pub fn start(
             "Lira can't find the harness `{shown}` on this host, or a program that it needs to start"
         ))
     })?;
+    // The harness gets the token in its environment. In the sandbox, the
+    // file of the token is empty, also in the place that Lira does not
+    // read. The commands that the harness runs get the environment too.
+    for file in token_files() {
+        sandbox.hidden(&file);
+    }
+    let token = match token_file() {
+        Some(file) => token(&file)?,
+        None => None,
+    };
     let data = Data::new()?;
-    data.prepare(sandbox)?;
+    data.prepare(sandbox, token.is_none())?;
     let mut command = sandbox.command(found.as_os_str());
     command.current_dir(folder).env(DATA_FOLDER, &data.folder);
+    if let Some(token) = token {
+        command.env(TOKEN, token);
+    }
     let mut harness =
         Harness::start_as(command, &shown).map_err(|error| named(error.to_string()))?;
     let conversation = harness
@@ -117,6 +130,67 @@ const OWN_SETTINGS: [&str; 11] = [
 /// The file of the login of the harness, in its data folder.
 const LOGIN: &str = ".credentials.json";
 
+/// The variable where Claude Code reads a login token. The harness does
+/// not renew such a token.
+const TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// The file of the login token, in the configuration folder of the host.
+const TOKEN_FILE: [&str; 3] = ["lira", "auth", "claude-oauth-token"];
+
+/// The file of the login token for the harness. It is in
+/// `XDG_CONFIG_HOME`, or in `~/.config` when that is not set. A value that
+/// is empty, or that is no absolute path, counts as not set, as for
+/// `XDG_DATA_HOME`.
+fn token_file() -> Option<PathBuf> {
+    let folder = absolute("XDG_CONFIG_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".config")))?;
+    Some(TOKEN_FILE.iter().fold(folder, |path, name| path.join(name)))
+}
+
+/// The places of the file of the login token: in `XDG_CONFIG_HOME`, and in
+/// `~/.config`.
+fn token_files() -> Vec<PathBuf> {
+    let folders = [
+        absolute("XDG_CONFIG_HOME"),
+        absolute("HOME").map(|home| home.join(".config")),
+    ];
+    let files = folders.into_iter().flatten();
+    files
+        .map(|folder| TOKEN_FILE.iter().fold(folder, |path, name| path.join(name)))
+        .collect()
+}
+
+/// The login token for the harness in `file`, or `None` when the file is
+/// not there.
+///
+/// `claude setup-token` makes the token. The harness does not renew it, so
+/// it keeps working when Claude Code on the host renews its own login.
+/// Lira gives the token to the harness in its environment, and writes it
+/// nowhere.
+fn token(file: &Path) -> Result<Option<String>, String> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Lira can't read the login token of the harness in `{}`: {error}",
+                file.display()
+            ));
+        }
+    };
+    // A token is one word. A file with two words, or two lines, holds no
+    // token that the harness can use.
+    match text.trim() {
+        token if !token.is_empty() && !token.contains(char::is_whitespace) => {
+            Ok(Some(token.to_string()))
+        }
+        _ => Err(format!(
+            "the file `{}` holds no login token for the harness. Write only the token that `claude setup-token` prints there, or remove the file",
+            file.display()
+        )),
+    }
+}
+
 /// The configuration of Claude Code. It is in the folder that
 /// `CLAUDE_CONFIG_DIR` names, or in the home folder.
 const CONFIGURATION: &str = ".claude.json";
@@ -134,8 +208,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 /// puts these in it, from the data folder of the host:
 ///
 /// - What says how the harness works, read-only.
-/// - The login, which the harness can change. It renews the login, and a
-///   login that it can't save could log you out.
+/// - The login, which the harness can change, when Lira has no login token
+///   for the harness. It renews the login, and a login that it can't save
+///   could log you out.
 /// - A copy of the configuration of Claude Code, which the harness can
 ///   change, and the copy goes away with the folder.
 struct Data {
@@ -168,8 +243,10 @@ impl Data {
     }
 
     /// Puts in the data folder what the harness needs from the data folder
-    /// of the host, and makes it writable in `sandbox`.
-    fn prepare(&self, sandbox: &mut Sandbox) -> Result<(), String> {
+    /// of the host, and makes it writable in `sandbox`. The login of the
+    /// host is there only with `login`. Without it, the login of the host
+    /// is empty in `sandbox`.
+    fn prepare(&self, sandbox: &mut Sandbox, login: bool) -> Result<(), String> {
         sandbox.writable(&self.folder);
         if let Some(host) = host_data().filter(|folder| folder.is_dir()) {
             for name in OWN_SETTINGS {
@@ -183,10 +260,14 @@ impl Data {
                         .read_only_at(&found, &self.folder.join(name));
                 }
             }
-            if let Ok(login) = host.join(LOGIN).canonicalize()
-                && login.is_file()
+            if !login {
+                // With a token, the harness can renew no login of the host,
+                // and nothing in the sandbox can read the login.
+                sandbox.hidden(&host.join(LOGIN));
+            } else if let Ok(file) = host.join(LOGIN).canonicalize()
+                && file.is_file()
             {
-                sandbox.writable_at(&login, &self.folder.join(LOGIN));
+                sandbox.writable_at(&file, &self.folder.join(LOGIN));
             }
         }
         let configuration = absolute(DATA_FOLDER)

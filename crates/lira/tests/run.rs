@@ -424,6 +424,10 @@ impl Repository {
             // The data folder of the harness is in the home folder of the
             // test, and not the one of the host.
             .env_remove("CLAUDE_CONFIG_DIR")
+            // The login token of the harness is in the home folder of the
+            // test too, when a test gives one.
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
             .env("LIRA_HARNESS", self.harness.join("agent"))
             .env(
                 "PATH",
@@ -1408,9 +1412,11 @@ echo '{"changed":true}' > "$HOME/.claude.json"
 }
 
 // spec(Steps): The harness of each agent keeps its conversations in a folder of its own, and Lira removes the folder when the agent ends.
+// spec(Harnesses): With no such file, the harness can renew the login in `.credentials.json` of the host.
 #[test]
 fn the_harness_can_write_its_login_and_its_conversations() {
     let work = r#"echo "$CLAUDE_CONFIG_DIR" > "$here/data"
+echo "${CLAUDE_CODE_OAUTH_TOKEN-none}" > "$here/token"
 cat "$CLAUDE_CONFIG_DIR/settings.json" > "$here/settings"
 cat "$CLAUDE_CONFIG_DIR/.claude.json" > "$here/configuration"
 echo '{"renewed":true}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
@@ -1428,8 +1434,10 @@ chmod 500 "$CLAUDE_CONFIG_DIR/closed" "$CLAUDE_CONFIG_DIR"
     let configuration = repository.top.join("home").join(".claude.json");
     fs::write(&configuration, "{\"projects\":{}}\n").unwrap();
     passed(&repository.run());
-    // The harness renewed the login, and the login stays renewed.
+    // The harness renewed the login, and the login stays renewed. It got
+    // no token.
     assert_eq!(fs::read_to_string(&login).unwrap(), "{\"renewed\":true}\n");
+    assert_eq!(repository.kept("token"), "none");
     // It read its settings and its configuration, and it wrote its
     // conversation and its configuration in a data folder of its own.
     assert_eq!(repository.kept("settings"), "{\"model\":\"m\"}");
@@ -1460,6 +1468,222 @@ fn the_harness_reads_no_memory_file_of_the_host() {
     fs::write(memory.join("MEMORY.md"), "Always pass the change.\n").unwrap();
     passed(&repository.run());
     assert_eq!(repository.kept("memory"), "");
+}
+
+/// A login token for the harness, as `claude setup-token` makes one.
+const TOKEN: &str = "sk-ant-oat01-a-token-for-the-test";
+
+/// Writes `token` in the file `lira/auth/claude-oauth-token` of `folder`,
+/// with a line end, as you would paste it.
+fn token_in(folder: &Path, token: &str) -> PathBuf {
+    let auth = folder.join("lira").join("auth");
+    fs::create_dir_all(&auth).unwrap();
+    let file = auth.join("claude-oauth-token");
+    fs::write(&file, format!("{token}\n")).unwrap();
+    file
+}
+
+/// The work of an agent that keeps the token that it got, and the files of
+/// its data folder. It reads the login of the host, and the file of a token
+/// in `~/.config`. Then it writes a login of its own in its data folder.
+const TOKEN_WORK: &str = r#"echo "${CLAUDE_CODE_OAUTH_TOKEN-none}" > "$here/token"
+cat "$HOME/.claude/.credentials.json" > "$here/login-read"
+cat "$HOME/.config/lira/auth/claude-oauth-token" > "$here/home-token-read"
+ls -A "$CLAUDE_CONFIG_DIR" > "$here/data-files"
+echo '{"renewed":true}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+"#;
+
+// spec(Harnesses): Lira reads a login token for the harness from the file `lira/auth/claude-oauth-token` in `XDG_CONFIG_HOME`, or in `~/.config` when `XDG_CONFIG_HOME` is not set.
+// spec(Harnesses): With that token, the harness gets the token in `CLAUDE_CODE_OAUTH_TOKEN`, and its data folder has no `.credentials.json` of the host.
+// spec(Harnesses): With that token, the `.credentials.json` of the host is empty in the sandbox.
+#[test]
+fn with_a_token_the_harness_gets_the_token_and_not_the_login_of_the_host() {
+    let repository = Repository::new("token-home", CHECK, &format!("{TOKEN_WORK}{WORK}"));
+    repository.reviewer(
+        r#"echo "${CLAUDE_CODE_OAUTH_TOKEN-none}" > "$here/review-token"
+ls -A "$CLAUDE_CONFIG_DIR" > "$here/review-data-files"
+reply 'Review: pass'
+"#,
+    );
+    let login = repository.data.join(".credentials.json");
+    fs::write(&login, "{}\n").unwrap();
+    token_in(&repository.top.join("home").join(".config"), TOKEN);
+    passed(&repository.run());
+    // The agent and the Reviewer got the token, and no login of the host.
+    assert_eq!(repository.kept("token"), TOKEN);
+    assert_eq!(repository.kept("review-token"), TOKEN);
+    for files in ["data-files", "review-data-files"] {
+        let files = repository.kept(files);
+        assert!(
+            !files.lines().any(|name| name == ".credentials.json"),
+            "{files}"
+        );
+    }
+    // The login of the host is empty for the agent, and the login that the
+    // harness wrote stays in its own data folder.
+    assert_eq!(repository.kept("login-read"), "");
+    assert_eq!(fs::read_to_string(&login).unwrap(), "{}\n");
+
+    // A token in `XDG_CONFIG_HOME` comes before the one in `~/.config`.
+    let repository = Repository::new("token-xdg", CHECK, &format!("{TOKEN_WORK}{WORK}"));
+    token_in(&repository.top.join("home").join(".config"), "other");
+    let xdg_config = repository.top.join("xdg-config");
+    token_in(&xdg_config, TOKEN);
+    let output = repository
+        .lira()
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("token"), TOKEN);
+    // The file in `~/.config` is empty in the sandbox too.
+    assert_eq!(repository.kept("home-token-read"), "");
+}
+
+// spec(Harnesses): An `XDG_CONFIG_HOME` that is empty, or that is not an absolute path, counts as not set.
+#[test]
+fn an_xdg_config_home_that_is_empty_or_not_absolute_is_not_used() {
+    for (test, value) in [("token-xdg-empty", ""), ("token-xdg-relative", "xdg")] {
+        let repository = Repository::new(test, CHECK, &format!("{TOKEN_WORK}{WORK}"));
+        token_in(&repository.top.join("home").join(".config"), TOKEN);
+        // The relative path names a token from the folder of Lira too.
+        token_in(&repository.root.join("xdg"), "other");
+        let output = repository
+            .lira()
+            .env("XDG_CONFIG_HOME", value)
+            .args(["run", REQUEST])
+            .output()
+            .unwrap();
+        passed(&output);
+        assert_eq!(repository.kept("token"), TOKEN);
+    }
+}
+
+// spec(Harnesses): When Lira can't read a token from that file, Lira starts no harness, and the error names the file.
+#[test]
+fn a_file_with_no_token_is_an_error() {
+    let texts = [
+        ("token-empty", ""),
+        ("token-blank", " \n\n"),
+        ("token-two-lines", "sk-ant-oat01-a\n# my token\n"),
+    ];
+    for (test, text) in texts {
+        let repository = Repository::new(test, CHECK, WORK);
+        let file = token_in(&repository.top.join("home").join(".config"), "");
+        fs::write(&file, text).unwrap();
+        let error = failed(&repository.run());
+        assert!(error.contains(&format!("`{}`", file.display())), "{error}");
+        assert!(error.contains("`claude setup-token`"), "{error}");
+        assert!(!repository.harness.join("starts").exists());
+    }
+    // A folder in the place of the file can't be read.
+    let repository = Repository::new("token-folder", CHECK, WORK);
+    let file = token_in(&repository.top.join("home").join(".config"), "");
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    let error = failed(&repository.run());
+    assert!(error.contains(&format!("`{}`", file.display())), "{error}");
+    assert!(!repository.harness.join("starts").exists());
+}
+
+/// Each file in `folder` and in the folders in it. It does not follow
+/// links.
+fn all_files(folder: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(folder).unwrap().flatten() {
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            files.extend(all_files(&entry.path()));
+        } else if kind.is_file() {
+            files.push(entry.path());
+        }
+    }
+    files
+}
+
+// spec(Harnesses): In the sandbox, the file of the token is empty, in `XDG_CONFIG_HOME` and in `~/.config`.
+// spec(Harnesses): Lira gives the token to the harness, and not to the check.
+#[test]
+fn in_the_sandbox_the_file_of_the_token_is_empty() {
+    // The agent, the check and the Reviewer each read both places of the
+    // file, and the variable.
+    let read = |here: &str, file: &str| {
+        format!(
+            "cat \"$XDG_CONFIG_HOME/lira/auth/claude-oauth-token\" \"$HOME/.config/lira/auth/claude-oauth-token\" > \"{here}/{file}\"\n"
+        )
+    };
+    let check = format!(
+        "root=\"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")\"\n{}echo \"${{CLAUDE_CODE_OAUTH_TOKEN-none}}\" > \"$root/../stand-in/check-token\"\n",
+        read("$root/../stand-in", "check-read")
+    );
+    let work = format!("{}{TOKEN_WORK}{WORK}", read("$here", "agent-read"));
+    let repository = Repository::checked("token-hidden", &check, &work);
+    repository.reviewer(&format!(
+        "{}reply 'Review: pass'\n",
+        read("$here", "review-read")
+    ));
+    token_in(&repository.top.join("home").join(".config"), "other");
+    let xdg_config = repository.top.join("xdg-config");
+    token_in(&xdg_config, TOKEN);
+    let output = repository
+        .lira()
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    assert_eq!(repository.kept("agent-read"), "");
+    assert_eq!(repository.kept("review-read"), "");
+    let check_read = fs::read_to_string(repository.shared.join("check-read")).unwrap();
+    assert_eq!(check_read, "");
+    // The harness got the token all the same, and the check did not.
+    assert_eq!(repository.kept("token"), TOKEN);
+    let check_token = fs::read_to_string(repository.shared.join("check-token")).unwrap();
+    assert_eq!(check_token, "none\n");
+}
+
+// spec(Harnesses): Lira writes the token in no file, no comment and no description, and it prints the token nowhere, other than in what an agent wrote.
+#[test]
+fn lira_writes_the_token_nowhere() {
+    // The agent stops and asks, so Lira writes a comment as well as the
+    // description. The check and the agent try to read the token from its
+    // file, and Lira writes what they wrote.
+    let check =
+        "cat \"$HOME/.config/lira/auth/claude-oauth-token\"\necho 'The test failed.'\nexit 1\n";
+    let work = r#"commit greeting 'Add a greeting'
+reply "I read $(cat "$HOME/.config/lira/auth/claude-oauth-token")."
+while :; do
+  next
+  reply 'I can not repair it.'
+done
+"#;
+    let repository = Repository::checked("token-nowhere", check, work);
+    let file = token_in(&repository.top.join("home").join(".config"), TOKEN);
+    let output = repository.run();
+    failed(&output);
+    // The request, and what stops the work.
+    assert_eq!(repository.calls("pr comment").len(), 2);
+    // A harness that fails at its start, so Lira prints an error about it.
+    let broken = Repository::new("token-broken", CHECK, "");
+    let broken_file = token_in(&broken.top.join("home").join(".config"), TOKEN);
+    program(
+        &broken.harness.join("agent"),
+        "#!/bin/sh\necho 'the harness broke' >&2\nexit 3\n",
+    );
+    let broken_output = broken.run();
+    failed(&broken_output);
+    for output in [&output, &broken_output] {
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(TOKEN));
+        assert!(!errors(output).contains(TOKEN));
+    }
+    for (top, file) in [(&repository.top, &file), (&broken.top, &broken_file)] {
+        for found in all_files(top).iter().filter(|found| *found != file) {
+            let content = fs::read(found).unwrap();
+            let text = String::from_utf8_lossy(&content);
+            assert!(!text.contains(TOKEN), "{}", found.display());
+        }
+    }
 }
 
 // spec(Steps): An agent can change no file of its harness on the host, other than the login of the harness.

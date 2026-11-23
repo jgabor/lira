@@ -17,6 +17,12 @@ what the first version does.
 - Lira runs on Linux, and needs `bwrap` (bubblewrap). Each agent works in a
   sandbox, where it can change its own worktree, and not your other files.
   The check of its change runs in the same sandbox.
+- Make a login token for the harness with `claude setup-token`, and keep it
+  in the file `lira/auth/claude-oauth-token` in `XDG_CONFIG_HOME`, or in
+  `~/.config` when `XDG_CONFIG_HOME` is not set. The harness does not
+  renew that token, so it keeps working when Claude Code on your host renews
+  its own login. With no such file, the harness uses the login of Claude
+  Code on the host.
 - A repository sets itself up for Lira with one file, `lira.toml`. It names
   the check: the one command that says pass or fail for a change.
 - The check can print scores. A change that makes a score worse waits for
