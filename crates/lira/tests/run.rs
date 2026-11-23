@@ -1580,7 +1580,8 @@ fn an_agent_and_a_reviewer_have_no_login_for_github() {
 /// in the sandbox sees: the ones of the credential helpers of git, of
 /// `~/.netrc`, of the home folder that the system names for the user, which
 /// is `$system`, and of the keyring. `$HOME/bus` is the socket of the
-/// session bus of D-Bus.
+/// session bus of D-Bus that its variable names, and `$XDG_RUNTIME_DIR/bus`
+/// is the one where a program looks when the variable is not set.
 const OTHER_LOGINS: &str = r#"other_logins() {
   for file in "$HOME/.git-credentials" "$XDG_CONFIG_HOME/git/credentials" "$HOME/.config/git/credentials" "$HOME/.netrc"; do
     echo "$file: $(cat "$file" 2>/dev/null)"
@@ -1589,6 +1590,7 @@ const OTHER_LOGINS: &str = r#"other_logins() {
     echo "$folder: $(ls -A "$folder" 2>&1)"
   done
   [ -S "$HOME/bus" ] && echo "the session bus is there"
+  [ -S "$XDG_RUNTIME_DIR/bus" ] && echo "the session bus of the runtime folder is there"
   env | grep '^DBUS_SESSION_BUS_ADDRESS=' || true
 }
 "#;
@@ -1633,6 +1635,9 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     // address of D-Bus can escape each byte of the path.
     let bus = home.join("bus");
     let _bus = ssh_agent("other-logins", &bus);
+    let runtime = repository.top.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let _runtime_bus = ssh_agent("other-logins-runtime", &runtime.join("bus"));
     let address = format!(
         "unix:path={}%2fbus,guid=0123456789abcdef0123456789abcdef",
         home.display()
@@ -1645,6 +1650,7 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_CACHE_HOME", &xdg_cache)
         .env("DBUS_SESSION_BUS_ADDRESS", &address)
+        .env("XDG_RUNTIME_DIR", &runtime)
         .args(["run", REQUEST])
         .output()
         .unwrap();
@@ -1695,7 +1701,8 @@ fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
         .args(["--dev-bind", "/", "/", "--ro-bind"])
         .arg(passwd)
         .args(["/etc/passwd", "--"])
-        .arg(lira.get_program());
+        .arg(lira.get_program())
+        .args(lira.get_args());
     if let Some(folder) = lira.get_current_dir() {
         command.current_dir(folder);
     }
