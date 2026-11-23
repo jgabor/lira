@@ -2,7 +2,7 @@
 
 use crate::lira_file::LiraFile;
 use crate::{git, process};
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -20,6 +20,9 @@ pub struct Worktree {
     pub main: String,
     /// The commit of the main branch that the worktree started from.
     pub commit: String,
+    /// The lock of the work in the worktree. Lira holds it while its agent
+    /// works there, and the system takes it away when Lira ends.
+    _lock: File,
 }
 
 impl Worktree {
@@ -51,6 +54,11 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
             "the branch `{branch}` is already there. A new worktree needs a new branch"
         ));
     }
+    let Some(lock) = lock(data, &[&owner, &name], branch)? else {
+        return Err(format!(
+            "an agent of Lira works on the branch `{branch}` already. A new worktree needs a new branch"
+        ));
+    };
     // Two calls can ask for the same branch at the same time. Making the
     // folder and making the branch each work for one call only. So after
     // these two steps the folder and the branch are this call's own, and it
@@ -74,6 +82,7 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
             remote: newest.remote,
             main: newest.main.name,
             commit: newest.commit,
+            _lock: lock,
         }),
         Err(error) => Err(
             match git::remove_worktree(repository, &place.folder, branch) {
@@ -97,6 +106,10 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
 /// not have, is taken first. Then the `setup` command runs in a new
 /// worktree. It returns the worktree, and the commit that the remote has on
 /// the branch.
+///
+/// It is an error, and it changes nothing, while an agent of Lira works on
+/// the pull request. The lock of the work is the lock of the branch that
+/// the work started on.
 pub fn continued(
     repository: &Path,
     data: &Path,
@@ -111,6 +124,15 @@ pub fn continued(
     let newest = git::newest_main(repository)?;
     let (owner, name) = git::repository_of(repository, &newest.remote)?;
     let file = git::lira_file_at(repository, &newest.main, &newest.commit)?;
+    let started = match started_on {
+        Some(name) if git::allows_branch(repository, name)? => name,
+        _ => branch,
+    };
+    let Some(lock) = lock(data, &[&owner, &name], started)? else {
+        return Err(format!(
+            "an agent of Lira works on the pull request of the branch `{branch}`, so Lira starts no second agent on it. Run `lira continue` again when that agent ends"
+        ));
+    };
     let on_remote = git::fetch_branch(repository, &newest.remote, branch)?;
     let remote = &newest.remote;
     let ours = data.join("worktrees").join(&owner).join(&name);
@@ -186,8 +208,55 @@ pub fn continued(
         remote: newest.remote,
         main: newest.main.name,
         commit,
+        _lock: lock,
     };
     Ok((worktree, on_remote))
+}
+
+/// Takes the lock of the work that started on the branch `started_on`, in
+/// a repository. It is `None` when another Lira holds the lock. The lock
+/// is the file `locks/<owner>/<repository>/<started_on>.lock` in `data`.
+/// The system takes the lock away when the file closes: when Lira ends,
+/// also when it is killed. A child of Lira does not get the file.
+fn lock(data: &Path, repository: &[&str], started_on: &str) -> Result<Option<File>, String> {
+    let failed = |path: &Path, error: std::io::Error| {
+        format!("Lira can't lock the file `{}`: {error}", path.display())
+    };
+    let mut path = data.join("locks");
+    let parts: Vec<&str> = repository
+        .iter()
+        .copied()
+        .chain(started_on.split('/'))
+        .collect();
+    for part in &parts {
+        // A part is one name, and it does not go up.
+        let one_name = matches!(
+            Path::new(part).components().collect::<Vec<_>>()[..],
+            [Component::Normal(_)]
+        );
+        if !one_name {
+            return Err(format!("`{part}` can't be the name of a folder"));
+        }
+    }
+    let (last, folders) = parts.split_last().expect("a lock has a branch");
+    for part in folders {
+        path.push(part);
+    }
+    fs::create_dir_all(&path).map_err(|error| failed(&path, error))?;
+    // git allows no part of a branch that ends with `.lock`. So the file of
+    // one branch is never the folder of another.
+    path.push(format!("{last}.lock"));
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| failed(&path, error))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(failed(&path, error)),
+    }
 }
 
 /// If `folder` is in the folder `ours`, with each link in both paths

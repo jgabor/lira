@@ -252,6 +252,10 @@ is success, 1 is a failure, and 2 is bad usage.
 - It is an error when the pull request is not open, or has no comment with the request.
 - It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
 - It is an error when the worktree and the remote both have commits on the branch that the other does not have.
+- It fails at once when an agent of Lira works on the pull request, and says so.
+- Then the pull request, its labels and the worktree stay as they are.
+- It does not wait for that agent, and it does not stop it.
+- When Lira is killed while its agent works, a later `lira continue` starts a new agent.
 - It prints the address of the pull request.
 
 ### lira check

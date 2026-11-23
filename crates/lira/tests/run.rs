@@ -5067,3 +5067,137 @@ fn lira_continue_takes_the_number_of_a_pull_request() {
         );
     }
 }
+
+/// The start of the work of an agent that waits for the file `go`, for 30
+/// seconds at most. It says that it works with the file `working`.
+const HOLD: &str = r#"echo working > "$here/working"
+tries=0
+until [ -e "$here/go" ]; do
+  tries=$((tries + 1)); [ "$tries" -gt 600 ] && exit 1; sleep 0.05
+done
+"#;
+
+impl Repository {
+    /// What a second `lira continue` must not change, while an agent works:
+    /// the calls of `gh` that change the pull request, and the worktree.
+    fn as_it_is(&self, worktree: &Path) -> Vec<String> {
+        let mut seen = Vec::new();
+        for start in [
+            "pr create",
+            "pr edit",
+            "pr comment",
+            "pr ready",
+            "api repos/{owner}/{repo}/issues/7/labels",
+        ] {
+            seen.extend(self.calls(start));
+        }
+        seen.push(git_ok(worktree, &["rev-parse", "HEAD"]));
+        seen.push(git_ok(worktree, &["branch", "--show-current"]));
+        seen.push(git_ok(worktree, &["status", "--porcelain", "--ignored"]));
+        seen.push(git_ok(&self.root, &["worktree", "list", "--porcelain"]));
+        seen.push(git_ok(&self.root, &["branch", "--list"]));
+        seen
+    }
+
+    /// Starts `lira continue 7`, with an agent that does `HOLD` and then
+    /// `CONTINUE`. It returns when the agent works.
+    fn continue_and_hold(&self) -> std::process::Child {
+        program(
+            &self.harness.join("agent"),
+            &format!("{START}{HOLD}{CONTINUE}"),
+        );
+        let first = self.lira().args(["continue", "7"]).spawn().unwrap();
+        wait_for("the work of the first agent", || {
+            self.harness.join("working").exists()
+        });
+        first
+    }
+}
+
+// spec(lira continue): It fails at once when an agent of Lira works on the pull request, and says so.
+// spec(lira continue): Then the pull request, its labels and the worktree stay as they are.
+// spec(lira continue): It does not wait for that agent, and it does not stop it.
+#[test]
+fn lira_continue_starts_no_second_agent_while_one_works() {
+    let repository = Repository::stopped("continue-twice");
+    repository.view(false, &["needs:answer"]);
+    let mut first = repository.continue_and_hold();
+    let worktree = PathBuf::from(repository.kept("folder"));
+    let starts = repository.starts();
+    let before = repository.as_it_is(&worktree);
+
+    let error = failed(&repository.continue_work());
+    assert!(
+        error.contains("an agent of Lira works on the pull request"),
+        "{error}"
+    );
+    // No second agent started, and nothing changed.
+    assert_eq!(repository.starts(), starts);
+    assert_eq!(repository.as_it_is(&worktree), before);
+    // The first agent still works, and its work goes on to the end.
+    assert!(first.try_wait().unwrap().is_none());
+    fs::write(repository.harness.join("go"), "").unwrap();
+    let ended = first.wait_with_output().unwrap();
+    passed(&ended);
+    assert_eq!(
+        repository.calls("pr ready").last().unwrap(),
+        &format!("pr ready {ADDRESS}")
+    );
+}
+
+// spec(lira continue): It fails at once when an agent of Lira works on the pull request, and says so.
+#[test]
+fn lira_continue_starts_no_agent_while_the_agent_of_lira_run_works() {
+    let work = format!(
+        "{}{HOLD}{REPLY}",
+        r#"commit greeting 'Add a greeting'
+ended
+called "pr comment"
+"#
+    );
+    let repository = Repository::new("continue-while-run", CHECK, &work);
+    let run = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    wait_for("the work of the agent", || {
+        repository.harness.join("working").exists()
+    });
+    repository.view(true, &[]);
+    let worktree = PathBuf::from(repository.kept("folder"));
+    let before = repository.as_it_is(&worktree);
+
+    let error = failed(&repository.continue_work());
+    assert!(
+        error.contains("an agent of Lira works on the pull request"),
+        "{error}"
+    );
+    assert_eq!(repository.starts(), 1);
+    assert_eq!(repository.as_it_is(&worktree), before);
+    fs::write(repository.harness.join("go"), "").unwrap();
+    passed(&run.wait_with_output().unwrap());
+}
+
+// spec(lira continue): When Lira is killed while its agent works, a later `lira continue` starts a new agent.
+#[test]
+fn a_lira_continue_after_a_killed_lira_starts_a_new_agent() {
+    let repository = Repository::stopped("continue-after-kill");
+    let mut first = repository.continue_and_hold();
+    let starts = repository.starts();
+    // Lira has no time to do anything.
+    first.kill().unwrap();
+    assert!(!first.wait().unwrap().success());
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    wait_for("the end of the harness", || {
+        processes_with(harness).is_empty()
+    });
+
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{CONTINUE}"),
+    );
+    passed(&repository.continue_work());
+    assert!(repository.starts() > starts);
+    assert_eq!(
+        repository.calls("pr ready").last().unwrap(),
+        &format!("pr ready {ADDRESS}")
+    );
+}
