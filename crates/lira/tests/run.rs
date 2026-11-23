@@ -103,6 +103,11 @@ for argument in "$@"; do
   [ "$before" = "--body-file" ] && description="$argument"
   before="$argument"
 done
+# `--body-file -` gives the text on the input.
+if [ "$description" = "-" ]; then
+  cat > "$here/body"
+  description="$here/body"
+fi
 if [ "$1 $2" = "pr create" ]; then
   if [ -e "$here/no-create" ]; then
     echo "the stand-in for gh makes no pull request" >&2
@@ -2332,14 +2337,10 @@ exit 1
 // spec(Steps): An agent works only in its own worktree.
 #[test]
 fn lira_writes_through_no_link_that_the_agent_put_in_its_git_folder() {
-    // Lira writes these files in the git folder of the worktree, which the
-    // agent can change. The agent puts a link with each name there, to a
+    // Lira writes this file in the git folder of the worktree, which the
+    // agent can change. The agent puts a link with its name there, to a
     // file of the host that it can't change.
-    let names = [
-        "lira-check-output-1.txt",
-        "lira-comment.md",
-        "lira-description.md",
-    ];
+    let names = ["lira-check-output-1.txt"];
     let check = r#"i=0
 while [ "$i" -lt 3000 ]; do echo "line $i of the output of the check"; i=$((i + 1)); done
 echo "the last line says what is wrong"
@@ -2389,6 +2390,33 @@ while :; do next; reply 'No.'; done
             .gh("commented")
             .contains("the last line says what is wrong")
     );
+}
+
+// spec(Steps): An agent works only in its own worktree.
+#[test]
+fn a_link_that_the_agent_puts_in_its_git_folder_changes_no_text_that_gh_sends() {
+    let check = "echo 'the check says no'\nexit 1\n";
+    let work =
+        "commit greeting 'Add a greeting'\nreply 'Done.'\nwhile :; do next; reply 'No.'; done\n";
+    let repository = Repository::checked("no-read-through-link", check, work);
+    // A process of the agent puts a link with each name in the git folder
+    // of the worktree, to a file of the host, just before `gh` reads.
+    let gh = GH.replace(
+        "# `--body-file -` gives the text on the input.",
+        r#"own="$(git rev-parse --absolute-git-dir)"
+for name in lira-comment.md lira-description.md; do ln -sf "$here/host-file" "$own/$name"; done
+# `--body-file -` gives the text on the input."#,
+    );
+    let bin = repository.shared.join("bin");
+    program(&bin.join("gh"), &gh);
+    fs::write(bin.join("host-file"), "the file of the host\n").unwrap();
+    failed(&repository.run());
+    for file in ["created", "commented"] {
+        let sent = repository.gh(file);
+        assert!(!sent.contains("the file of the host"), "{file}: {sent}");
+    }
+    assert!(repository.gh("created").contains("## Done"));
+    assert!(repository.gh("commented").contains("the check says no"));
 }
 
 #[test]

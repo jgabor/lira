@@ -5,7 +5,7 @@ use crate::comment::Comment;
 use crate::json;
 use crate::scores::Scores;
 use std::ffi::OsStr;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -82,18 +82,58 @@ fn api(folder: &Path, args: &[&str]) -> Result<String, String> {
 /// Runs `gh pr` in `folder` with these arguments, and returns what it
 /// prints.
 fn pull_request(folder: &Path, args: &[&OsStr]) -> Result<String, String> {
-    let output = Command::new("gh")
+    run_pr(folder, args, None)
+}
+
+/// Runs `gh pr` in `folder` with these arguments and `--body-file -`, and
+/// gives it `text` on its input. Lira writes the text to no file, so that
+/// the agent can't change it on its way to GitHub.
+fn pull_request_with_text(folder: &Path, args: &[&OsStr], text: &str) -> Result<String, String> {
+    let mut args = args.to_vec();
+    args.extend([OsStr::new("--body-file"), OsStr::new("-")]);
+    run_pr(folder, &args, Some(text))
+}
+
+/// Runs `gh pr` in `folder` with these arguments, and gives it `text` on its
+/// input when there is a text.
+fn run_pr(
+    folder: &Path,
+    args: &[&OsStr],
+    text: Option<&str>,
+) -> Result<String, String> {
+    let mut child = Command::new("gh")
         .arg("pr")
         .args(args)
         .current_dir(folder)
-        .stdin(Stdio::null())
-        .output()
+        .stdin(match text {
+            Some(_) => Stdio::piped(),
+            None => Stdio::null(),
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("couldn't run `gh`: {e}"))?;
+    // A thread writes the text, so that `gh` can write its output while it
+    // reads. The input ends when the thread drops it.
+    let writer = child.stdin.take().zip(text).map(|(mut input, text)| {
+        let text = text.to_string();
+        std::thread::spawn(move || input.write_all(text.as_bytes()))
+    });
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("couldn't run `gh`: {e}"))?;
+    let written = writer.map(|writer| writer.join());
     if !output.status.success() {
         return Err(format!(
             "`gh pr {}` failed: {}",
             args[0].to_string_lossy(),
             String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if let Some(Ok(Err(error))) = written {
+        return Err(format!(
+            "Lira couldn't give the text to `gh pr {}`: {error}",
+            args[0].to_string_lossy()
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -109,20 +149,18 @@ pub struct Draft {
 }
 
 /// Opens a draft pull request for the branch `head` of the repository in
-/// `folder`, into the branch `base`. The description is the text of the
-/// file `description`.
+/// `folder`, into the branch `base`, with this description.
 pub fn open_draft(
     folder: &Path,
     base: &str,
     head: &str,
     title: &str,
-    description: &Path,
+    description: &str,
 ) -> Result<Draft, String> {
     let args = ["create", "--draft", "--base", base, "--head", head];
     let mut args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     args.extend([OsStr::new("--title"), OsStr::new(title)]);
-    args.extend([OsStr::new("--body-file"), description.as_os_str()]);
-    let printed = match pull_request(folder, &args) {
+    let printed = match pull_request_with_text(folder, &args, description) {
         Ok(printed) => printed,
         // GitHub can open the pull request, and its answer can get lost.
         // The branch is new and Lira's own, so an open pull request for it
@@ -166,28 +204,16 @@ fn open_for(folder: &Path, head: &str) -> Result<Option<String>, String> {
     Ok(address_in(&pull_request(folder, &args)?))
 }
 
-/// Gives the pull request at `address` the text of the file `description`
-/// as its description.
-pub fn describe(folder: &Path, address: &str, description: &Path) -> Result<(), String> {
-    let args = [
-        OsStr::new("edit"),
-        OsStr::new(address),
-        OsStr::new("--body-file"),
-        description.as_os_str(),
-    ];
-    pull_request(folder, &args).map(|_| ())
+/// Gives the pull request at `address` this description.
+pub fn describe(folder: &Path, address: &str, description: &str) -> Result<(), String> {
+    let args = [OsStr::new("edit"), OsStr::new(address)];
+    pull_request_with_text(folder, &args, description).map(|_| ())
 }
 
-/// Writes the text of the file `text` as a comment on the pull request at
-/// `address`.
-pub fn comment(folder: &Path, address: &str, text: &Path) -> Result<(), String> {
-    let args = [
-        OsStr::new("comment"),
-        OsStr::new(address),
-        OsStr::new("--body-file"),
-        text.as_os_str(),
-    ];
-    pull_request(folder, &args).map(|_| ())
+/// Writes `text` as a comment on the pull request at `address`.
+pub fn comment(folder: &Path, address: &str, text: &str) -> Result<(), String> {
+    let args = [OsStr::new("comment"), OsStr::new(address)];
+    pull_request_with_text(folder, &args, text).map(|_| ())
 }
 
 /// Adds the label `label` to the pull request at `address`. GitHub makes
