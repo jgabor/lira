@@ -29,7 +29,8 @@ pub struct Review {
 ///
 /// The Reviewer can't change a file of the change. It works in a copy of
 /// the repository for itself alone, which shares no branch with the
-/// repository and knows no remote, and Lira removes the copy afterwards.
+/// repository and knows no remote, and Lira removes the copy afterwards. A
+/// copy that an earlier Lira left, when it was killed, goes first.
 /// Its sandbox holds it to the copy, to a data folder of its harness for
 /// itself alone, and to the login of the harness. Lira also says no to each
 /// of its permission requests.
@@ -42,6 +43,15 @@ pub fn run(
 ) -> Result<Review, String> {
     let message = message(worktree, request, from, to)?;
     let copy = copy_folder(&worktree.folder);
+    // A Lira that was killed during a review left its copy here.
+    if is_a_copy(&copy) {
+        fs::remove_dir_all(&copy).map_err(|error| {
+            format!(
+                "Lira can't remove the folder `{}` that an earlier Reviewer left: {error}",
+                copy.display()
+            )
+        })?;
+    }
     // The folder must be new: Lira removes it with all that is in it.
     fs::create_dir(&copy).map_err(|error| {
         format!(
@@ -96,6 +106,19 @@ fn copy_folder(worktree: &Path) -> PathBuf {
     let mut name = worktree.file_name().unwrap_or_default().to_os_string();
     name.push("-review");
     worktree.with_file_name(name)
+}
+
+/// If `folder` can be a copy that an earlier Reviewer left: a folder, and
+/// no link, that is empty or holds a repository of its own. A worktree
+/// holds a file `.git`, so the worktree of a branch whose name ends with
+/// `-review` is no copy.
+fn is_a_copy(folder: &Path) -> bool {
+    let is_folder = |path: &Path| fs::symlink_metadata(path).is_ok_and(|kind| kind.is_dir());
+    if !is_folder(folder) {
+        return false;
+    }
+    let empty = fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_none());
+    empty || is_folder(&folder.join(".git"))
 }
 
 /// The message for the Reviewer: its instructions, with the request, the
