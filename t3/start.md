@@ -55,7 +55,8 @@ Model of the agent: `claude-opus-5-5`, at high effort
    ```
 
    `clientRequestId` is `issue-<number>-<time>`. `<time>` is what
-   `date -u +%Y%m%dT%H%MZ` prints before the first call for the issue. So
+   `date -u +%Y%m%dT%H%MZ` prints. Run it one time for each issue in this
+   run, before the first call for that issue. So
    each start of an issue has a new `clientRequestId`, also a second start on
    one day. T3 Code reads the same `clientRequestId` as a retry, and gives
    back the thread of the call before it.
