@@ -488,8 +488,9 @@ pub fn prune_worktrees(folder: &Path, inside: &[&Path]) -> Result<(), String> {
     Ok(())
 }
 
-/// The folder of each worktree of the repository in `folder`.
-fn worktrees(folder: &Path) -> Result<Vec<PathBuf>, String> {
+/// The folder of each worktree of the repository in `folder`, as git has
+/// it in its list.
+pub fn worktrees(folder: &Path) -> Result<Vec<PathBuf>, String> {
     let listed = worktree_list(folder)?;
     let folders = listed.split(|byte| *byte == 0).filter_map(|part| {
         part.strip_prefix(b"worktree ")
