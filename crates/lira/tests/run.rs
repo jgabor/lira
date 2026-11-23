@@ -2407,6 +2407,7 @@ fn a_link_that_the_agent_puts_in_its_git_folder_changes_no_text_that_gh_sends() 
 for name in lira-comment.md lira-description.md; do ln -sf "$here/host-file" "$own/$name"; done
 # `--body-file -` gives the text on the input."#,
     );
+    assert_ne!(gh, GH, "the stand-in for gh puts no link");
     let bin = repository.shared.join("bin");
     program(&bin.join("gh"), &gh);
     fs::write(bin.join("host-file"), "the file of the host\n").unwrap();
@@ -2416,6 +2417,7 @@ for name in lira-comment.md lira-description.md; do ln -sf "$here/host-file" "$o
         assert!(!sent.contains("the file of the host"), "{file}: {sent}");
     }
     assert!(repository.gh("created").contains("## Done"));
+    assert!(repository.gh("edited").contains("## Done"));
     assert!(repository.gh("commented").contains("the check says no"));
 }
 
