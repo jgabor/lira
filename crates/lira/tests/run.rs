@@ -3532,7 +3532,7 @@ while :; do sleep 1; done
     });
 }
 
-// spec(Steps): The harness of each agent keeps its conversations in a folder of its own, and Lira removes the folder when the agent ends.
+// spec(Steps): When Lira ends before it can remove that folder, Lira removes it when the next agent starts.
 #[test]
 fn lira_removes_the_data_folder_of_a_harness_that_it_left_when_it_was_killed() {
     // The first agent keeps its data folder and never ends its reply. The

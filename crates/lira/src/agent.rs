@@ -268,7 +268,15 @@ impl Data {
                     });
                 }
                 Ok(()) | Err(TryLockError::WouldBlock) => continue,
-                Err(TryLockError::Error(error)) => return Err(failed(&folder, error)),
+                // A file system with no lock on a folder, such as NFS. No
+                // other process can take the lock there, so none removes
+                // the folder.
+                Err(TryLockError::Error(_)) => {
+                    return Ok(Data {
+                        folder,
+                        _lock: lock,
+                    });
+                }
             }
         }
     }
@@ -334,19 +342,30 @@ fn remove_left(above: &Path) {
             continue;
         }
         let folder = entry.path();
-        let opened = File::open(&folder).or_else(|error| {
-            // The harness can take the right to read away from its folder.
-            if error.kind() != ErrorKind::PermissionDenied {
-                return Err(error);
-            }
-            fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
-            File::open(&folder)
-        });
-        if let Ok(lock) = opened
-            && lock.try_lock().is_ok()
-        {
+        if let Some(_lock) = take(&folder) {
             remove(&folder);
         }
+    }
+}
+
+/// The lock on `folder`, when no process of Lira holds it.
+fn take(folder: &Path) -> Option<File> {
+    let locked = |lock: File| lock.try_lock().is_ok().then_some(lock);
+    match File::open(folder) {
+        Ok(lock) => locked(lock),
+        // The harness can take the right to read away from its folder. Lira
+        // gives it back to see the lock, and puts the mode of the harness
+        // back on a folder that a harness still holds.
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            let mode = fs::symlink_metadata(folder).ok()?.permissions();
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).ok()?;
+            let lock = File::open(folder).ok().and_then(locked);
+            if lock.is_none() {
+                let _ = fs::set_permissions(folder, mode);
+            }
+            lock
+        }
+        Err(_) => None,
     }
 }
 
@@ -420,6 +439,12 @@ mod tests {
         fs::set_permissions(&held.folder, fs::Permissions::from_mode(0o000)).unwrap();
         let other = Data::new_in(&above).unwrap();
         assert!(held.folder.exists());
+        // The folder that a harness holds keeps the mode that the harness gave it.
+        let mode = fs::symlink_metadata(&held.folder)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o000);
         assert_ne!(held.folder, other.folder);
 
         let folder = held.folder.clone();
