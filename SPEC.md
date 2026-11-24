@@ -263,6 +263,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.
 - When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
 - When the pull request is ready for review, it becomes a draft again.
+- When Lira can't remove `needs:answer`, `lira continue` fails, and the new agent gets no message.
+- Then the pull request is a draft and keeps `needs:answer`, and the worktree stays.
 - The agent works in the old worktree when it is still there, and in a new one when it is not.
 - A new worktree starts from the branch in the repository in the current folder when it has the branch, and from the branch of the remote when it does not.
 - When something that git does not list as a worktree is in the folder of the branch, the new worktree is that folder with `~2` at the end of its name, or with `~3` when that is there too, and so on.
