@@ -329,6 +329,11 @@ fn set(name: &str) -> Option<OsString> {
 /// `/run`, so then it is `None`. A relative path names no folder, as the
 /// XDG specification says.
 ///
+/// The XDG specification also says that the user owns the folder. A folder
+/// of the system, such as `/` or `/usr`, is not one, and the sandbox needs
+/// what is in it, such as `sh`. The sandbox needs the home folders too, so
+/// a folder that has one in it is not one either.
+///
 /// The sandbox makes it empty before it adds the paths that Lira names, as
 /// it does `/tmp` and `/run`. So a path that Lira names in it is there.
 fn user_folder() -> Option<PathBuf> {
@@ -338,7 +343,20 @@ fn user_folder() -> Option<PathBuf> {
         .then_some(folder)?
         .canonicalize()
         .ok()?;
-    (folder.is_dir() && !OWN.iter().any(|path| folder.starts_with(path))).then_some(folder)
+    let owner = fs::metadata(&folder).ok()?.uid();
+    // SAFETY: `getuid` takes nothing, and it can't fail.
+    let mine = owner == unsafe { getuid() };
+    let has_home = homes()
+        .iter()
+        .filter_map(|home| home.canonicalize().ok())
+        .any(|home| home.starts_with(&folder));
+    (folder.is_dir() && mine && !has_home && !OWN.iter().any(|path| folder.starts_with(path)))
+        .then_some(folder)
+}
+
+unsafe extern "C" {
+    /// The user of this process.
+    fn getuid() -> u32;
 }
 
 /// The home folders of the user: the one that `HOME` names, and the one
@@ -530,7 +548,6 @@ fn system_home() -> Option<PathBuf> {
         shell: *mut c_char,
     }
     unsafe extern "C" {
-        fn getuid() -> u32;
         fn getpwuid_r(
             uid: u32,
             entry: *mut Passwd,
