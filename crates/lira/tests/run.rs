@@ -2222,6 +2222,140 @@ fn a_file_that_lira_gives_the_sandbox_in_the_hidden_xdg_runtime_dir_is_there() {
     passed(&output);
 }
 
+/// A shell function that prints what a program in the sandbox sees in
+/// `/tmp` and in `/run`, one name on each line, and the file of the
+/// scores.
+const OWN_FOLDERS: &str = r#"own_folders() {
+  echo "scores: $LIRA_SCORES"
+  for folder in /tmp /run; do
+    ls -A "$folder" | sed "s|^|$folder: |"
+  done
+}
+"#;
+
+// spec(Steps): In the sandbox, `/tmp` and `/run` are empty folders of its own, other than the paths that Lira gives the sandbox.
+// spec(Steps): So an agent and its check see no temporary file of the host and no socket of a service of the host there, such as `/run/docker.sock`.
+#[test]
+fn an_agent_and_its_check_see_no_temporary_file_and_no_socket_of_the_host() {
+    // The agent writes a file in its own `/tmp`.
+    let written = PathBuf::from(format!("/tmp/lira-{}-own-written", std::process::id()));
+    let work = format!(
+        "{OWN_FOLDERS}own_folders > \"$here/agent-folders\"\necho written > '{0}'\ncat '{0}' > \"$here/agent-written\"\n{WORK}",
+        written.display()
+    );
+    let check = format!(
+        "{OWN_FOLDERS}root=\"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")\"\nown_folders > \"$root/../stand-in/check-folders\"\n"
+    );
+    let repository = Repository::checked("own-folders", &check, &work);
+    // The host has a temporary file and the socket of a service in `/tmp`.
+    let file = PathBuf::from(format!("/tmp/lira-{}-own-file", std::process::id()));
+    let socket = PathBuf::from(format!("/tmp/lira-{}-own-socket", std::process::id()));
+    fs::write(&file, "of the host\n").unwrap();
+    let _ = fs::remove_file(&socket);
+    let service = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    // Lira keeps the file of the scores in `/tmp`, and gives it to the check.
+    let output = repository
+        .lira()
+        .env("TMPDIR", "/tmp")
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    drop(service);
+    fs::remove_file(&socket).unwrap();
+    fs::remove_file(&file).unwrap();
+    passed(&output);
+    // The host has more in `/run` than the sandbox, such as the sockets of
+    // its services.
+    let names = |folder: &str| -> Vec<String> {
+        fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    // The sandbox keeps the file of the name servers when it is in `/run`.
+    let run: Vec<String> = Path::new("/etc/resolv.conf")
+        .canonicalize()
+        .ok()
+        .and_then(|names| {
+            let first = names.strip_prefix("/run").ok()?.components().next()?;
+            Some(format!("/run: {}", first.as_os_str().to_string_lossy()))
+        })
+        .into_iter()
+        .collect();
+    assert!(
+        names("/run")
+            .iter()
+            .any(|name| !run.contains(&format!("/run: {name}"))),
+        "{run:?}"
+    );
+    // What the agent wrote in its `/tmp` is not on the host.
+    assert_eq!(repository.kept("agent-written"), "written");
+    assert!(!written.exists());
+    // Lira gives the sandbox the folder of the test, which is in `/tmp`
+    // when the target folder is.
+    let test_folder = repository.top.canonicalize().unwrap();
+    let given = test_folder
+        .strip_prefix("/tmp")
+        .ok()
+        .and_then(|path| path.components().next())
+        .map(|first| format!("/tmp: {}", first.as_os_str().to_string_lossy()));
+    let seen = |kept: &str| -> (String, Vec<String>, Vec<String>) {
+        let mut lines = kept.lines();
+        let scores = lines.next().unwrap().to_string();
+        let (tmp, run): (Vec<_>, Vec<_>) = lines
+            .map(str::to_string)
+            .filter(|line| Some(line) != given.as_ref())
+            .partition(|line| line.starts_with("/tmp: "));
+        (scores, tmp, run)
+    };
+    // The agent sees nothing of the host in `/tmp`.
+    let (_, tmp, agent_run) = seen(&repository.kept("agent-folders"));
+    assert_eq!(tmp, Vec::<String>::new());
+    assert_eq!(agent_run, run);
+    // The check sees only the file of the scores in `/tmp`.
+    let kept = fs::read_to_string(repository.shared.join("check-folders")).unwrap();
+    let (scores, tmp, check_run) = seen(&kept);
+    let scores = Path::new(scores.strip_prefix("scores: ").unwrap());
+    assert_eq!(scores.parent(), Some(Path::new("/tmp")), "{kept}");
+    let name = scores.file_name().unwrap().to_string_lossy();
+    assert_eq!(tmp, [format!("/tmp: {name}")], "{kept}");
+    assert_eq!(check_run, run, "{kept}");
+}
+
+// spec(Steps): A check that needs such a service fails in the sandbox.
+#[test]
+fn a_check_that_needs_a_service_of_the_host_fails() {
+    // The host has the socket of a service in `/tmp`, and the check needs
+    // it. This agent never repairs the change.
+    let socket = PathBuf::from(format!("/tmp/lira-{}-service", std::process::id()));
+    let check = format!(
+        "if [ ! -S '{0}' ]; then\n  echo 'the check finds no service at {0}' >&2\n  exit 1\nfi\n",
+        socket.display()
+    );
+    let work = r#"commit greeting 'Add a greeting'
+reply 'I made the file.'
+while :; do
+  next
+  reply 'I can not repair it.'
+done
+"#;
+    let repository = Repository::checked("needs-service", &check, work);
+    let _ = fs::remove_file(&socket);
+    let service = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let output = repository.run();
+    drop(service);
+    fs::remove_file(&socket).unwrap();
+    let error = failed(&output);
+    assert!(error.contains("did not pass the check 3 times"), "{error}");
+    assert!(
+        error.contains(&format!(
+            "the check finds no service at {}",
+            socket.display()
+        )),
+        "{error}"
+    );
+}
+
 /// The sockets of gpg-agent. With its ssh support on, `S.gpg-agent.ssh`
 /// leads to the keys of ssh, also when `SSH_AUTH_SOCK` does not name it.
 const GPG_AGENT: [&str; 4] = [
