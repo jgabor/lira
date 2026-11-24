@@ -174,7 +174,7 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
     if !read.earlier.is_empty() {
         let _ = write!(
             request,
-            "\n\nThe earlier comments of the user on the pull request:\n\n{}",
+            "\n\nThe earlier comments on the pull request:\n\n{}",
             quotes(&read.earlier)
         );
     }

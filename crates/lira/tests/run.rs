@@ -5463,6 +5463,12 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     let earlier = review.find(ANSWER).expect(&review);
     let newest = review.find("Make it louder.").expect(&review);
     assert!(earlier < newest, "{review}");
+    // The agent wrote no description, so Lira wrote it from the request,
+    // with your earlier comment. It is for you, so it does not call you
+    // "the user".
+    let ready = repository.gh("description-when-ready");
+    assert!(ready.contains(ANSWER), "{ready}");
+    assert!(!ready.contains("user"), "{ready}");
 }
 
 // spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
