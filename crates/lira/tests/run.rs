@@ -5511,7 +5511,7 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
 }
 
 // spec(lira continue): When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
-// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after its agent started.
+// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after the comments that its agent read.
 // spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 // spec(lira continue): The Reviewer also gets each comment that you wrote after the request and before your answer.
 #[test]

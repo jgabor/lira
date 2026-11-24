@@ -257,7 +257,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - The command removes `needs:answer` when the pull request has it. It does not need the label: you can remove it yourself on GitHub.
 - When the work of the new agent fails, the pull request gets `needs:answer` again.
 - When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
-- After a `lira continue` that passed, the next one gets only the answer that you wrote after its agent started.
+- After a `lira continue` that passed, the next one gets only the answer that you wrote after the comments that its agent read.
 - After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 - After a `lira continue` that fails with no question, the next one gets the same question and the same answer again.
 - When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.

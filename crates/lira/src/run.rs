@@ -257,9 +257,9 @@ impl Run<'_> {
         eprintln!(
             "lira: the check and a Reviewer passed the change, and the pull request is ready for review. The change is on the branch `{branch}`, and its worktree is {place}"
         );
-        // A later `lira continue` reads only what you wrote after this
-        // comment. The work passed already, so a failure here does not
-        // change that.
+        // This comment names what the agent read. A later `lira continue`
+        // reads only what you wrote after that. The work passed already, so
+        // a failure here does not change that.
         if self.continued.is_some()
             && let Err(error) = self.pull_request.passed(self.read().as_ref())
         {
