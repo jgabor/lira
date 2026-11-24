@@ -4999,6 +4999,12 @@ fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
     assert!(!message[place..parent].contains("data"), "{message}");
     assert!(message[parent..earlier].contains("`someone`"), "{message}");
     assert!(message[parent..earlier].contains("data"), "{message}");
+    // The agent wrote no description, and the description that Lira
+    // writes is for you. It quotes only the request.
+    let ready = repository.gh("description-when-ready");
+    assert!(ready.contains(&format!("> {REQUEST}\n")), "{ready}");
+    assert!(!ready.contains("user"), "{ready}");
+    assert!(!ready.contains("Yes, do that."), "{ready}");
 }
 
 #[test]
@@ -5553,6 +5559,7 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
 // spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after it.
 // spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 // spec(lira continue): The Reviewer also gets each comment that you wrote after the request and before your answer.
+// spec(lira continue): When the new agent writes no description, the description that Lira writes quotes only the request under `Problem`.
 #[test]
 fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     let repository = Repository::stopped("second-continue");
@@ -5583,6 +5590,13 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     let earlier = review.find(ANSWER).expect(&review);
     let newest = review.find("Make it louder.").expect(&review);
     assert!(earlier < newest, "{review}");
+    // The agent wrote no description, so Lira wrote it from the request.
+    // It is for you, so it does not call you "the user".
+    let ready = repository.gh("description-when-ready");
+    assert!(ready.contains(&format!("> {REQUEST}\n")), "{ready}");
+    assert!(!ready.contains(ANSWER), "{ready}");
+    assert!(!ready.contains("Make it louder."), "{ready}");
+    assert!(!ready.contains("user"), "{ready}");
 }
 
 // spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
