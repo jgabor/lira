@@ -6089,7 +6089,7 @@ fn a_copy_that_a_killed_reviewer_left_does_not_stop_the_next_review() {
     }
 }
 
-// spec(lira continue): When something that is no copy of a Reviewer is in the folder of that copy, `lira continue` fails, names the folder, and leaves what is there as it is.
+// spec(lira continue): When a link, a file, or a folder with files and no repository of its own is in the place of that copy, `lira continue` fails, names the place, and leaves what is there as it is.
 #[test]
 fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
     // A worktree of another branch can be in the place of the copy: the
@@ -6125,12 +6125,15 @@ fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
         assert!(error.contains(copy.to_str().unwrap()), "{test}: {error}");
         assert!(!repository.harness.join("review-folder").exists(), "{test}");
         assert!(fs::symlink_metadata(&copy).is_ok(), "{test}");
-        assert!(target.join("keep.txt").exists(), "{test}");
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "keep\n"
+        );
         match make {
             "worktree" => assert!(copy.join(".git").is_file(), "{test}"),
-            "file" => assert!(copy.is_file(), "{test}"),
-            "other" => assert!(copy.join("keep.txt").exists(), "{test}"),
-            _ => {}
+            "link" => assert_eq!(fs::read_link(&copy).unwrap(), target, "{test}"),
+            "file" => assert_eq!(fs::read_to_string(&copy).unwrap(), "keep\n"),
+            _ => assert_eq!(fs::read_to_string(copy.join("keep.txt")).unwrap(), "keep\n"),
         }
     }
 }
