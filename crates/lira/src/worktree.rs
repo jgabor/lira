@@ -160,7 +160,7 @@ pub fn continued(
             // while it has it.
             // Lira removes only the records of its own worktrees, and not
             // one of yours whose folder is on a drive that is not there.
-            let real = ours.canonicalize().ok();
+            let real = real_path(&ours);
             let inside: Vec<&Path> = [Some(ours.as_path()), real.as_deref()]
                 .into_iter()
                 .flatten()
@@ -267,6 +267,22 @@ fn lock(data: &Path, repository: &[&str], started_on: &str) -> Result<Option<Fil
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(error)) => Err(failed(&path, error)),
+    }
+}
+
+/// The path `path` with each link in it followed. The end of the path
+/// can be gone: then the links of the folder above it that is there are
+/// followed, and the rest of the path is put after it. It is `None` when no
+/// folder of the path is there.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    let mut rest = Vec::new();
+    let mut there = path;
+    loop {
+        if let Ok(real) = there.canonicalize() {
+            return Some(rest.iter().rev().fold(real, |real, name| real.join(name)));
+        }
+        rest.push(there.file_name()?);
+        there = there.parent()?;
     }
 }
 

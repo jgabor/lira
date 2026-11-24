@@ -5632,6 +5632,43 @@ fn a_worktree_of_yours_whose_folder_is_gone_keeps_its_record() {
     assert!(listed.contains(old.to_str().unwrap()), "{listed}");
 }
 
+// spec(lira continue): When the branch is in no worktree whose folder is there, Lira removes from `git worktree list` each worktree of Lira whose folder is gone.
+#[test]
+fn the_worktrees_of_lira_whose_folder_is_gone_go_also_under_a_link() {
+    // The data folder is under a link, and the folder of all the
+    // worktrees of the repository went away without git.
+    let repository = Repository::stopped("gone-under-link");
+    let branch = repository.pull_request_branch();
+    let data = repository.top.join("xdg").join("lira");
+    fs::remove_dir_all(Repository::worktrees(&data)).unwrap();
+    let link = repository.top.join("xdg-link");
+    std::os::unix::fs::symlink(repository.top.join("xdg"), &link).unwrap();
+    passed(
+        &repository
+            .lira()
+            .env("XDG_DATA_HOME", &link)
+            .env("ORDER", repository.shared.join("order"))
+            .args(["continue", "7"])
+            .output()
+            .unwrap(),
+    );
+    // The agent worked in a new worktree in the folder of the branch, and
+    // git lists it and the repository, and no worktree that is gone.
+    let new = PathBuf::from(repository.kept("folder"));
+    let real = Repository::worktrees(&data.canonicalize().unwrap()).join(&branch);
+    assert_eq!(new.canonicalize().unwrap(), real);
+    let listed = git_ok(&repository.root, &["worktree", "list", "--porcelain"]);
+    let folders: Vec<&str> = listed
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .collect();
+    assert_eq!(folders.len(), 2, "{listed}");
+    assert!(
+        folders.iter().all(|folder| Path::new(folder).exists()),
+        "{listed}"
+    );
+}
+
 // spec(lira continue): The agent works in the old worktree when it is still there, and in a new one when it is not.
 #[test]
 fn a_folder_that_git_does_not_list_in_the_place_of_the_old_worktree_is_not_used() {
