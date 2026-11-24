@@ -6187,24 +6187,70 @@ fn a_copy_that_a_killed_reviewer_left_does_not_stop_the_next_review() {
     }
 }
 
-// spec(lira continue): When the old worktree is gone and the new one is in another folder, `lira continue` removes that copy too, before its own Reviewer starts.
+// spec(lira continue): When the old worktree is gone and the work continues in another folder, `lira continue` removes that copy too, before its own Reviewer starts.
 #[test]
 fn a_copy_beside_an_old_worktree_that_is_gone_goes_too() {
-    // The agent gave its branch a new name, so the new worktree is in the
-    // folder of that name. The old worktree went, and its copy stayed.
-    let (repository, copy) =
-        killed_in_review_after("killed-in-review-renamed", "git branch -m fix/greeting\n");
-    let old = PathBuf::from(repository.kept("folder"));
-    let place = old.to_str().unwrap();
-    git_ok(&repository.root, &["worktree", "remove", "--force", place]);
-    passed(&repository.continue_work());
-    let new = PathBuf::from(repository.kept("folder"));
-    assert!(new.ends_with("fix/greeting"), "{}", new.display());
-    assert_eq!(repository.starts(), 4);
-    assert!(repository.first_message(4).contains("You are a Reviewer"));
-    let review = PathBuf::from(repository.kept("review-folder"));
-    assert_ne!(review, copy);
-    assert!(!copy.exists(), "the copy {} is still there", copy.display());
+    // The old worktree went, and its copy stayed. The agent gave its branch
+    // a new name, so the new worktree is in the folder of that name. Or the
+    // old worktree was beside the folder of its branch, in `<name>~2`. Or
+    // the work continues in the worktree of an earlier pull request on a
+    // branch with the same name.
+    for (test, first, how) in [
+        //X("left-copy-renamed", "git branch -m fix/greeting\n", "renamed"),
+        ("left-copy-numbered", "", "numbered"),
+        (
+            "left-copy-earlier",
+            "git branch -m fix/greeting\n",
+            "earlier",
+        ),
+    ] {
+        let (repository, mut copy) = killed_in_review_after(test, first);
+        let mut old = PathBuf::from(repository.kept("folder"));
+        let data = repository.top.join("xdg").join("lira");
+        match how {
+            "numbered" => {
+                let mut name = old.file_name().unwrap().to_os_string();
+                name.push("~2");
+                let beside = old.with_file_name(&name);
+                let (from, to) = (old.to_str().unwrap(), beside.to_str().unwrap());
+                git_ok(&repository.root, &["worktree", "move", from, to]);
+                name.push("-review");
+                let moved = old.with_file_name(&name);
+                fs::rename(&copy, &moved).unwrap();
+                (old, copy) = (beside, moved);
+            }
+            "earlier" => {
+                let earlier = Repository::worktrees(&data).join("fix/greeting");
+                let place = earlier.to_str().unwrap();
+                git_ok(
+                    &repository.root,
+                    &["worktree", "add", "--quiet", "--detach", place],
+                );
+            }
+            _ => {}
+        }
+        let place = old.to_str().unwrap();
+        git_ok(&repository.root, &["worktree", "remove", "--force", place]);
+        // The new Reviewer says if the copy is still there when it starts.
+        repository.reviewer(&format!(
+            "[ -e '{}' ] && echo there > \"$here/copy-at-review\"\nreply 'Review: pass'\n",
+            copy.display()
+        ));
+        passed(&repository.continue_work());
+        let new = PathBuf::from(repository.kept("folder"));
+        assert_ne!(new, old, "{test}");
+        assert_eq!(repository.starts(), 4, "{test}");
+        assert!(repository.first_message(4).contains("You are a Reviewer"));
+        assert!(
+            !repository.harness.join("copy-at-review").exists(),
+            "{test}: the copy was there when the Reviewer started"
+        );
+        assert!(
+            !copy.exists(),
+            "{test}: the copy {} is still there",
+            copy.display()
+        );
+    }
 }
 
 // spec(lira continue): When a link, a file, or a folder that is not empty and has no folder `.git` is in the place of that copy, `lira continue` fails, names the place, and leaves what is there as it is.

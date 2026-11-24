@@ -137,6 +137,12 @@ pub fn continued(
     let on_remote = git::fetch_branch(repository, &newest.remote, branch)?;
     let remote = &newest.remote;
     let ours = data.join("worktrees").join(&owner).join(&name);
+    // A Lira that was killed during a review can have left a copy beside a
+    // folder of an old worktree that is gone. The work can continue in
+    // another folder, so the copy goes now.
+    for name in [started_on, Some(branch)].into_iter().flatten() {
+        remove_left_copies(repository, &ours, name)?;
+    }
     let folder = match git::worktree_of(repository, branch)? {
         Some(folder) if folder.exists() => {
             if !is_inside(&folder, &ours) {
@@ -201,11 +207,6 @@ pub fn continued(
                 )?;
                 folder
             } else {
-                // A Lira that was killed during a review left a copy
-                // beside the folder of the old worktree, which is gone.
-                for name in [started_on, Some(branch)].into_iter().flatten() {
-                    remove_left_copy(&ours, name)?;
-                }
                 // Something that git does not list can be in the folder of
                 // the branch. Lira leaves it as it is, and makes the new
                 // worktree beside it.
@@ -317,24 +318,54 @@ fn is_at(folder: &Path, ours: &Path, branch: &str) -> bool {
     }
 }
 
-/// Removes the copy that a Reviewer left beside the folder `name` in the
-/// folder `ours`, where an old worktree of the branch `name` can have been.
-/// A name that goes out of `ours`, or a link above the folder, is not used.
-fn remove_left_copy(ours: &Path, name: &str) -> Result<(), String> {
+/// Removes each copy that a Reviewer left beside a folder where an old
+/// worktree of the work can have been: the folder `name` in the folder
+/// `ours`, and the folders `<name>~2`, `<name>~3`, and so on. A copy beside
+/// a worktree that git lists stays: the Reviewer of that worktree removes
+/// it. A name that goes out of `ours`, or a link above the folder, is not
+/// used.
+fn remove_left_copies(repository: &Path, ours: &Path, name: &str) -> Result<(), String> {
     let names = !name.is_empty()
         && Path::new(name)
             .components()
             .all(|part| matches!(part, Component::Normal(_)));
+    if !names {
+        return Ok(());
+    }
     let folder = ours.join(name);
-    let above = Path::new(name).parent().unwrap_or(Path::new(""));
-    let inside = match (folder.parent().map(Path::canonicalize), ours.canonicalize()) {
-        (Some(Ok(real)), Ok(ours)) => real == ours.join(above),
+    let (Some(above), Some(last)) = (folder.parent(), folder.file_name()) else {
+        return Ok(());
+    };
+    let path_above = Path::new(name).parent().unwrap_or(Path::new(""));
+    let inside = match (above.canonicalize(), ours.canonicalize()) {
+        (Ok(real), Ok(ours)) => real == ours.join(path_above),
         _ => false,
     };
-    match names && inside {
-        true => review::remove_left_copy(&folder),
-        false => Ok(()),
+    if !inside {
+        return Ok(());
     }
+    let Some(last) = last.to_str() else {
+        return Ok(());
+    };
+    let Ok(entries) = fs::read_dir(above) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let entry = entry.file_name();
+        let Some(worktree) = entry.to_str().and_then(|copy| copy.strip_suffix("-review")) else {
+            continue;
+        };
+        let numbered = worktree
+            .strip_prefix(last)
+            .and_then(|rest| rest.strip_prefix('~'))
+            .and_then(|number| number.parse::<u64>().ok())
+            .is_some_and(|number| number >= 2 && worktree == format!("{last}~{number}"));
+        let worktree = above.join(worktree);
+        if (worktree == folder || numbered) && !is_a_worktree_of(&worktree, repository)? {
+            review::remove_left_copy(&worktree)?;
+        }
+    }
+    Ok(())
 }
 
 /// The worktree in `folder`, as an error names it.
