@@ -292,10 +292,16 @@ fn plain_store_settings() -> Vec<PathBuf> {
 /// for it, as Git Credential Manager reads it in one of them.
 fn store_folders(path: &[u8]) -> Vec<PathBuf> {
     match path.strip_prefix(b"~/") {
-        Some(rest) => homes()
-            .into_iter()
-            .map(|home| home.join(OsStr::from_bytes(rest)))
-            .collect(),
+        // The path stays in the home folder also after more than one `/`.
+        Some(mut rest) => {
+            while let Some(after) = rest.strip_prefix(b"/") {
+                rest = after;
+            }
+            homes()
+                .into_iter()
+                .map(|home| home.join(OsStr::from_bytes(rest)))
+                .collect()
+        }
         None if path.is_empty() => Vec::new(),
         None => vec![PathBuf::from(OsStr::from_bytes(path))],
     }

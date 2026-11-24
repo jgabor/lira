@@ -1955,7 +1955,7 @@ fn an_agent_and_a_reviewer_have_no_login_in_a_plain_store_that_the_host_moves() 
     // `GCM_PLAINTEXT_STORE_PATH` names, or else in the one that a git
     // setting `plaintextStorePath` of `credential` names. A setting can be
     // for one site, a later value replaces an earlier one, and `~` is the
-    // home folder.
+    // home folder, also with more than one `/` after it.
     let variable = repository.top.join("variable-store");
     let earlier = repository.top.join("earlier-store");
     let later = repository.top.join("home").join("later-store");
@@ -1990,7 +1990,7 @@ fn an_agent_and_a_reviewer_have_no_login_in_a_plain_store_that_the_host_moves() 
         .env("GIT_CONFIG_KEY_0", "credential.plaintextStorePath")
         .env("GIT_CONFIG_VALUE_0", &earlier)
         .env("GIT_CONFIG_KEY_1", "credential.plaintextStorePath")
-        .env("GIT_CONFIG_VALUE_1", "~/later-store")
+        .env("GIT_CONFIG_VALUE_1", "~//later-store")
         .env(
             "GIT_CONFIG_KEY_2",
             "credential.https://github.com.plaintextStorePath",
