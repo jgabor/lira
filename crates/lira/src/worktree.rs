@@ -103,6 +103,8 @@ pub fn make(repository: &Path, data: &Path, branch: &str) -> Result<Worktree, St
 /// knows it. The old worktree is in the folder of that branch, also when
 /// the agent gave the branch another name. When something that git does
 /// not list is in the folder of the branch, a new worktree is beside it.
+/// First a copy that a killed Reviewer left beside an old folder of the
+/// work goes, when no worktree that git lists is in that folder.
 /// A commit that the remote has on the branch, and that the worktree does
 /// not have, is taken first. Then the `setup` command runs in a new
 /// worktree. It returns the worktree, and the commit that the remote has on

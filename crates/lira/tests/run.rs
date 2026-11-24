@@ -6196,7 +6196,11 @@ fn a_copy_beside_an_old_worktree_that_is_gone_goes_too() {
     // the work continues in the worktree of an earlier pull request on a
     // branch with the same name.
     for (test, first, how) in [
-        //X("left-copy-renamed", "git branch -m fix/greeting\n", "renamed"),
+        (
+            "left-copy-renamed",
+            "git branch -m fix/greeting\n",
+            "renamed",
+        ),
         ("left-copy-numbered", "", "numbered"),
         (
             "left-copy-earlier",
