@@ -279,6 +279,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again. The work can stop and ask again.
 - The Reviewer gets the request and your answer.
 - The Reviewer also gets each comment that you wrote after the request and before your answer.
+- When the new agent writes no description, the description that Lira writes quotes only the request.
 - It is an error when the pull request is not open, or has no comment with the request.
 - It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
 - It is an error when the worktree and the remote both have commits on the branch that the other does not have.
