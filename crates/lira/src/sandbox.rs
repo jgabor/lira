@@ -83,7 +83,9 @@ impl Sandbox {
             command.arg("--tmpfs").arg(folder);
         }
         // The folder of the data folders of harnesses is empty before the
-        // paths come, so that the data folder of this agent is there.
+        // paths come, so that the data folder of this agent is there. A
+        // path that holds this folder, such as the whole data folder of
+        // Lira, would show it again, so no path may hold it.
         let harnesses = harnesses();
         if let Some(folder) = &harnesses {
             command.arg("--tmpfs").arg(folder);
