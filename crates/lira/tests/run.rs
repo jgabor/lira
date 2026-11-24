@@ -347,6 +347,32 @@ fn listen(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
     agent.unwrap()
 }
 
+/// The folder where each test has a folder of its own. The sandbox has its
+/// own `/tmp` and `/run`, so it does not show a folder of a test there. A
+/// test of a login that the sandbox hides would then pass also when Lira
+/// hid nothing. So when the folder of cargo for the files of tests is in
+/// one of them, the tests are in `target/tmp` of the workspace.
+fn tests_folder() -> PathBuf {
+    let own = |folder: &Path| {
+        let folder = folder
+            .canonicalize()
+            .unwrap_or_else(|_| folder.to_path_buf());
+        ["/tmp", "/run"].iter().any(|own| folder.starts_with(own))
+    };
+    let cargo = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    if !own(cargo) {
+        return cargo.to_path_buf();
+    }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let folder = workspace.canonicalize().unwrap().join("target").join("tmp");
+    assert!(
+        !own(&folder),
+        "the tests of the sandbox need a folder outside `/tmp` and `/run`, and `{}` is in one",
+        folder.display()
+    );
+    folder
+}
+
 impl Repository {
     /// A repository whose main branch has one commit, with this Lira file.
     /// The stand-in for the harness does `work` when the message for the
@@ -362,9 +388,7 @@ impl Repository {
     }
 
     fn with(test: &str, lira_file: &str, check: &str, work: &str) -> Repository {
-        let top = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("run")
-            .join(test);
+        let top = tests_folder().join("run").join(test);
         if top.exists() {
             fs::remove_dir_all(&top).unwrap();
         }
@@ -2137,7 +2161,7 @@ fn a_relative_xdg_runtime_dir_hides_nothing() {
     // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
     // in the repository, so `.` is the repository, and the worktree of the
     // agent needs its `.git`. The file `bus` there is no session bus.
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+    let root = tests_folder()
         .join("run")
         .join("relative-user-folder")
         .join("repository");
