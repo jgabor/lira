@@ -131,13 +131,10 @@ fn hide_locks(command: &mut Command, user_folder: Option<&Path>) {
         if hidden.iter().any(|folder| place.starts_with(folder)) {
             continue;
         }
-        let (Ok(seen), Ok(lock)) = (fs::metadata(&place), fs::metadata(&shown)) else {
+        let Some(folder) = shows(&place, &shown) else {
             continue;
         };
-        if (seen.dev(), seen.ino()) != (lock.dev(), lock.ino()) {
-            continue;
-        }
-        if seen.is_dir() {
+        if folder {
             command
                 .arg("--tmpfs")
                 .arg(&place)
@@ -148,6 +145,18 @@ fn hide_locks(command: &mut Command, user_folder: Option<&Path>) {
         }
         hidden.push(place);
     }
+}
+
+/// If the path `place` shows the folder or file `shown`: `Some(true)` for
+/// a folder, `Some(false)` for a file, and `None` when it does not show it.
+/// A path that a mount shows has no symbolic link in it. A link leads to
+/// another path, and `bwrap` mounts on no link.
+fn shows(place: &Path, shown: &Path) -> Option<bool> {
+    if place.canonicalize().ok().as_deref() != Some(place) {
+        return None;
+    }
+    let (seen, lock) = (fs::metadata(place).ok()?, fs::metadata(shown).ok()?);
+    ((seen.dev(), seen.ino()) == (lock.dev(), lock.ino())).then(|| seen.is_dir())
 }
 
 /// One mount of `/proc/self/mountinfo`: the file system, as its device
@@ -698,6 +707,27 @@ mod tests {
             places_in(b"", Path::new("/home/u/locks")),
             Vec::<(PathBuf, PathBuf)>::new()
         );
+    }
+
+    #[test]
+    fn a_path_shows_a_folder_or_file_only_with_no_link() {
+        let top = std::env::temp_dir().join(format!("lira-shows-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        let locks = top.join("locks");
+        fs::create_dir_all(locks.join("o")).unwrap();
+        fs::write(locks.join("o").join("a.lock"), "").unwrap();
+        std::os::unix::fs::symlink(&locks, top.join("link")).unwrap();
+        fs::create_dir_all(top.join("other")).unwrap();
+        let top = top.canonicalize().unwrap();
+        let locks = top.join("locks");
+        let lock = locks.join("o").join("a.lock");
+        assert_eq!(shows(&locks, &locks), Some(true));
+        assert_eq!(shows(&lock, &lock), Some(false));
+        assert_eq!(shows(&top.join("link"), &locks), None);
+        assert_eq!(shows(&top.join("link").join("o"), &locks.join("o")), None);
+        assert_eq!(shows(&top.join("other"), &locks), None);
+        assert_eq!(shows(&top.join("none"), &locks), None);
+        fs::remove_dir_all(&top).unwrap();
     }
 
     #[test]
