@@ -5663,7 +5663,10 @@ fn the_worktrees_of_lira_whose_folder_is_gone_go_also_under_a_link() {
         .filter_map(|line| line.strip_prefix("worktree "))
         .collect();
     assert_eq!(folders.len(), 2, "{listed}");
-    assert!(folders.iter().all(|folder| Path::new(folder).exists()), "{listed}");
+    assert!(
+        folders.iter().all(|folder| Path::new(folder).exists()),
+        "{listed}"
+    );
 }
 
 // spec(lira continue): The agent works in the old worktree when it is still there, and in a new one when it is not.
