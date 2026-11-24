@@ -332,7 +332,9 @@ fn set(name: &str) -> Option<OsString> {
 /// The XDG specification also says that the user owns the folder. A folder
 /// of the system, such as `/` or `/usr`, is not one, and the sandbox needs
 /// what is in it, such as `sh`. The sandbox needs the home folders too, so
-/// a folder that has one in it is not one either.
+/// a folder that has one in it is not one either. A home folder is in it
+/// also when the path of the home folder leads through it to a folder
+/// outside it, by a link: the link would not be there.
 ///
 /// The sandbox makes it empty before it adds the paths that Lira names, as
 /// it does `/tmp` and `/run`. So a path that Lira names in it is there.
@@ -343,15 +345,18 @@ fn user_folder() -> Option<PathBuf> {
         .then_some(folder)?
         .canonicalize()
         .ok()?;
-    let owner = fs::metadata(&folder).ok()?.uid();
+    let metadata = fs::metadata(&folder).ok()?;
     // SAFETY: `getuid` takes nothing, and it can't fail.
-    let mine = owner == unsafe { getuid() };
-    let has_home = homes()
-        .iter()
-        .filter_map(|home| home.canonicalize().ok())
-        .any(|home| home.starts_with(&folder));
-    (folder.is_dir() && mine && !has_home && !OWN.iter().any(|path| folder.starts_with(path)))
-        .then_some(folder)
+    let mine = metadata.uid() == unsafe { getuid() };
+    let has_home = homes().iter().any(|home| {
+        home.canonicalize()
+            .is_ok_and(|home| home.starts_with(&folder))
+            || home
+                .ancestors()
+                .any(|above| above.canonicalize().is_ok_and(|above| above == folder))
+    });
+    let own = OWN.iter().any(|path| folder.starts_with(path));
+    (metadata.is_dir() && mine && !has_home && !own).then_some(folder)
 }
 
 unsafe extern "C" {
