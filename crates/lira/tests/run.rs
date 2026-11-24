@@ -4048,6 +4048,27 @@ fn a_harness_whose_guard_ends_at_once_does_not_start() {
     assert!(error.contains("ended"), "{error}");
 }
 
+// spec(Steps): When Lira can't start a `sh` that stops the harness if Lira ends, Lira starts no harness, and the error names `sh`.
+#[test]
+fn a_harness_whose_guard_is_not_ready_does_not_start() {
+    // This `sh` writes another first line, and keeps running.
+    let error = no_guard(
+        "guard-not-ready",
+        Some("#!/bin/sh\necho other\nexec /bin/sleep 60\n"),
+    );
+    // The `sh` still runs, so the error does not say that it ended.
+    assert!(!error.contains("ended"), "{error}");
+    assert!(error.contains("`other`"), "{error}");
+}
+
+// spec(Steps): When Lira can't start a `sh` that stops the harness if Lira ends, Lira starts no harness, and the error names `sh`.
+#[test]
+fn a_harness_whose_guard_ends_in_its_first_line_does_not_start() {
+    // This `sh` writes `ready` with no end of line, and ends.
+    let error = no_guard("guard-ends-in-line", Some("#!/bin/sh\nprintf ready\n"));
+    assert!(error.contains("ended before it was ready"), "{error}");
+}
+
 /// Runs Lira with a `PATH` where `sh` is the script `sh`, or where there is
 /// no `sh` at all. Lira can't guard the harness, so the run fails, and Lira
 /// starts no harness. It gives the error of Lira.

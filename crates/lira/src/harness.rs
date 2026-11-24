@@ -937,19 +937,12 @@ impl Drop for Harness {
 /// `sh` that starts and ends at once guards no harness. The error says what
 /// the `sh` did, in a sentence that starts after "It is a `sh`, and".
 fn guard() -> Result<Child, String> {
-    start_guard(
-        r#"echo ready
+    let wait_then_stop = r#"echo ready
 IFS= read -r group || exit 0
 while IFS= read -r line; do :; done
-kill -s KILL -- "-$group""#,
-    )
-}
-
-/// Starts a `sh` with this script as the guard, and waits until it says
-/// that it is ready.
-fn start_guard(script: &str) -> Result<Child, String> {
+kill -s KILL -- "-$group""#;
     let mut guard = Command::new("sh")
-        .args(["-c", script])
+        .args(["-c", wait_then_stop])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -966,7 +959,10 @@ fn start_guard(script: &str) -> Result<Child, String> {
     let _ = guard.wait();
     Err(match read {
         Err(error) => format!("Lira can't read from it: {error}"),
-        Ok(0) => "it started, and it ended before it was ready".to_string(),
+        // A line with no end is the last output of the `sh`: it ended.
+        Ok(_) if !ready.ends_with('\n') => {
+            "it started, and it ended before it was ready".to_string()
+        }
         Ok(_) => format!(
             "it started, and its first line was `{}`, not `ready`",
             ready.trim_end_matches('\n')
@@ -1043,22 +1039,4 @@ fn keep(mut output: ChildStderr) -> (Arc<Mutex<Vec<u8>>>, Receiver<()>) {
         let _ = ended.send(());
     });
     (kept, errors_ended)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn says_what_the_guard_wrote_when_its_first_line_is_not_ready() {
-        let error = start_guard("echo other; exec sleep 60").unwrap_err();
-        assert!(!error.contains("ended"), "{error}");
-        assert!(error.contains("`other`"), "{error}");
-    }
-
-    #[test]
-    fn says_that_the_guard_ended_when_it_wrote_nothing() {
-        let error = start_guard("exit 0").unwrap_err();
-        assert_eq!(error, "it started, and it ended before it was ready");
-    }
 }
