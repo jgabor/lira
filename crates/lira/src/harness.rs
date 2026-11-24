@@ -937,12 +937,19 @@ impl Drop for Harness {
 /// `sh` that starts and ends at once guards no harness. The error says what
 /// the `sh` did, in a sentence that starts after "It is a `sh`, and".
 fn guard() -> Result<Child, String> {
-    let wait_then_stop = r#"echo ready
+    start_guard(
+        r#"echo ready
 IFS= read -r group || exit 0
 while IFS= read -r line; do :; done
-kill -s KILL -- "-$group""#;
+kill -s KILL -- "-$group""#,
+    )
+}
+
+/// Starts a `sh` with this script as the guard, and waits until it says
+/// that it is ready.
+fn start_guard(script: &str) -> Result<Child, String> {
     let mut guard = Command::new("sh")
-        .args(["-c", wait_then_stop])
+        .args(["-c", script])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -959,7 +966,11 @@ kill -s KILL -- "-$group""#;
     let _ = guard.wait();
     Err(match read {
         Err(error) => format!("Lira can't read from it: {error}"),
-        Ok(_) => "it started, and it ended before it was ready".to_string(),
+        Ok(0) => "it started, and it ended before it was ready".to_string(),
+        Ok(_) => format!(
+            "it started, and its first line was `{}`, not `ready`",
+            ready.trim_end_matches('\n')
+        ),
     })
 }
 
@@ -1032,4 +1043,22 @@ fn keep(mut output: ChildStderr) -> (Arc<Mutex<Vec<u8>>>, Receiver<()>) {
         let _ = ended.send(());
     });
     (kept, errors_ended)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn says_what_the_guard_wrote_when_its_first_line_is_not_ready() {
+        let error = start_guard("echo other; exec sleep 60").unwrap_err();
+        assert!(!error.contains("ended"), "{error}");
+        assert!(error.contains("`other`"), "{error}");
+    }
+
+    #[test]
+    fn says_that_the_guard_ended_when_it_wrote_nothing() {
+        let error = start_guard("exit 0").unwrap_err();
+        assert_eq!(error, "it started, and it ended before it was ready");
+    }
 }
