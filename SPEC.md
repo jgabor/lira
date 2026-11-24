@@ -290,7 +290,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - It does not wait for that agent, and it does not stop it.
 - When Lira is killed while its agent works, a later `lira continue` starts a new agent.
 - When Lira is killed while its Reviewer works, a later `lira continue` in the same worktree removes the copy of the repository that the Reviewer worked in, before its own Reviewer starts.
-- When a link, a file, or a folder with files and no repository of its own is in the place of that copy, `lira continue` fails, names the place, and leaves what is there as it is.
+- When a link, a file, or a folder that is not empty and has no folder `.git` is in the place of that copy, `lira continue` fails, names the place, and leaves what is there as it is.
 - It prints the address of the pull request.
 
 ### lira check
