@@ -193,14 +193,12 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         sandbox,
         pull_request,
         continued: Some(Continued {
-            answers: read.answer.len(),
             read: comments.last().and_then(|newest| {
                 Some(comment::Read::Until {
                     id: newest.id.clone()?,
                     time: newest.time.clone(),
                 })
             }),
-            login,
         }),
         said: String::new(),
         outputs: 0,
@@ -262,8 +260,8 @@ impl Run<'_> {
         // A later `lira continue` reads only what you wrote after this
         // comment. The work passed already, so a failure here does not
         // change that.
-        if let Some(continued) = &self.continued
-            && let Err(error) = self.write_passed(continued)
+        if self.continued.is_some()
+            && let Err(error) = self.pull_request.passed(self.read().as_ref())
         {
             eprintln!(
                 "lira: Lira did not write on the pull request that the work passed: {error}\nSo the next `lira continue` gets again what this one got"
@@ -387,35 +385,12 @@ struct Run<'a> {
 
 /// What the agent of `lira continue` got from the comments.
 struct Continued {
-    /// The login of `gh`.
-    login: String,
-    /// How many comments your answer had.
-    answers: usize,
     /// The newest comment when the agent started. The agent read each
     /// comment until that one.
     read: Option<comment::Read>,
 }
 
 impl Run<'_> {
-    /// Writes the comment that the work of `lira continue` passed. Lira
-    /// reads the comments again first. When you wrote a comment while the
-    /// agent worked, no agent got it, so Lira writes no such comment: then
-    /// the next `lira continue` gets your comment too.
-    fn write_passed(&self, continued: &Continued) -> Result<(), String> {
-        let address = self.address()?;
-        let comments = github::comments(self.started, &address, &continued.login)?;
-        let answers = comment::read(&comments, &continued.login)
-            .map(|read| read.answer.len())
-            .unwrap_or_default();
-        if answers > continued.answers {
-            return Err(
-                "you wrote a comment while the agent worked, and the agent did not get it"
-                    .to_string(),
-            );
-        }
-        self.pull_request.passed(self.read().as_ref())
-    }
-
     /// What the agent read. The agent of `lira run` reads only the
     /// request. That of `lira continue` reads the comments that were there
     /// when it started.

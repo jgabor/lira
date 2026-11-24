@@ -5511,7 +5511,7 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
 }
 
 // spec(lira continue): When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
-// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after it.
+// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after its agent started.
 // spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 // spec(lira continue): The Reviewer also gets each comment that you wrote after the request and before your answer.
 #[test]
@@ -5565,21 +5565,20 @@ fn after_a_pass_and_no_new_comment_the_agent_is_not_told_to_try_again() {
     assert!(!message.contains("try again"), "{message}");
 }
 
-// spec(lira continue): When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
+// spec(lira continue): A comment that you write while the agent works is part of your answer for the next `lira continue`.
 #[test]
-fn a_comment_that_you_wrote_while_the_agent_worked_is_not_lost() {
+fn a_comment_that_you_wrote_while_the_agent_worked_is_the_next_answer_after_a_pass() {
     let repository = Repository::stopped("continue-comment-meanwhile");
     repository.comment("you", ANSWER);
     let meanwhile = repository.shared.join("bin").join("comment-at-ready");
     fs::write(&meanwhile, "Also rename the file.").unwrap();
-    let output = repository.continue_work();
-    passed(&output);
-    let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("you wrote a comment"), "{said}");
-    // The request and the question, and no comment that the work passed.
-    assert_eq!(repository.calls("pr comment").len(), 2);
-    // The next `lira continue` gets the old question, the old answer, and
-    // the comment that you wrote while the agent worked.
+    passed(&repository.continue_work());
+    // The request, the question, and the comment that the work passed.
+    assert_eq!(repository.calls("pr comment").len(), 3);
+    let comment = repository.gh("commented");
+    assert!(comment.contains("passed the change"), "{comment}");
+    // The next `lira continue` gets only the comment that you wrote while
+    // the agent worked: not the old question, and not the old answer.
     fs::remove_file(&meanwhile).unwrap();
     repository.view(false, &[]);
     program(
@@ -5588,9 +5587,14 @@ fn a_comment_that_you_wrote_while_the_agent_worked_is_not_lost() {
     );
     passed(&repository.continue_work());
     let message = repository.message();
-    assert!(message.contains("3 rounds of review"), "{message}");
-    assert!(message.contains(ANSWER), "{message}");
-    assert!(message.contains("Also rename the file."), "{message}");
+    let answer = message.find("The answer of the user:").expect(&message);
+    assert!(
+        message[answer..].contains("Also rename the file."),
+        "{message}"
+    );
+    assert!(!message.contains(ANSWER), "{message}");
+    assert!(!message.contains("3 rounds of review"), "{message}");
+    assert!(message.contains("sent it back"), "{message}");
 }
 
 // spec(lira continue): Your answer is each comment that the login of `gh` wrote after the comments that the last comment of Lira says its agent read, and that Lira did not write.
