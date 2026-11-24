@@ -12,6 +12,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -84,7 +85,7 @@ impl Sandbox {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
-        hide_locks(&mut command);
+        hide_locks(&mut command, user_folder.as_deref());
         hide_logins(&mut command, &self.hidden, user_folder);
         command.arg("--").arg(program);
         command
@@ -95,28 +96,162 @@ impl Sandbox {
 const OWN: [&str; 4] = ["/dev", "/proc", "/tmp", "/run"];
 
 /// Hides the locks that Lira takes on the work of agents: their folder is
-/// empty in the sandbox, and read-only. A lock works on a file that is open
-/// for reading, so an agent that saw the lock of other work could take it,
-/// and Lira would then start no agent on that work. This comes after the
-/// other paths, so that it wins over them.
+/// empty in the sandbox, and read-only, at each path where the host shows
+/// it. A lock works on a file that is open for reading, so an agent that
+/// saw the lock of other work could take it, and Lira would then start no
+/// agent on that work. This comes after the other paths, so that it wins
+/// over them.
+///
+/// A path that a mount shows is hidden only when it is the same folder or
+/// file as the one of the locks: another mount can cover it. A file there
+/// is hidden as a file of a login is. `user_folder` is the folder of
+/// `XDG_RUNTIME_DIR`, when the sandbox has its own.
 ///
 /// Lira makes the folder when it is not there yet. A folder that the host
-/// makes later would show in the sandbox.
-fn hide_locks(command: &mut Command) {
+/// makes later would show in the sandbox, and so would a mount that the
+/// host makes later.
+fn hide_locks(command: &mut Command, user_folder: Option<&Path>) {
     let Ok(data) = data::folder() else {
         return;
     };
     let locks = data::locks(&data);
     let _ = fs::create_dir_all(&locks);
-    if let Ok(locks) = locks.canonicalize()
-        && locks.is_dir()
-    {
-        command
-            .arg("--tmpfs")
-            .arg(&locks)
-            .arg("--remount-ro")
-            .arg(&locks);
+    let Ok(locks) = locks.canonicalize() else {
+        return;
+    };
+    let mounts = fs::read("/proc/self/mountinfo").unwrap_or_default();
+    let mut places = vec![(locks.clone(), locks.clone())];
+    places.extend(places_in(&mounts, &locks));
+    let mut hidden: Vec<PathBuf> = OWN
+        .iter()
+        .map(PathBuf::from)
+        .chain(user_folder.map(Path::to_path_buf))
+        .collect();
+    for (place, shown) in places {
+        if hidden.iter().any(|folder| place.starts_with(folder)) {
+            continue;
+        }
+        let Some(folder) = shows(&place, &shown) else {
+            continue;
+        };
+        if folder {
+            command
+                .arg("--tmpfs")
+                .arg(&place)
+                .arg("--remount-ro")
+                .arg(&place);
+        } else {
+            command.arg("--dev-bind").arg("/dev/null").arg(&place);
+        }
+        hidden.push(place);
     }
+}
+
+/// If the path `place` shows the folder or file `shown`: `Some(true)` for
+/// a folder, `Some(false)` for a file, and `None` when it does not show it.
+/// A path that a mount shows has no symbolic link in it. A link leads to
+/// another path, and `bwrap` mounts on no link.
+fn shows(place: &Path, shown: &Path) -> Option<bool> {
+    if place.canonicalize().ok().as_deref() != Some(place) {
+        return None;
+    }
+    let (seen, lock) = (fs::metadata(place).ok()?, fs::metadata(shown).ok()?);
+    ((seen.dev(), seen.ino()) == (lock.dev(), lock.ino())).then(|| seen.is_dir())
+}
+
+/// One mount of `/proc/self/mountinfo`: the file system, as its device
+/// number, the folder of that file system that it shows, and where.
+struct Mount {
+    device: Vec<u8>,
+    root: PathBuf,
+    point: PathBuf,
+}
+
+/// The mounts of a text in the form of `/proc/self/mountinfo`, in its
+/// order. A line has the number of the mount, the number of its parent,
+/// the device number, the root, the mount point, and more.
+fn mounts(text: &[u8]) -> Vec<Mount> {
+    let mut mounts = Vec::new();
+    for line in text.split(|&byte| byte == b'\n') {
+        let mut fields = line.split(|&byte| byte == b' ').skip(2);
+        if let (Some(device), Some(root), Some(point)) =
+            (fields.next(), fields.next(), fields.next())
+        {
+            mounts.push(Mount {
+                device: device.to_vec(),
+                root: PathBuf::from(OsString::from_vec(unescape_octal(root))),
+                point: PathBuf::from(OsString::from_vec(unescape_octal(point))),
+            });
+        }
+    }
+    mounts
+}
+
+/// A path of `/proc/self/mountinfo` with each `\` and three octal digits
+/// as the byte that they escape. The system escapes a space, a tab, a new
+/// line and `\` so.
+fn unescape_octal(value: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        let digits = value.get(index + 1..index + 4);
+        let escaped = digits
+            .filter(|digits| {
+                value[index] == b'\\' && digits.iter().all(|d| (b'0'..=b'7').contains(d))
+            })
+            .map(|digits| {
+                digits
+                    .iter()
+                    .fold(0u32, |sum, d| sum * 8 + u32::from(d - b'0'))
+            });
+        match escaped {
+            Some(byte) if byte <= 0xff => {
+                bytes.push(byte as u8);
+                index += 4;
+            }
+            _ => {
+                bytes.push(value[index]);
+                index += 1;
+            }
+        }
+    }
+    bytes
+}
+
+/// The other paths where the mounts in `text`, in the form of
+/// `/proc/self/mountinfo`, can show the folder `folder`, which is a
+/// canonical path, or a folder or file in it. Each is the path, and the
+/// path in `folder` that it would show. A bind mount shows a folder of a
+/// file system at a second path, and so does a second mount of the file
+/// system, such as of a btrfs subvolume.
+///
+/// A mount can cover another, at the same point or at a folder above it,
+/// so this does not know which mount shows `folder`. It takes each mount
+/// whose point `folder` is in, and the paths are what those mounts could
+/// show.
+fn places_in(text: &[u8], folder: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mounts = mounts(text);
+    let mut places = Vec::new();
+    for own in &mounts {
+        let Ok(inside) = folder.strip_prefix(&own.point) else {
+            continue;
+        };
+        let inside = own.root.join(inside);
+        for mount in mounts.iter().filter(|mount| mount.device == own.device) {
+            let place = match (
+                inside.strip_prefix(&mount.root),
+                mount.root.strip_prefix(&inside),
+            ) {
+                (Ok(rest), _) => (mount.point.join(rest), folder.to_path_buf()),
+                (_, Ok(rest)) => (mount.point.clone(), folder.join(rest)),
+                _ => continue,
+            };
+            if place.0 != place.1 && !places.contains(&place) {
+                places.push(place);
+            }
+        }
+    }
+    places
 }
 
 /// The variables that can hold a token for GitHub, for `gh` and for git.
@@ -222,7 +357,9 @@ fn homes() -> Vec<PathBuf> {
 /// from `gh` too. ssh keeps its keys in `~/.ssh`. `git credential-cache`
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
 /// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
-/// plain store in `~/.gcm/store`.
+/// plain store in `~/.gcm/store`, or in the folder that
+/// `GCM_PLAINTEXT_STORE_PATH` or a git setting `plaintextStorePath` of
+/// `credential` names.
 ///
 /// gpg keeps its keys in `GNUPGHOME`, or in `~/.gnupg`. gpg-agent answers
 /// at its sockets, and with its ssh support on, one of them leads to the
@@ -238,6 +375,10 @@ fn login_folders() -> Vec<PathBuf> {
     if let Some(folder) = set("GNUPGHOME") {
         folders.push(PathBuf::from(folder));
     }
+    if let Some(folder) = set("GCM_PLAINTEXT_STORE_PATH") {
+        folders.extend(store_folders(folder.as_bytes()));
+    }
+    folders.extend(plain_store_settings());
     if let Some(folder) = set("XDG_CONFIG_HOME") {
         folders.push(Path::new(&folder).join("gh"));
     }
@@ -253,6 +394,52 @@ fn login_folders() -> Vec<PathBuf> {
         folders.push(home.join(".gnupg"));
     }
     folders
+}
+
+/// The folders that the git settings of the plain store of Git Credential
+/// Manager name: `credential.plaintextStorePath`, and the same setting for
+/// a site, such as `credential.https://github.com.plaintextStorePath`. Each
+/// value of each of them is here, also one that a later value replaces.
+/// There are none when git does not run.
+fn plain_store_settings() -> Vec<PathBuf> {
+    let Ok(output) = Command::new("git")
+        .args([
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^credential\.(.*\.)?plaintextstorepath$",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    // Each entry is the name of the setting, a new line, and the value.
+    output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter_map(|entry| Some(&entry[entry.iter().position(|&byte| byte == b'\n')? + 1..]))
+        .flat_map(store_folders)
+        .collect()
+}
+
+/// The folders that a path of the plain store can name. A path that starts
+/// with `~/` is in a home folder, and each home folder of the user is here
+/// for it, as Git Credential Manager reads it in one of them.
+fn store_folders(path: &[u8]) -> Vec<PathBuf> {
+    match path.strip_prefix(b"~/") {
+        // The path stays in the home folder also after more than one `/`.
+        Some(mut rest) => {
+            while let Some(after) = rest.strip_prefix(b"/") {
+                rest = after;
+            }
+            homes()
+                .into_iter()
+                .map(|home| home.join(OsStr::from_bytes(rest)))
+                .collect()
+        }
+        None if path.is_empty() => Vec::new(),
+        None => vec![PathBuf::from(OsStr::from_bytes(path))],
+    }
 }
 
 /// The files and sockets that hold or lead to a login for GitHub. `git
@@ -479,6 +666,68 @@ mod tests {
                 PathBuf::from(OsString::from_vec(b"/s,\xffx".to_vec())),
             ]
         );
+    }
+
+    /// The mounts of a host with btrfs: the subvolume `@` at `/`, `@home`
+    /// at `/home`, the top of the file system at `/mnt/top`, a bind mount
+    /// of a folder of `/home` at `/srv/a b`, and of a folder in the locks
+    /// at `/srv/part`. `/proc` is another file system.
+    const MOUNTS: &[u8] = b"43 1 0:37 /@ / rw - btrfs /dev/a rw\n\
+        50 43 0:37 /@home /home rw - btrfs /dev/a rw\n\
+        51 43 0:22 / /proc rw - proc proc rw\n\
+        52 43 0:37 / /mnt/top rw - btrfs /dev/a rw\n\
+        53 43 0:37 /@home/u /srv/a\\040b rw - btrfs /dev/a rw\n\
+        54 43 0:37 /@home/u/.local/share/lira/locks/o /srv/part rw - btrfs /dev/a rw\n\
+        55 43 0:37 /@home/other /srv/other rw - btrfs /dev/a rw\n";
+
+    #[test]
+    fn finds_each_path_where_a_mount_can_show_a_folder() {
+        let locks = Path::new("/home/u/.local/share/lira/locks");
+        let shown = |place: &str, path: &Path| (PathBuf::from(place), path.to_path_buf());
+        assert_eq!(
+            places_in(MOUNTS, locks),
+            [
+                // What `/` would show, if no mount covered `/home`.
+                shown("/mnt/top/@/home/u/.local/share/lira/locks", locks),
+                shown("/mnt/top/@home/u/.local/share/lira/locks", locks),
+                shown("/srv/a b/.local/share/lira/locks", locks),
+                shown("/srv/part", &locks.join("o")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_with_no_second_mount_has_no_other_path() {
+        let mounts = b"43 1 0:37 /@ / rw - btrfs /dev/a rw\n51 43 0:22 / /proc rw - proc proc rw\n";
+        assert_eq!(
+            places_in(mounts, Path::new("/home/u/locks")),
+            Vec::<(PathBuf, PathBuf)>::new()
+        );
+        assert_eq!(
+            places_in(b"", Path::new("/home/u/locks")),
+            Vec::<(PathBuf, PathBuf)>::new()
+        );
+    }
+
+    #[test]
+    fn a_path_shows_a_folder_or_file_only_with_no_link() {
+        let top = std::env::temp_dir().join(format!("lira-shows-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        let locks = top.join("locks");
+        fs::create_dir_all(locks.join("o")).unwrap();
+        fs::write(locks.join("o").join("a.lock"), "").unwrap();
+        std::os::unix::fs::symlink(&locks, top.join("link")).unwrap();
+        fs::create_dir_all(top.join("other")).unwrap();
+        let top = top.canonicalize().unwrap();
+        let locks = top.join("locks");
+        let lock = locks.join("o").join("a.lock");
+        assert_eq!(shows(&locks, &locks), Some(true));
+        assert_eq!(shows(&lock, &lock), Some(false));
+        assert_eq!(shows(&top.join("link"), &locks), None);
+        assert_eq!(shows(&top.join("link").join("o"), &locks.join("o")), None);
+        assert_eq!(shows(&top.join("other"), &locks), None);
+        assert_eq!(shows(&top.join("none"), &locks), None);
+        fs::remove_dir_all(&top).unwrap();
     }
 
     #[test]

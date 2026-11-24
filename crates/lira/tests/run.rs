@@ -347,6 +347,47 @@ fn listen(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
     agent.unwrap()
 }
 
+/// The folder where each test has a folder of its own. The sandbox has its
+/// own `/dev`, `/proc`, `/tmp`, `/run` and folder of `XDG_RUNTIME_DIR`, so
+/// it does not show a folder of a test there. A test of a login that the
+/// sandbox hides would then pass also when Lira hid nothing. So when the
+/// folder of cargo for the files of tests is in one of them, the tests are
+/// in `target/tmp` of the workspace.
+fn tests_folder() -> PathBuf {
+    let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    hidden.extend(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|folder| folder.is_absolute())
+            .and_then(|folder| folder.canonicalize().ok()),
+    );
+    // The folder has no link in its path: the sandbox hides a link in a
+    // hidden folder, also when it leads out of it. So the folder is made,
+    // and the tests use the path with each link followed.
+    let real = |folder: &Path| {
+        fs::create_dir_all(folder).unwrap();
+        folder.canonicalize().unwrap()
+    };
+    let hidden_in = |folder: &Path| hidden.iter().find(|place| folder.starts_with(place));
+    let cargo = real(Path::new(env!("CARGO_TARGET_TMPDIR")));
+    if hidden_in(&cargo).is_none() {
+        return cargo;
+    }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let folder = real(&workspace.join("target").join("tmp"));
+    if let Some(place) = hidden_in(&folder) {
+        panic!(
+            "the tests of the sandbox need a folder that the sandbox shows, and `{}` is in `{}`",
+            folder.display(),
+            place.display()
+        );
+    }
+    folder
+}
+
 impl Repository {
     /// A repository whose main branch has one commit, with this Lira file.
     /// The stand-in for the harness does `work` when the message for the
@@ -362,9 +403,7 @@ impl Repository {
     }
 
     fn with(test: &str, lira_file: &str, check: &str, work: &str) -> Repository {
-        let top = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("run")
-            .join(test);
+        let top = tests_folder().join("run").join(test);
         if top.exists() {
             fs::remove_dir_all(&top).unwrap();
         }
@@ -1947,6 +1986,81 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     }
 }
 
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_have_no_login_in_a_plain_store_that_the_host_moves() {
+    let repository = Repository::new("moved-store", CHECK, "");
+    // Git Credential Manager keeps its plain store in the folder that
+    // `GCM_PLAINTEXT_STORE_PATH` names, or else in the one that a git
+    // setting `plaintextStorePath` of `credential` names. A setting can be
+    // for one site, a later value replaces an earlier one, and `~` is the
+    // home folder, also with more than one `/` after it.
+    let variable = repository.top.join("variable-store");
+    let earlier = repository.top.join("earlier-store");
+    let later = repository.top.join("home").join("later-store");
+    let site = repository.top.join("site-store");
+    let folders = [variable.clone(), earlier.clone(), later, site.clone()];
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    let logins = r#"stores() {
+  for folder in "$GCM_PLAINTEXT_STORE_PATH" "$@"; do
+    echo "$folder: $(ls -A "$folder" 2>&1)"
+  done
+}
+"#;
+    let paths = folders[1..]
+        .iter()
+        .map(|folder| format!("'{}'", folder.display()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{logins}stores {paths} > \"$here/agent-stores\"\n{WORK}"),
+    );
+    repository.reviewer(&format!(
+        "{logins}stores {paths} > \"$here/reviewer-stores\"\nreply 'Review: pass'\n"
+    ));
+    let output = repository
+        .lira()
+        .env("GCM_PLAINTEXT_STORE_PATH", &variable)
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_0", "credential.plaintextStorePath")
+        .env("GIT_CONFIG_VALUE_0", &earlier)
+        .env("GIT_CONFIG_KEY_1", "credential.plaintextStorePath")
+        .env("GIT_CONFIG_VALUE_1", "~//later-store")
+        .env(
+            "GIT_CONFIG_KEY_2",
+            "credential.https://github.com.plaintextStorePath",
+        )
+        .env("GIT_CONFIG_VALUE_2", &site)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    // Each folder is empty.
+    let empty: String = folders
+        .iter()
+        .map(|folder| format!("{}: \n", folder.display()))
+        .collect();
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("agent-stores")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("reviewer-stores")).unwrap(),
+        empty
+    );
+    // The logins of the host are as they were.
+    for folder in &folders {
+        assert_eq!(
+            fs::read_to_string(folder.join("login")).unwrap(),
+            "secret\n"
+        );
+    }
+}
+
 #[test]
 fn with_no_home_an_agent_and_a_reviewer_have_no_login_in_the_home_folder_of_the_system() {
     let repository = Repository::new("system-home", CHECK, "");
@@ -2007,6 +2121,12 @@ fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
     if Path::new("/run/nscd").is_dir() {
         command.args(["--tmpfs", "/run/nscd"]);
     }
+    within(command, lira)
+}
+
+/// `bwrap` with what it was given, which runs `lira` with its folder and
+/// its variables.
+fn within(mut command: Command, lira: &Command) -> Command {
     command
         .arg("--")
         .arg(lira.get_program())
@@ -2056,7 +2176,7 @@ fn a_relative_xdg_runtime_dir_hides_nothing() {
     // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
     // in the repository, so `.` is the repository, and the worktree of the
     // agent needs its `.git`. The file `bus` there is no session bus.
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+    let root = tests_folder()
         .join("run")
         .join("relative-user-folder")
         .join("repository");
@@ -6402,4 +6522,75 @@ fn a_setup_command_that_fails_in_a_new_worktree_of_a_branch_keeps_the_branch() {
     let full = format!("refs/heads/{branch}");
     assert_eq!(git_ok(&repository.root, &["rev-parse", &full]), head);
     assert_eq!(repository.as_it_is(&repository.root), before);
+}
+
+// spec(Steps): An agent can't see the locks that Lira takes on the work of agents.
+#[test]
+fn an_agent_can_not_lock_the_work_on_another_pull_request_through_a_second_path() {
+    let repository = Repository::stopped("lock-at-second-path");
+    let data = repository.top.join("xdg");
+    let lock = Path::new("lira")
+        .join("locks")
+        .join("owner")
+        .join("name")
+        .join(format!("{}.lock", repository.pull_request_branch()));
+    assert!(data.join(&lock).is_file());
+    // The host shows the folder of the data folder at a second path too,
+    // as a bind mount does, and the lock file at a third. The agent of a
+    // new run tries to lock the work on the pull request there, and holds
+    // the lock while it works. The next start is the agent of `lira
+    // continue`, on the host.
+    let second = repository.top.join("second");
+    fs::create_dir_all(&second).unwrap();
+    let third = repository.top.join("third.lock");
+    fs::write(&third, "").unwrap();
+    let file = data.join(&lock);
+    let lock = second.join(lock);
+    let work = format!(
+        r#"if [ ! -e "$here/tried" ]; then
+  echo tried > "$here/tried"
+  [ -e '{lock}' ] && echo seen > "$here/lock-seen"
+  [ -d '{worktrees}' ] && echo shown > "$here/second-path-shown"
+  # The shell holds this lock until it ends.
+  exec 8< '{third}' && flock --nonblock 8
+  export here
+  if flock --nonblock '{lock}' sh -c 'echo locked > "$here/locked"; {HOLD}'; then :; else
+    echo failed > "$here/lock-failed"
+    {HOLD}
+  fi
+  reply 'I did nothing.'
+  exit 0
+fi
+{CONTINUE}"#,
+        lock = lock.display(),
+        third = third.display(),
+        worktrees = second.join("lira").join("worktrees").display(),
+    );
+    program(&repository.harness.join("agent"), &format!("{START}{work}"));
+    let mut lira = repository.lira();
+    lira.args(["run", REQUEST]);
+    let mut outer = Command::new("bwrap");
+    outer
+        .args(["--dev-bind", "/", "/", "--bind"])
+        .arg(&data)
+        .arg(&second)
+        .arg("--bind")
+        .arg(&file)
+        .arg(&third);
+    let mut run = within(outer, &lira).spawn().unwrap();
+    wait_for("the work of the agent", || {
+        repository.harness.join("working").exists()
+    });
+    let starts = repository.starts();
+
+    let continued = repository.continue_work();
+    fs::write(repository.harness.join("go"), "").unwrap();
+    let _ = run.wait();
+    passed(&continued);
+    assert!(repository.starts() > starts);
+    // The sandbox shows the rest of the data folder at the second path.
+    assert!(repository.harness.join("second-path-shown").exists());
+    assert!(!repository.harness.join("lock-seen").exists());
+    assert!(!repository.harness.join("locked").exists());
+    assert!(repository.harness.join("lock-failed").exists());
 }
