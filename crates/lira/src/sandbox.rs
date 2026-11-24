@@ -333,8 +333,10 @@ fn set(name: &str) -> Option<OsString> {
 /// of the system, such as `/` or `/usr`, is not one, and the sandbox needs
 /// what is in it, such as `sh`. The sandbox needs the home folders too, so
 /// a folder that has one in it is not one either. A home folder is in it
-/// also when the path of the home folder leads through it to a folder
-/// outside it, by a link: the link would not be there.
+/// also when its path, or a folder above it in its path, leads into it by
+/// a link: the link would not be there. A chain of links that leads into
+/// it and out of it again is not seen, because `canonicalize` follows the
+/// whole chain at once.
 ///
 /// The sandbox makes it empty before it adds the paths that Lira names, as
 /// it does `/tmp` and `/run`. So a path that Lira names in it is there.
