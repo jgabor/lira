@@ -12,6 +12,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -84,7 +85,7 @@ impl Sandbox {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
         }
-        hide_locks(&mut command);
+        hide_locks(&mut command, user_folder.as_deref());
         hide_logins(&mut command, &self.hidden, user_folder);
         command.arg("--").arg(program);
         command
@@ -101,10 +102,15 @@ const OWN: [&str; 4] = ["/dev", "/proc", "/tmp", "/run"];
 /// agent on that work. This comes after the other paths, so that it wins
 /// over them.
 ///
+/// A path that a mount shows is hidden only when it is the same folder or
+/// file as the one of the locks: another mount can cover it. A file there
+/// is hidden as a file of a login is. `user_folder` is the folder of
+/// `XDG_RUNTIME_DIR`, when the sandbox has its own.
+///
 /// Lira makes the folder when it is not there yet. A folder that the host
 /// makes later would show in the sandbox, and so would a mount that the
 /// host makes later.
-fn hide_locks(command: &mut Command) {
+fn hide_locks(command: &mut Command, user_folder: Option<&Path>) {
     let Ok(data) = data::folder() else {
         return;
     };
@@ -114,19 +120,33 @@ fn hide_locks(command: &mut Command) {
         return;
     };
     let mounts = fs::read("/proc/self/mountinfo").unwrap_or_default();
-    let mut places = vec![locks.clone()];
+    let mut places = vec![(locks.clone(), locks.clone())];
     places.extend(places_in(&mounts, &locks));
-    let user_folder = user_folder();
-    let mut hidden: Vec<PathBuf> = OWN.iter().map(PathBuf::from).chain(user_folder).collect();
-    for place in places {
-        if place.is_dir() && !hidden.iter().any(|folder| place.starts_with(folder)) {
+    let mut hidden: Vec<PathBuf> = OWN
+        .iter()
+        .map(PathBuf::from)
+        .chain(user_folder.map(Path::to_path_buf))
+        .collect();
+    for (place, shown) in places {
+        if hidden.iter().any(|folder| place.starts_with(folder)) {
+            continue;
+        }
+        let (Ok(seen), Ok(lock)) = (fs::metadata(&place), fs::metadata(&shown)) else {
+            continue;
+        };
+        if (seen.dev(), seen.ino()) != (lock.dev(), lock.ino()) {
+            continue;
+        }
+        if seen.is_dir() {
             command
                 .arg("--tmpfs")
                 .arg(&place)
                 .arg("--remount-ro")
                 .arg(&place);
-            hidden.push(place);
+        } else {
+            command.arg("--dev-bind").arg("/dev/null").arg(&place);
         }
+        hidden.push(place);
     }
 }
 
@@ -190,44 +210,36 @@ fn unescape_octal(value: &[u8]) -> Vec<u8> {
 }
 
 /// The other paths where the mounts in `text`, in the form of
-/// `/proc/self/mountinfo`, show the folder `folder`, which is a canonical
-/// path. A bind mount shows a folder of a file system at a second path, and
-/// so does a second mount of the file system, such as of a btrfs
-/// subvolume. Such a mount shows `folder`, or a folder in it.
+/// `/proc/self/mountinfo`, can show the folder `folder`, which is a
+/// canonical path, or a folder or file in it. Each is the path, and the
+/// path in `folder` that it would show. A bind mount shows a folder of a
+/// file system at a second path, and so does a second mount of the file
+/// system, such as of a btrfs subvolume.
 ///
-/// The mount of `folder` is the last one with the longest mount point that
-/// `folder` is in: a later mount at the same point covers an earlier one.
-fn places_in(text: &[u8], folder: &Path) -> Vec<PathBuf> {
+/// A mount can cover another, at the same point or at a folder above it,
+/// so this does not know which mount shows `folder`. It takes each mount
+/// whose point `folder` is in, and the paths are what those mounts could
+/// show.
+fn places_in(text: &[u8], folder: &Path) -> Vec<(PathBuf, PathBuf)> {
     let mounts = mounts(text);
-    let mut own: Option<&Mount> = None;
-    for mount in &mounts {
-        if folder.starts_with(&mount.point)
-            && own.is_none_or(|own| {
-                mount.point.components().count() >= own.point.components().count()
-            })
-        {
-            own = Some(mount);
-        }
-    }
-    let Some(own) = own else {
-        return Vec::new();
-    };
-    let Ok(inside) = folder.strip_prefix(&own.point) else {
-        return Vec::new();
-    };
-    let inside = own.root.join(inside);
     let mut places = Vec::new();
-    for mount in &mounts {
-        if mount.device != own.device {
+    for own in &mounts {
+        let Ok(inside) = folder.strip_prefix(&own.point) else {
             continue;
-        }
-        let place = match inside.strip_prefix(&mount.root) {
-            Ok(rest) => mount.point.join(rest),
-            Err(_) if mount.root.starts_with(&inside) => mount.point.clone(),
-            Err(_) => continue,
         };
-        if place != folder && !places.contains(&place) {
-            places.push(place);
+        let inside = own.root.join(inside);
+        for mount in mounts.iter().filter(|mount| mount.device == own.device) {
+            let place = match (
+                inside.strip_prefix(&mount.root),
+                mount.root.strip_prefix(&inside),
+            ) {
+                (Ok(rest), _) => (mount.point.join(rest), folder.to_path_buf()),
+                (_, Ok(rest)) => (mount.point.clone(), folder.join(rest)),
+                _ => continue,
+            };
+            if place.0 != place.1 && !places.contains(&place) {
+                places.push(place);
+            }
         }
     }
     places
@@ -660,14 +672,17 @@ mod tests {
         55 43 0:37 /@home/other /srv/other rw - btrfs /dev/a rw\n";
 
     #[test]
-    fn finds_each_other_path_of_a_folder() {
+    fn finds_each_path_where_a_mount_can_show_a_folder() {
         let locks = Path::new("/home/u/.local/share/lira/locks");
+        let shown = |place: &str, path: &Path| (PathBuf::from(place), path.to_path_buf());
         assert_eq!(
             places_in(MOUNTS, locks),
             [
-                PathBuf::from("/mnt/top/@home/u/.local/share/lira/locks"),
-                PathBuf::from("/srv/a b/.local/share/lira/locks"),
-                PathBuf::from("/srv/part"),
+                // What `/` would show, if no mount covered `/home`.
+                shown("/mnt/top/@/home/u/.local/share/lira/locks", locks),
+                shown("/mnt/top/@home/u/.local/share/lira/locks", locks),
+                shown("/srv/a b/.local/share/lira/locks", locks),
+                shown("/srv/part", &locks.join("o")),
             ]
         );
     }
@@ -677,11 +692,11 @@ mod tests {
         let mounts = b"43 1 0:37 /@ / rw - btrfs /dev/a rw\n51 43 0:22 / /proc rw - proc proc rw\n";
         assert_eq!(
             places_in(mounts, Path::new("/home/u/locks")),
-            Vec::<PathBuf>::new()
+            Vec::<(PathBuf, PathBuf)>::new()
         );
         assert_eq!(
             places_in(b"", Path::new("/home/u/locks")),
-            Vec::<PathBuf>::new()
+            Vec::<(PathBuf, PathBuf)>::new()
         );
     }
 

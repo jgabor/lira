@@ -6483,16 +6483,23 @@ fn an_agent_can_not_lock_the_work_on_another_pull_request_through_a_second_path(
         .join(format!("{}.lock", repository.pull_request_branch()));
     assert!(data.join(&lock).is_file());
     // The host shows the folder of the data folder at a second path too,
-    // as a bind mount does. The agent of a new run tries to lock the work
-    // on the pull request there, and holds the lock while it works. The
-    // next start is the agent of `lira continue`, on the host.
+    // as a bind mount does, and the lock file at a third. The agent of a
+    // new run tries to lock the work on the pull request there, and holds
+    // the lock while it works. The next start is the agent of `lira
+    // continue`, on the host.
     let second = repository.top.join("second");
     fs::create_dir_all(&second).unwrap();
+    let third = repository.top.join("third.lock");
+    fs::write(&third, "").unwrap();
+    let file = data.join(&lock);
     let lock = second.join(lock);
     let work = format!(
         r#"if [ ! -e "$here/tried" ]; then
   echo tried > "$here/tried"
   [ -e '{lock}' ] && echo seen > "$here/lock-seen"
+  [ -d '{worktrees}' ] && echo shown > "$here/second-path-shown"
+  # The shell holds this lock until it ends.
+  exec 8< '{third}' && flock --nonblock 8
   export here
   if flock --nonblock '{lock}' sh -c 'echo locked > "$here/locked"; {HOLD}'; then :; else
     echo failed > "$here/lock-failed"
@@ -6503,6 +6510,8 @@ fn an_agent_can_not_lock_the_work_on_another_pull_request_through_a_second_path(
 fi
 {CONTINUE}"#,
         lock = lock.display(),
+        third = third.display(),
+        worktrees = second.join("lira").join("worktrees").display(),
     );
     program(&repository.harness.join("agent"), &format!("{START}{work}"));
     let mut lira = repository.lira();
@@ -6511,7 +6520,10 @@ fi
     outer
         .args(["--dev-bind", "/", "/", "--bind"])
         .arg(&data)
-        .arg(&second);
+        .arg(&second)
+        .arg("--bind")
+        .arg(&file)
+        .arg(&third);
     let mut run = within(outer, &lira).spawn().unwrap();
     wait_for("the work of the agent", || {
         repository.harness.join("working").exists()
@@ -6523,6 +6535,8 @@ fi
     let _ = run.wait();
     passed(&continued);
     assert!(repository.starts() > starts);
+    // The sandbox shows the rest of the data folder at the second path.
+    assert!(repository.harness.join("second-path-shown").exists());
     assert!(!repository.harness.join("lock-seen").exists());
     assert!(!repository.harness.join("locked").exists());
     assert!(repository.harness.join("lock-failed").exists());
