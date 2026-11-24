@@ -223,8 +223,8 @@ fn homes() -> Vec<PathBuf> {
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
 /// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
 /// plain store in `~/.gcm/store`, or in the folder that
-/// `GCM_PLAINTEXT_STORE_PATH` or the git setting
-/// `credential.plaintextStorePath` names.
+/// `GCM_PLAINTEXT_STORE_PATH` or a git setting `plaintextStorePath` of
+/// `credential` names.
 ///
 /// gpg keeps its keys in `GNUPGHOME`, or in `~/.gnupg`. gpg-agent answers
 /// at its sockets, and with its ssh support on, one of them leads to the
@@ -241,9 +241,9 @@ fn login_folders() -> Vec<PathBuf> {
         folders.push(PathBuf::from(folder));
     }
     if let Some(folder) = set("GCM_PLAINTEXT_STORE_PATH") {
-        folders.push(PathBuf::from(folder));
+        folders.extend(store_folders(folder.as_bytes()));
     }
-    folders.extend(plain_store_setting());
+    folders.extend(plain_store_settings());
     if let Some(folder) = set("XDG_CONFIG_HOME") {
         folders.push(Path::new(&folder).join("gh"));
     }
@@ -261,22 +261,44 @@ fn login_folders() -> Vec<PathBuf> {
     folders
 }
 
-/// The folder that the git setting `credential.plaintextStorePath` names,
-/// as Git Credential Manager reads it: with `~` as the home folder. It is
-/// `None` when the setting is not there, or git does not run.
-fn plain_store_setting() -> Option<PathBuf> {
-    let output = Command::new("git")
+/// The folders that the git settings of the plain store of Git Credential
+/// Manager name: `credential.plaintextStorePath`, and the same setting for
+/// a site, such as `credential.https://github.com.plaintextStorePath`. Each
+/// value of each of them is here, also one that a later value replaces.
+/// There are none when git does not run.
+fn plain_store_settings() -> Vec<PathBuf> {
+    let Ok(output) = Command::new("git")
         .args([
             "config",
-            "--type=path",
-            "--get",
-            "credential.plaintextStorePath",
+            "--null",
+            "--get-regexp",
+            r"^credential\.(.*\.)?plaintextstorepath$",
         ])
         .output()
-        .ok()?;
-    let value = output.stdout.strip_suffix(b"\n")?;
-    (output.status.success() && !value.is_empty())
-        .then(|| PathBuf::from(OsString::from_vec(value.to_vec())))
+    else {
+        return Vec::new();
+    };
+    // Each entry is the name of the setting, a new line, and the value.
+    output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter_map(|entry| Some(&entry[entry.iter().position(|&byte| byte == b'\n')? + 1..]))
+        .flat_map(store_folders)
+        .collect()
+}
+
+/// The folders that a path of the plain store can name. A path that starts
+/// with `~/` is in a home folder, and each home folder of the user is here
+/// for it, as Git Credential Manager reads it in one of them.
+fn store_folders(path: &[u8]) -> Vec<PathBuf> {
+    match path.strip_prefix(b"~/") {
+        Some(rest) => homes()
+            .into_iter()
+            .map(|home| home.join(OsStr::from_bytes(rest)))
+            .collect(),
+        None if path.is_empty() => Vec::new(),
+        None => vec![PathBuf::from(OsStr::from_bytes(path))],
+    }
 }
 
 /// The files and sockets that hold or lead to a login for GitHub. `git
