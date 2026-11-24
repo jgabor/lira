@@ -959,7 +959,14 @@ kill -s KILL -- "-$group""#;
     let _ = guard.wait();
     Err(match read {
         Err(error) => format!("Lira can't read from it: {error}"),
-        Ok(_) => "it started, and it ended before it was ready".to_string(),
+        // A line with no end is the last output of the `sh`: it ended.
+        Ok(_) if !ready.ends_with('\n') => {
+            "it started, and it ended before it was ready".to_string()
+        }
+        Ok(_) => format!(
+            "it started, and its first line was `{}`, not `ready`",
+            ready.trim_end_matches('\n')
+        ),
     })
 }
 
