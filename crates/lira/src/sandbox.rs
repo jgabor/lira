@@ -355,6 +355,15 @@ fn set(name: &str) -> Option<OsString> {
 /// `/run`, so then it is `None`. A relative path names no folder, as the
 /// XDG specification says.
 ///
+/// The XDG specification also says that the user owns the folder. A folder
+/// of the system, such as `/` or `/usr`, is not one, and the sandbox needs
+/// what is in it, such as `sh`. The sandbox needs the home folders too, so
+/// a folder that has one in it is not one either. A home folder is in it
+/// also when its path, or a folder above it in its path, leads into it by
+/// a link: the link would not be there. A chain of links that leads into
+/// it and out of it again is not seen, because `canonicalize` follows the
+/// whole chain at once.
+///
 /// The sandbox makes it empty before it adds the paths that Lira names, as
 /// it does `/tmp` and `/run`. So a path that Lira names in it is there.
 fn user_folder() -> Option<PathBuf> {
@@ -364,7 +373,25 @@ fn user_folder() -> Option<PathBuf> {
         .then_some(folder)?
         .canonicalize()
         .ok()?;
-    (folder.is_dir() && !OWN.iter().any(|path| folder.starts_with(path))).then_some(folder)
+    let metadata = fs::metadata(&folder).ok()?;
+    // SAFETY: `getuid` takes nothing, and it can't fail.
+    let mine = metadata.uid() == unsafe { getuid() };
+    // The path of a home folder leads through `folder` when the path, or a
+    // folder above it, is in `folder`, also by a link.
+    let has_home = homes().iter().any(|home| {
+        home.ancestors().any(|above| {
+            above
+                .canonicalize()
+                .is_ok_and(|above| above.starts_with(&folder))
+        })
+    });
+    let own = OWN.iter().any(|path| folder.starts_with(path));
+    (metadata.is_dir() && mine && !has_home && !own).then_some(folder)
+}
+
+unsafe extern "C" {
+    /// The user of this process.
+    fn getuid() -> u32;
 }
 
 /// The home folders of the user: the one that `HOME` names, and the one
@@ -556,7 +583,6 @@ fn system_home() -> Option<PathBuf> {
         shell: *mut c_char,
     }
     unsafe extern "C" {
-        fn getuid() -> u32;
         fn getpwuid_r(
             uid: u32,
             entry: *mut Passwd,

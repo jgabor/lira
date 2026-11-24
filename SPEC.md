@@ -131,6 +131,7 @@ Lira does these steps for each issue, in this order.
 - In the sandbox, `SSH_AUTH_SOCK` and `DBUS_SESSION_BUS_ADDRESS` are not set, and a socket file that they name is not a socket there.
 - In the sandbox, the folder of `XDG_RUNTIME_DIR` has no file of the host, other than the paths that Lira gives the sandbox.
 - An `XDG_RUNTIME_DIR` that is not an absolute path counts as not set.
+- An `XDG_RUNTIME_DIR` that names a folder that you do not own, your home folder, or a folder that has your home folder in it, counts as not set.
 - In the sandbox, `/tmp` and `/run` are empty folders of its own, other than the paths that Lira gives the sandbox. So an agent and its check see no temporary file of the host and no socket of a service of the host there, such as `/run/docker.sock`. A check that needs such a service fails in the sandbox.
 - When the host has no `bwrap`, Lira runs no agent, and the error names `bwrap`.
 - When `bwrap` makes no sandbox, Lira runs no agent, and the error shows what `bwrap` wrote.
