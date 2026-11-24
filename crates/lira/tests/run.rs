@@ -201,6 +201,10 @@ if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/issues/7/comments$'; then
 fi
 if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/labels/'; then
   [ -n "$ORDER" ] && echo unlabel >> "$ORDER"
+  if [ -e "$here/no-unlabel" ]; then
+    echo "the stand-in for gh removes no label" >&2
+    exit 1
+  fi
   exit 0
 fi
 if [ "$1 $2" = "pr view" ]; then
@@ -5505,6 +5509,41 @@ fn a_pull_request_that_can_not_become_a_draft_keeps_needs_answer() {
         repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
         Vec::<String>::new()
     );
+}
+
+// spec(lira continue): When Lira can't remove `needs:answer`, `lira continue` fails, and the new agent gets no message.
+// spec(lira continue): Then the pull request is a draft and keeps `needs:answer`, and the worktree stays.
+#[test]
+fn a_pull_request_that_keeps_needs_answer_is_a_draft_and_the_agent_gets_no_message() {
+    // The pull request is ready for review, or a draft already.
+    for (test, draft) in [("no-unlabel-ready", false), ("no-unlabel-draft", true)] {
+        let repository = Repository::stopped(test);
+        repository.view(draft, &["needs:answer"]);
+        fs::write(repository.shared.join("bin").join("no-unlabel"), "").unwrap();
+        let old = PathBuf::from(repository.kept("folder"));
+        let starts = repository.starts();
+        let error = failed(&repository.continue_work());
+        assert!(error.contains("removes no label"), "{error}");
+        assert!(error.contains("stays"), "{error}");
+        // The harness of the new agent started, and it got no message.
+        assert_eq!(repository.starts(), starts + 1);
+        let received =
+            fs::read_to_string(repository.harness.join(format!("received-{}", starts + 1)))
+                .unwrap();
+        assert!(!received.contains("session/prompt"), "{received}");
+        // The pull request is a draft, and Lira did not make it ready.
+        let undo = match draft {
+            true => vec![],
+            false => vec![format!("pr ready {ADDRESS} --undo")],
+        };
+        assert_eq!(repository.calls("pr ready"), undo);
+        // Lira tried to remove the label.
+        assert_eq!(
+            repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
+            ["api repos/{owner}/{repo}/issues/7/labels/needs:answer --method DELETE"]
+        );
+        assert!(old.is_dir(), "the worktree {} is gone", old.display());
+    }
 }
 
 // spec(lira continue): When the work of the new agent fails, the pull request gets `needs:answer` again.
