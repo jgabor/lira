@@ -3983,6 +3983,130 @@ fi
     assert!(!lock.exists(), "{}", lock.display());
 }
 
+// spec(Steps): When Lira ends before it can remove that folder, Lira removes it when the next agent on the same host starts.
+#[test]
+fn an_agent_can_not_keep_the_data_folder_of_a_harness_that_lira_left() {
+    // Three runs, one after the other, in the same data folder. The first
+    // agent keeps its data folder and never ends its reply. The second
+    // agent waits for `go`, and then tries to lock the file of the data
+    // folder of the first agent, and to hold the lock. The third agent does
+    // its work.
+    let work = r#"case "$start" in
+  1)
+    echo "$CLAUDE_CONFIG_DIR" > "$here/first-data"
+    exec sh -c 'while :; do sleep 1; done' sh "$here/first-loop"
+    ;;
+  2)
+    echo started > "$here/second-started"
+    until [ -e "$here/go" ]; do sleep 0.1; done
+    command -v flock > "$here/flock"
+    (
+      flock -n "$(cat "$here/first-data").lock" \
+        sh -c 'echo held > "$1"; while :; do sleep 1; done' sh "$here/locked" \
+        2> "$here/lock-error" || echo failed > "$here/locked"
+    ) &
+    while :; do sleep 1; done
+    ;;
+esac
+"#;
+    let repository = Repository::new("kept-by-agent", CHECK, &format!("{work}{WORK}"));
+    let harness = repository.harness.join("agent");
+    let harness = harness.to_str().unwrap();
+    let mut first = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    let first_loop = repository.harness.join("first-loop");
+    let first_loop = first_loop.to_str().unwrap();
+    wait_for("the start of the first agent", || {
+        !processes_with(first_loop).is_empty()
+    });
+    let left = PathBuf::from(repository.kept("first-data"));
+    let mut lock = left.clone().into_os_string();
+    lock.push(".lock");
+    let lock = PathBuf::from(lock);
+    let mut second = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    wait_for("the start of the second agent", || {
+        repository.harness.join("second-started").exists()
+    });
+
+    // Lira can do nothing after this signal, and leaves the data folder of
+    // the first agent.
+    first.kill().unwrap();
+    assert!(!first.wait().unwrap().success());
+    wait_for("the end of the first harness", || {
+        processes_with(first_loop).is_empty()
+    });
+    assert!(left.is_dir(), "{}", left.display());
+    assert!(lock.exists(), "{}", lock.display());
+
+    fs::write(repository.harness.join("go"), "").unwrap();
+    wait_for("the try of the second agent", || {
+        fs::read_to_string(repository.harness.join("locked")).is_ok_and(|text| text.ends_with('\n'))
+    });
+    assert!(!repository.kept("flock").is_empty());
+
+    passed(&repository.run());
+    assert!(!left.exists(), "{}", left.display());
+    assert!(!lock.exists(), "{}", lock.display());
+    assert_eq!(
+        repository.kept("locked"),
+        "failed",
+        "{}",
+        fs::read_to_string(repository.harness.join("lock-error")).unwrap_or_default()
+    );
+
+    second.kill().unwrap();
+    assert!(!second.wait().unwrap().success());
+    let locked = repository.harness.join("locked");
+    let locked = locked.to_str().unwrap();
+    wait_for("the end of the second harness", || {
+        processes_with(harness).is_empty() && processes_with(locked).is_empty()
+    });
+}
+
+// spec(Steps): An agent can't see the folder of the harness of another agent, or the lock of that folder.
+#[test]
+fn an_agent_can_not_see_the_folder_of_the_harness_of_another_agent() {
+    // The first agent keeps its folder and never ends its reply. The
+    // second agent looks at the folder that holds the folders of the
+    // harnesses, and then does its work.
+    let work = r#"case "$start" in
+  1)
+    echo "$CLAUDE_CONFIG_DIR" > "$here/first-data"
+    exec sh -c 'while :; do sleep 1; done' sh "$here/first-loop"
+    ;;
+  2)
+    ls -A "$(dirname "$CLAUDE_CONFIG_DIR")" > "$here/seen"
+    basename "$CLAUDE_CONFIG_DIR" > "$here/own"
+    ;;
+esac
+"#;
+    let repository = Repository::new("other-harness", CHECK, &format!("{work}{WORK}"));
+    let mut first = repository.lira().args(["run", REQUEST]).spawn().unwrap();
+    let first_loop = repository.harness.join("first-loop");
+    let first_loop = first_loop.to_str().unwrap();
+    wait_for("the start of the first agent", || {
+        !processes_with(first_loop).is_empty()
+    });
+    let other = PathBuf::from(repository.kept("first-data"));
+    let output = repository.run();
+    first.kill().unwrap();
+    assert!(!first.wait().unwrap().success());
+    wait_for("the end of the first harness", || {
+        processes_with(first_loop).is_empty()
+    });
+    passed(&output);
+
+    // On the host, the folder of the first agent and its lock were there.
+    let name = other.file_name().unwrap().to_str().unwrap();
+    let harnesses = fs::read_dir(other.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert!(harnesses.contains(&name.to_string()), "{harnesses:?}");
+    assert!(harnesses.contains(&format!("{name}.lock")), "{harnesses:?}");
+    // The second agent saw only its own folder.
+    assert_eq!(repository.kept("seen"), repository.kept("own"));
+}
+
 // spec(Steps): When Lira can't lock the folder of a harness, it runs no agent.
 #[test]
 fn lira_runs_no_agent_when_it_can_not_lock_the_folder_of_a_harness() {

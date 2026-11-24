@@ -2,7 +2,8 @@
 //! the change of the agent. What runs in it can change files only in the
 //! folders that Lira names. It can read all files of the host, except the
 //! places where ssh, gpg, git and `gh` keep logins, for GitHub and for
-//! other sites, and the locks of the work of agents.
+//! other sites, the locks of the work of agents, and the data folders of
+//! the harnesses of other agents.
 //!
 //! This is the one place that knows how the sandbox works. Lira makes it
 //! with the program `bwrap` (bubblewrap), so it runs on Linux only.
@@ -81,9 +82,22 @@ impl Sandbox {
         if let Some(folder) = &user_folder {
             command.arg("--tmpfs").arg(folder);
         }
+        // The folder of the data folders of harnesses is empty before the
+        // paths come, so that the data folder of this agent is there. A
+        // path that holds this folder, such as the whole data folder of
+        // Lira, would show it again, so no path may hold it.
+        let harnesses = harnesses();
+        if let Some(folder) = &harnesses {
+            command.arg("--tmpfs").arg(folder);
+        }
         for (path, place, writable) in &self.paths {
             let bind = if *writable { "--bind" } else { "--ro-bind" };
             command.arg(bind).arg(path).arg(place);
+        }
+        if let Some(folder) = &harnesses {
+            // This makes only the empty folder read-only, and not the
+            // paths in it.
+            command.arg("--remount-ro").arg(folder);
         }
         hide_locks(&mut command, user_folder.as_deref());
         hide_logins(&mut command, &self.hidden, user_folder);
@@ -94,6 +108,18 @@ impl Sandbox {
 
 /// The folders that the sandbox has of its own. See `base`.
 const OWN: [&str; 4] = ["/dev", "/proc", "/tmp", "/run"];
+
+/// The folder of the data folders of the harnesses of agents, which the
+/// sandbox shows empty and read-only. A lock works on a file that is open
+/// for reading. So an agent that saw the lock file of a data folder that
+/// Lira left could take its lock, and the next agent would not remove that
+/// folder. The data folders of other agents are not there either. Lira
+/// makes the folder when it is not there yet, as with the locks.
+fn harnesses() -> Option<PathBuf> {
+    let folder = data::harnesses(&data::folder().ok()?);
+    let _ = fs::create_dir_all(&folder);
+    folder.canonicalize().ok().filter(|folder| folder.is_dir())
+}
 
 /// Hides the locks that Lira takes on the work of agents: their folder is
 /// empty in the sandbox, and read-only, at each path where the host shows

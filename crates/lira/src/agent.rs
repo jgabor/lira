@@ -210,10 +210,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 /// with no time to remove the folder, as after `SIGKILL`, loses the lock all
 /// the same. So a folder with no lock is one that Lira left, and the next
 /// agent on the same host removes it. The lock is on a file that Lira opens
-/// to write, and not on the folder, because NFS takes only such a lock. The
-/// harness can't remove a lock file, because the folder `harness` is
-/// read-only in its sandbox. It can take the lock of a folder that Lira
-/// left, which keeps that folder only while the harness runs.
+/// to write, and not on the folder, because NFS takes only such a lock. A
+/// lock works on a file that is open for reading too, so the sandbox shows
+/// the folder `harness` empty, other than the data folder of the agent.
 ///
 /// The harness reads its data folder in each later conversation, also
 /// outside a sandbox. So in the sandbox, the data folder of the host is
@@ -236,7 +235,7 @@ struct Data {
 impl Data {
     /// Makes a new data folder, which only you can read.
     fn new() -> Result<Data, String> {
-        Data::new_in(&data::folder()?.join("harness"), &host()?)
+        Data::new_in(&data::harnesses(&data::folder()?), &host()?)
     }
 
     /// Makes a new data folder in `above`, for the host with the name
