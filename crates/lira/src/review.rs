@@ -42,16 +42,8 @@ pub fn run(
     to: &str,
 ) -> Result<Review, String> {
     let message = message(worktree, request, from, to)?;
+    remove_left_copy(&worktree.folder)?;
     let copy = copy_folder(&worktree.folder);
-    // A Lira that was killed during a review left its copy here.
-    if is_a_copy(&copy) {
-        fs::remove_dir_all(&copy).map_err(|error| {
-            format!(
-                "Lira can't remove the folder `{}` that an earlier Reviewer left: {error}",
-                copy.display()
-            )
-        })?;
-    }
     // The folder must be new: Lira removes it with all that is in it.
     fs::create_dir(&copy).map_err(|error| {
         format!(
@@ -98,6 +90,22 @@ fn read(started: &Path, worktree: &Worktree, copy: &Path, message: &str) -> Resu
         None => Ok(reply.text),
         Some(why) => Err(format!("the Reviewer did not end its review: {why}")),
     }
+}
+
+/// Removes the copy that a Reviewer left beside the worktree in `worktree`,
+/// when a Lira that was killed during a review left one there. The folder
+/// of the worktree can be gone.
+pub fn remove_left_copy(worktree: &Path) -> Result<(), String> {
+    let copy = copy_folder(worktree);
+    if !is_a_copy(&copy) {
+        return Ok(());
+    }
+    fs::remove_dir_all(&copy).map_err(|error| {
+        format!(
+            "Lira can't remove the folder `{}` that an earlier Reviewer left: {error}",
+            copy.display()
+        )
+    })
 }
 
 /// The folder for the copy of a Reviewer: beside the worktree of the

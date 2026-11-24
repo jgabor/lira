@@ -201,6 +201,10 @@ if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/issues/7/comments$'; then
 fi
 if [ "$1" = "api" ] && printf '%s\n' "$@" | grep -q '/labels/'; then
   [ -n "$ORDER" ] && echo unlabel >> "$ORDER"
+  if [ -e "$here/no-unlabel" ]; then
+    echo "the stand-in for gh removes no label" >&2
+    exit 1
+  fi
   exit 0
 fi
 if [ "$1 $2" = "pr view" ]; then
@@ -347,6 +351,47 @@ fn listen(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
     agent.unwrap()
 }
 
+/// The folder where each test has a folder of its own. The sandbox has its
+/// own `/dev`, `/proc`, `/tmp`, `/run` and folder of `XDG_RUNTIME_DIR`, so
+/// it does not show a folder of a test there. A test of a login that the
+/// sandbox hides would then pass also when Lira hid nothing. So when the
+/// folder of cargo for the files of tests is in one of them, the tests are
+/// in `target/tmp` of the workspace.
+fn tests_folder() -> PathBuf {
+    let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    hidden.extend(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|folder| folder.is_absolute())
+            .and_then(|folder| folder.canonicalize().ok()),
+    );
+    // The folder has no link in its path: the sandbox hides a link in a
+    // hidden folder, also when it leads out of it. So the folder is made,
+    // and the tests use the path with each link followed.
+    let real = |folder: &Path| {
+        fs::create_dir_all(folder).unwrap();
+        folder.canonicalize().unwrap()
+    };
+    let hidden_in = |folder: &Path| hidden.iter().find(|place| folder.starts_with(place));
+    let cargo = real(Path::new(env!("CARGO_TARGET_TMPDIR")));
+    if hidden_in(&cargo).is_none() {
+        return cargo;
+    }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let folder = real(&workspace.join("target").join("tmp"));
+    if let Some(place) = hidden_in(&folder) {
+        panic!(
+            "the tests of the sandbox need a folder that the sandbox shows, and `{}` is in `{}`",
+            folder.display(),
+            place.display()
+        );
+    }
+    folder
+}
+
 impl Repository {
     /// A repository whose main branch has one commit, with this Lira file.
     /// The stand-in for the harness does `work` when the message for the
@@ -362,9 +407,7 @@ impl Repository {
     }
 
     fn with(test: &str, lira_file: &str, check: &str, work: &str) -> Repository {
-        let top = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("run")
-            .join(test);
+        let top = tests_folder().join("run").join(test);
         if top.exists() {
             fs::remove_dir_all(&top).unwrap();
         }
@@ -2137,7 +2180,7 @@ fn a_relative_xdg_runtime_dir_hides_nothing() {
     // The XDG specification ignores a relative `XDG_RUNTIME_DIR`. Lira runs
     // in the repository, so `.` is the repository, and the worktree of the
     // agent needs its `.git`. The file `bus` there is no session bus.
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+    let root = tests_folder()
         .join("run")
         .join("relative-user-folder")
         .join("repository");
@@ -4960,6 +5003,12 @@ fn a_reply_on_a_line_comes_with_the_comment_that_it_replies_to() {
     assert!(!message[place..parent].contains("data"), "{message}");
     assert!(message[parent..earlier].contains("`someone`"), "{message}");
     assert!(message[parent..earlier].contains("data"), "{message}");
+    // The agent wrote no description, and the description that Lira
+    // writes is for you. It quotes only the request.
+    let ready = repository.gh("description-when-ready");
+    assert!(ready.contains(&format!("> {REQUEST}\n")), "{ready}");
+    assert!(!ready.contains("user"), "{ready}");
+    assert!(!ready.contains("Yes, do that."), "{ready}");
 }
 
 #[test]
@@ -5462,6 +5511,41 @@ fn a_pull_request_that_can_not_become_a_draft_keeps_needs_answer() {
     );
 }
 
+// spec(lira continue): When Lira can't remove `needs:answer`, `lira continue` fails, and the new agent gets no message.
+// spec(lira continue): Then the pull request is a draft and keeps `needs:answer`, and the worktree stays.
+#[test]
+fn a_pull_request_that_keeps_needs_answer_is_a_draft_and_the_agent_gets_no_message() {
+    // The pull request is ready for review, or a draft already.
+    for (test, draft) in [("no-unlabel-ready", false), ("no-unlabel-draft", true)] {
+        let repository = Repository::stopped(test);
+        repository.view(draft, &["needs:answer"]);
+        fs::write(repository.shared.join("bin").join("no-unlabel"), "").unwrap();
+        let old = PathBuf::from(repository.kept("folder"));
+        let starts = repository.starts();
+        let error = failed(&repository.continue_work());
+        assert!(error.contains("removes no label"), "{error}");
+        assert!(error.contains("stays"), "{error}");
+        // The harness of the new agent started, and it got no message.
+        assert_eq!(repository.starts(), starts + 1);
+        let received =
+            fs::read_to_string(repository.harness.join(format!("received-{}", starts + 1)))
+                .unwrap();
+        assert!(!received.contains("session/prompt"), "{received}");
+        // The pull request is a draft, and Lira did not make it ready.
+        let undo = match draft {
+            true => vec![],
+            false => vec![format!("pr ready {ADDRESS} --undo")],
+        };
+        assert_eq!(repository.calls("pr ready"), undo);
+        // Lira tried to remove the label.
+        assert_eq!(
+            repository.calls("api repos/{owner}/{repo}/issues/7/labels/"),
+            ["api repos/{owner}/{repo}/issues/7/labels/needs:answer --method DELETE"]
+        );
+        assert!(old.is_dir(), "the worktree {} is gone", old.display());
+    }
+}
+
 // spec(lira continue): When the work of the new agent fails, the pull request gets `needs:answer` again.
 #[test]
 fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
@@ -5511,9 +5595,10 @@ fn a_continue_that_fails_gives_the_pull_request_needs_answer_again() {
 }
 
 // spec(lira continue): When the check and a Reviewer pass the change of the new agent, Lira writes a comment that says so.
-// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after it.
+// spec(lira continue): After a `lira continue` that passed, the next one gets only the answer that you wrote after the comments that its agent read.
 // spec(lira continue): After a `lira continue` that passed, the agent is told that the check and a Reviewer passed the change, and that you sent it back.
 // spec(lira continue): The Reviewer also gets each comment that you wrote after the request and before your answer.
+// spec(lira continue): When the new agent writes no description, the description that Lira writes quotes only the request under `Problem`.
 #[test]
 fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     let repository = Repository::stopped("second-continue");
@@ -5544,6 +5629,13 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     let earlier = review.find(ANSWER).expect(&review);
     let newest = review.find("Make it louder.").expect(&review);
     assert!(earlier < newest, "{review}");
+    // The agent wrote no description, so Lira wrote it from the request.
+    // It is for you, so it does not call you "the user".
+    let ready = repository.gh("description-when-ready");
+    assert!(ready.contains(&format!("> {REQUEST}\n")), "{ready}");
+    assert!(!ready.contains(ANSWER), "{ready}");
+    assert!(!ready.contains("Make it louder."), "{ready}");
+    assert!(!ready.contains("user"), "{ready}");
 }
 
 // spec(lira continue): A comment that you write in the same second as the newest comment that the agent read is part of your next answer too.
@@ -5606,21 +5698,20 @@ fn after_a_pass_and_no_new_comment_the_agent_is_not_told_to_try_again() {
     assert!(!message.contains("try again"), "{message}");
 }
 
-// spec(lira continue): When you wrote a comment while the new agent worked, Lira writes no comment that the work passed, and says so.
+// spec(lira continue): A comment that you write while the agent works is part of your answer for the next `lira continue`.
 #[test]
-fn a_comment_that_you_wrote_while_the_agent_worked_is_not_lost() {
+fn a_comment_that_you_wrote_while_the_agent_worked_is_the_next_answer_after_a_pass() {
     let repository = Repository::stopped("continue-comment-meanwhile");
     repository.comment("you", ANSWER);
     let meanwhile = repository.shared.join("bin").join("comment-at-ready");
     fs::write(&meanwhile, "Also rename the file.").unwrap();
-    let output = repository.continue_work();
-    passed(&output);
-    let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("you wrote a comment"), "{said}");
-    // The request and the question, and no comment that the work passed.
-    assert_eq!(repository.calls("pr comment").len(), 2);
-    // The next `lira continue` gets the old question, the old answer, and
-    // the comment that you wrote while the agent worked.
+    passed(&repository.continue_work());
+    // The request, the question, and the comment that the work passed.
+    assert_eq!(repository.calls("pr comment").len(), 3);
+    let comment = repository.gh("commented");
+    assert!(comment.contains("passed the change"), "{comment}");
+    // The next `lira continue` gets only the comment that you wrote while
+    // the agent worked: not the old question, and not the old answer.
     fs::remove_file(&meanwhile).unwrap();
     repository.view(false, &[]);
     program(
@@ -5629,9 +5720,14 @@ fn a_comment_that_you_wrote_while_the_agent_worked_is_not_lost() {
     );
     passed(&repository.continue_work());
     let message = repository.message();
-    assert!(message.contains("3 rounds of review"), "{message}");
-    assert!(message.contains(ANSWER), "{message}");
-    assert!(message.contains("Also rename the file."), "{message}");
+    let answer = message.find("The answer of the user:").expect(&message);
+    assert!(
+        message[answer..].contains("Also rename the file."),
+        "{message}"
+    );
+    assert!(!message.contains(ANSWER), "{message}");
+    assert!(!message.contains("3 rounds of review"), "{message}");
+    assert!(message.contains("sent it back"), "{message}");
 }
 
 // spec(lira continue): Your answer is each comment that the login of `gh` wrote after the comments that the last comment of Lira says its agent read, and that Lira did not write.
@@ -6073,7 +6169,13 @@ fn it_is_an_error_when_the_pull_request_is_not_open_or_has_no_request() {
 /// After this, each Reviewer passes the change, and the agent does
 /// `CONTINUE`.
 fn killed_in_review(test: &str) -> (Repository, PathBuf) {
-    let repository = Repository::new(test, CHECK, WORK);
+    killed_in_review_after(test, "")
+}
+
+/// A run that is killed as `killed_in_review` says. The agent does
+/// `first` before its commit.
+fn killed_in_review_after(test: &str, first: &str) -> (Repository, PathBuf) {
+    let repository = Repository::new(test, CHECK, &format!("{first}{WORK}"));
     repository.reviewer("echo started > \"$here/review-started\"\nwhile :; do sleep 1; done\n");
     let mut lira = repository.lira().args(["run", REQUEST]).spawn().unwrap();
     wait_for("the start of the Reviewer", || {
@@ -6130,11 +6232,83 @@ fn a_copy_that_a_killed_reviewer_left_does_not_stop_the_next_review() {
     }
 }
 
+// spec(lira continue): When the old worktree is gone and the work continues in another folder, `lira continue` removes that copy too, before its own Reviewer starts.
+#[test]
+fn a_copy_beside_an_old_worktree_that_is_gone_goes_too() {
+    // The old worktree went, and its copy stayed. The agent gave its branch
+    // a new name, so the new worktree is in the folder of that name. Or the
+    // old worktree was beside the folder of its branch, in `<name>~2`. Or
+    // the work continues in the worktree of an earlier pull request on a
+    // branch with the same name.
+    for (test, first, how) in [
+        (
+            "left-copy-renamed",
+            "git branch -m fix/greeting\n",
+            "renamed",
+        ),
+        ("left-copy-numbered", "", "numbered"),
+        (
+            "left-copy-earlier",
+            "git branch -m fix/greeting\n",
+            "earlier",
+        ),
+    ] {
+        let (repository, mut copy) = killed_in_review_after(test, first);
+        let mut old = PathBuf::from(repository.kept("folder"));
+        let data = repository.top.join("xdg").join("lira");
+        match how {
+            "numbered" => {
+                let mut name = old.file_name().unwrap().to_os_string();
+                name.push("~2");
+                let beside = old.with_file_name(&name);
+                let (from, to) = (old.to_str().unwrap(), beside.to_str().unwrap());
+                git_ok(&repository.root, &["worktree", "move", from, to]);
+                name.push("-review");
+                let moved = old.with_file_name(&name);
+                fs::rename(&copy, &moved).unwrap();
+                (old, copy) = (beside, moved);
+            }
+            "earlier" => {
+                let earlier = Repository::worktrees(&data).join("fix/greeting");
+                let place = earlier.to_str().unwrap();
+                git_ok(
+                    &repository.root,
+                    &["worktree", "add", "--quiet", "--detach", place],
+                );
+            }
+            _ => {}
+        }
+        let place = old.to_str().unwrap();
+        git_ok(&repository.root, &["worktree", "remove", "--force", place]);
+        // The new Reviewer says if the copy is still there when it starts.
+        repository.reviewer(&format!(
+            "[ -e '{}' ] && echo there > \"$here/copy-at-review\"\nreply 'Review: pass'\n",
+            copy.display()
+        ));
+        passed(&repository.continue_work());
+        let new = PathBuf::from(repository.kept("folder"));
+        assert_ne!(new, old, "{test}");
+        assert_eq!(repository.starts(), 4, "{test}");
+        assert!(repository.first_message(4).contains("You are a Reviewer"));
+        assert!(
+            !repository.harness.join("copy-at-review").exists(),
+            "{test}: the copy was there when the Reviewer started"
+        );
+        assert!(
+            !copy.exists(),
+            "{test}: the copy {} is still there",
+            copy.display()
+        );
+    }
+}
+
+// spec(lira continue): When a link, a file, or a folder that is not empty and has no folder `.git` is in the place of that copy, `lira continue` fails, names the place, and leaves what is there as it is.
 #[test]
 fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
     // A worktree of another branch can be in the place of the copy: the
     // branch `x-review` is beside the branch `x`. A link, a file, or a
-    // folder with other files is no copy of a Reviewer either.
+    // folder with other files is no copy of a Reviewer either. The link
+    // goes to a folder that looks like a copy, and still stays.
     for (test, make) in [
         ("place-of-copy-worktree", "worktree"),
         ("place-of-copy-link", "link"),
@@ -6146,6 +6320,7 @@ fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
         let target = repository.top.join("target");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("keep.txt"), "keep\n").unwrap();
+        fs::create_dir(target.join(".git")).unwrap();
         match make {
             "worktree" => {
                 let place = copy.to_str().unwrap();
@@ -6165,12 +6340,20 @@ fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
         assert!(error.contains(copy.to_str().unwrap()), "{test}: {error}");
         assert!(!repository.harness.join("review-folder").exists(), "{test}");
         assert!(fs::symlink_metadata(&copy).is_ok(), "{test}");
-        assert!(target.join("keep.txt").exists(), "{test}");
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "keep\n",
+            "{test}"
+        );
         match make {
             "worktree" => assert!(copy.join(".git").is_file(), "{test}"),
-            "file" => assert!(copy.is_file(), "{test}"),
-            "other" => assert!(copy.join("keep.txt").exists(), "{test}"),
-            _ => {}
+            "link" => assert_eq!(fs::read_link(&copy).unwrap(), target, "{test}"),
+            "file" => assert_eq!(fs::read_to_string(&copy).unwrap(), "keep\n", "{test}"),
+            _ => assert_eq!(
+                fs::read_to_string(copy.join("keep.txt")).unwrap(),
+                "keep\n",
+                "{test}"
+            ),
         }
     }
 }
