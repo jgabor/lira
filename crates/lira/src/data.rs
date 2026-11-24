@@ -16,6 +16,12 @@ pub fn locks(data: &Path) -> PathBuf {
     data.join("locks")
 }
 
+/// The folder of the data folders of the harnesses of agents, and of their
+/// lock files, in the data folder `data`.
+pub fn harnesses(data: &Path) -> PathBuf {
+    data.join("harness")
+}
+
 /// The data folder for these values of `XDG_DATA_HOME` and `HOME`.
 ///
 /// A value that is empty, or that is no absolute path, counts as not set.
