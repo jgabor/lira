@@ -1947,6 +1947,81 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     }
 }
 
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_have_no_login_in_a_plain_store_that_the_host_moves() {
+    let repository = Repository::new("moved-store", CHECK, "");
+    // Git Credential Manager keeps its plain store in the folder that
+    // `GCM_PLAINTEXT_STORE_PATH` names, or else in the one that a git
+    // setting `plaintextStorePath` of `credential` names. A setting can be
+    // for one site, a later value replaces an earlier one, and `~` is the
+    // home folder, also with more than one `/` after it.
+    let variable = repository.top.join("variable-store");
+    let earlier = repository.top.join("earlier-store");
+    let later = repository.top.join("home").join("later-store");
+    let site = repository.top.join("site-store");
+    let folders = [variable.clone(), earlier.clone(), later, site.clone()];
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    let logins = r#"stores() {
+  for folder in "$GCM_PLAINTEXT_STORE_PATH" "$@"; do
+    echo "$folder: $(ls -A "$folder" 2>&1)"
+  done
+}
+"#;
+    let paths = folders[1..]
+        .iter()
+        .map(|folder| format!("'{}'", folder.display()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{logins}stores {paths} > \"$here/agent-stores\"\n{WORK}"),
+    );
+    repository.reviewer(&format!(
+        "{logins}stores {paths} > \"$here/reviewer-stores\"\nreply 'Review: pass'\n"
+    ));
+    let output = repository
+        .lira()
+        .env("GCM_PLAINTEXT_STORE_PATH", &variable)
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_0", "credential.plaintextStorePath")
+        .env("GIT_CONFIG_VALUE_0", &earlier)
+        .env("GIT_CONFIG_KEY_1", "credential.plaintextStorePath")
+        .env("GIT_CONFIG_VALUE_1", "~//later-store")
+        .env(
+            "GIT_CONFIG_KEY_2",
+            "credential.https://github.com.plaintextStorePath",
+        )
+        .env("GIT_CONFIG_VALUE_2", &site)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    // Each folder is empty.
+    let empty: String = folders
+        .iter()
+        .map(|folder| format!("{}: \n", folder.display()))
+        .collect();
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("agent-stores")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("reviewer-stores")).unwrap(),
+        empty
+    );
+    // The logins of the host are as they were.
+    for folder in &folders {
+        assert_eq!(
+            fs::read_to_string(folder.join("login")).unwrap(),
+            "secret\n"
+        );
+    }
+}
+
 #[test]
 fn with_no_home_an_agent_and_a_reviewer_have_no_login_in_the_home_folder_of_the_system() {
     let repository = Repository::new("system-home", CHECK, "");
