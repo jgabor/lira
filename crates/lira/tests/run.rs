@@ -2234,8 +2234,10 @@ const OWN_FOLDERS: &str = r#"own_folders() {
 #[test]
 fn an_agent_and_its_check_see_no_temporary_file_and_no_socket_of_the_host() {
     // The agent writes a file in its own `/tmp`.
+    let written = PathBuf::from(format!("/tmp/lira-{}-own-written", std::process::id()));
     let work = format!(
-        "{OWN_FOLDERS}own_folders > \"$here/agent-folders\"\necho written > /tmp/lira-own-written\ncat /tmp/lira-own-written > \"$here/agent-written\"\n{WORK}"
+        "{OWN_FOLDERS}own_folders > \"$here/agent-folders\"\necho written > '{0}'\ncat '{0}' > \"$here/agent-written\"\n{WORK}",
+        written.display()
     );
     let check = format!(
         "{OWN_FOLDERS}root=\"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")\"\nown_folders > \"$root/../stand-in/check-folders\"\n"
@@ -2284,12 +2286,21 @@ fn an_agent_and_its_check_see_no_temporary_file_and_no_socket_of_the_host() {
     );
     // What the agent wrote in its `/tmp` is not on the host.
     assert_eq!(repository.kept("agent-written"), "written");
-    assert!(!Path::new("/tmp/lira-own-written").exists());
+    assert!(!written.exists());
+    // Lira gives the sandbox the folder of the test, which is in `/tmp`
+    // when the target folder is.
+    let test_folder = repository.top.canonicalize().unwrap();
+    let given = test_folder
+        .strip_prefix("/tmp")
+        .ok()
+        .and_then(|path| path.components().next())
+        .map(|first| format!("/tmp: {}", first.as_os_str().to_string_lossy()));
     let seen = |kept: &str| -> (String, Vec<String>, Vec<String>) {
         let mut lines = kept.lines();
         let scores = lines.next().unwrap().to_string();
         let (tmp, run): (Vec<_>, Vec<_>) = lines
             .map(str::to_string)
+            .filter(|line| Some(line) != given.as_ref())
             .partition(|line| line.starts_with("/tmp: "));
         (scores, tmp, run)
     };
