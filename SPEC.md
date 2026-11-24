@@ -262,6 +262,8 @@ is success, 1 is a failure, and 2 is bad usage.
 - After a `lira continue` that fails with no question, the next one gets the same question and the same answer again.
 - When Lira can't write the comment that the work passed, `lira continue` still passes, and says so.
 - When the pull request is ready for review, it becomes a draft again.
+- When Lira can't remove `needs:answer`, `lira continue` fails, and the new agent gets no message.
+- Then the pull request is a draft and keeps `needs:answer`, and the worktree stays.
 - The agent works in the old worktree when it is still there, and in a new one when it is not.
 - A new worktree starts from the branch in the repository in the current folder when it has the branch, and from the branch of the remote when it does not.
 - When something that git does not list as a worktree is in the folder of the branch, the new worktree is that folder with `~2` at the end of its name, or with `~3` when that is there too, and so on.
@@ -278,6 +280,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - Lira then runs the check and a Reviewer as `lira run` does, with both limits at 0 again. The work can stop and ask again.
 - The Reviewer gets the request and your answer.
 - The Reviewer also gets each comment that you wrote after the request and before your answer.
+- When the new agent writes no description, the description that Lira writes quotes only the request under `Problem`.
 - It is an error when the pull request is not open, or has no comment with the request.
 - It is an error when the branch of the pull request is in another repository, or is checked out in a folder that is not a worktree of Lira.
 - It is an error when the worktree and the remote both have commits on the branch that the other does not have.
@@ -289,6 +292,7 @@ is success, 1 is a failure, and 2 is bad usage.
 - It does not wait for that agent, and it does not stop it.
 - When Lira is killed while its agent works, a later `lira continue` starts a new agent.
 - When Lira is killed while its Reviewer works, a later `lira continue` in the same worktree removes the copy of the repository that the Reviewer worked in, before its own Reviewer starts.
+- When a link, a file, or a folder that is not empty and has no folder `.git` is in the place of that copy, `lira continue` fails, names the place, and leaves what is there as it is.
 - It prints the address of the pull request.
 
 ### lira check

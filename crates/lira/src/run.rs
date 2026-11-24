@@ -96,6 +96,7 @@ pub fn command(folder: &Path, request: &str) -> Result<(), String> {
         started: folder,
         made: &made,
         request,
+        review_request: request,
         agent,
         sandbox,
         pull_request: PullRequest::new(&made, request)?,
@@ -170,17 +171,17 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let mut request = read.request.clone();
+    let mut review_request = read.request.clone();
     if !read.earlier.is_empty() {
         let _ = write!(
-            request,
+            review_request,
             "\n\nThe earlier comments of the user on the pull request:\n\n{}",
             quotes(&read.earlier)
         );
     }
     if !read.answer.is_empty() {
         let _ = write!(
-            request,
+            review_request,
             "\n\nThe answer on the pull request:\n\n{}",
             quotes(&read.answer)
         );
@@ -188,7 +189,8 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
     let run = Run {
         started: folder,
         made: &made,
-        request: &request,
+        request: &read.request,
+        review_request: &review_request,
         agent,
         sandbox,
         pull_request,
@@ -363,7 +365,12 @@ struct Run<'a> {
     /// The folder that `lira run` started in.
     started: &'a Path,
     made: &'a Worktree,
+    /// The request of `lira run`. The description that Lira writes quotes
+    /// it.
     request: &'a str,
+    /// The request for the Reviewer. With `lira continue`, it has your
+    /// comments on the pull request too, in text for an agent.
+    review_request: &'a str,
     /// The agent. Its harness runs until the run ends, so that the agent
     /// knows what it did when Lira gives it the output of the check or the
     /// findings of a Reviewer.
@@ -798,7 +805,7 @@ impl Run<'_> {
         let Some(to) = self.pull_request.commit() else {
             return Err("the agent made no commit, so there is no change to review".to_string());
         };
-        review::run(self.started, self.made, self.request, &from, to)
+        review::run(self.started, self.made, self.review_request, &from, to)
     }
 
     /// Where the work is, for an error.
