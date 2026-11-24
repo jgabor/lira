@@ -348,28 +348,44 @@ fn listen(test: &str, socket: &Path) -> std::os::unix::net::UnixListener {
 }
 
 /// The folder where each test has a folder of its own. The sandbox has its
-/// own `/tmp` and `/run`, so it does not show a folder of a test there. A
-/// test of a login that the sandbox hides would then pass also when Lira
-/// hid nothing. So when the folder of cargo for the files of tests is in
-/// one of them, the tests are in `target/tmp` of the workspace.
+/// own `/dev`, `/proc`, `/tmp`, `/run` and folder of `XDG_RUNTIME_DIR`, so
+/// it does not show a folder of a test there. A test of a login that the
+/// sandbox hides would then pass also when Lira hid nothing. So when the
+/// folder of cargo for the files of tests is in one of them, the tests are
+/// in `target/tmp` of the workspace.
 fn tests_folder() -> PathBuf {
-    let own = |folder: &Path| {
-        let folder = folder
-            .canonicalize()
-            .unwrap_or_else(|_| folder.to_path_buf());
-        ["/tmp", "/run"].iter().any(|own| folder.starts_with(own))
+    let mut hidden: Vec<PathBuf> = ["/dev", "/proc", "/tmp", "/run"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    hidden.extend(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|folder| folder.is_absolute())
+            .and_then(|folder| folder.canonicalize().ok()),
+    );
+    // The folder is made first, so that a link in its path counts.
+    let hidden_in = |folder: &Path| {
+        fs::create_dir_all(folder).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        hidden
+            .iter()
+            .find(|place| folder.starts_with(place))
+            .cloned()
     };
     let cargo = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    if !own(cargo) {
+    if hidden_in(cargo).is_none() {
         return cargo.to_path_buf();
     }
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let folder = workspace.canonicalize().unwrap().join("target").join("tmp");
-    assert!(
-        !own(&folder),
-        "the tests of the sandbox need a folder outside `/tmp` and `/run`, and `{}` is in one",
-        folder.display()
-    );
+    if let Some(place) = hidden_in(&folder) {
+        panic!(
+            "the tests of the sandbox need a folder that the sandbox shows, and `{}` is in `{}`",
+            folder.display(),
+            place.display()
+        );
+    }
     folder
 }
 
