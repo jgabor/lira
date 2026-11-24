@@ -1,7 +1,7 @@
 //! A new worktree for a branch, in the data folder of Lira.
 
 use crate::lira_file::LiraFile;
-use crate::{data, git, process};
+use crate::{data, git, process, review};
 use std::fs::{self, File, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -201,6 +201,11 @@ pub fn continued(
                 )?;
                 folder
             } else {
+                // A Lira that was killed during a review left a copy
+                // beside the folder of the old worktree, which is gone.
+                for name in [started_on, Some(branch)].into_iter().flatten() {
+                    remove_left_copy(&ours, name)?;
+                }
                 // Something that git does not list can be in the folder of
                 // the branch. Lira leaves it as it is, and makes the new
                 // worktree beside it.
@@ -309,6 +314,26 @@ fn is_at(folder: &Path, ours: &Path, branch: &str) -> bool {
     match (folder.canonicalize(), ours.canonicalize()) {
         (Ok(folder), Ok(ours)) => folder == ours.join(branch),
         _ => false,
+    }
+}
+
+/// Removes the copy that a Reviewer left beside the folder `name` in the
+/// folder `ours`, where an old worktree of the branch `name` can have been.
+/// A name that goes out of `ours`, or a link above the folder, is not used.
+fn remove_left_copy(ours: &Path, name: &str) -> Result<(), String> {
+    let names = !name.is_empty()
+        && Path::new(name)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+    let folder = ours.join(name);
+    let above = Path::new(name).parent().unwrap_or(Path::new(""));
+    let inside = match (folder.parent().map(Path::canonicalize), ours.canonicalize()) {
+        (Some(Ok(real)), Ok(ours)) => real == ours.join(above),
+        _ => false,
+    };
+    match names && inside {
+        true => review::remove_left_copy(&folder),
+        false => Ok(()),
     }
 }
 
