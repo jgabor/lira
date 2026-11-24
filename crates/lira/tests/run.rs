@@ -1947,6 +1947,68 @@ fn an_agent_and_a_reviewer_have_no_other_login_for_github() {
     }
 }
 
+// spec(GitHub): An agent and a Reviewer have no login for GitHub.
+#[test]
+fn an_agent_and_a_reviewer_have_no_login_in_a_plain_store_that_the_host_moves() {
+    let repository = Repository::new("moved-store", CHECK, "");
+    // Git Credential Manager keeps its plain store in the folder that
+    // `GCM_PLAINTEXT_STORE_PATH` names, or else in the one that the git
+    // setting `credential.plaintextStorePath` names.
+    let variable = repository.top.join("variable-store");
+    let setting = repository.top.join("setting-store");
+    let folders = [variable.clone(), setting.clone()];
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("login"), "secret\n").unwrap();
+    }
+    let logins = format!(
+        r#"stores() {{
+  for folder in "$GCM_PLAINTEXT_STORE_PATH" '{}'; do
+    echo "$folder: $(ls -A "$folder" 2>&1)"
+  done
+}}
+"#,
+        setting.display()
+    );
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}{logins}stores > \"$here/agent-stores\"\n{WORK}"),
+    );
+    repository.reviewer(&format!(
+        "{logins}stores > \"$here/reviewer-stores\"\nreply 'Review: pass'\n"
+    ));
+    let output = repository
+        .lira()
+        .env("GCM_PLAINTEXT_STORE_PATH", &variable)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "credential.plaintextStorePath")
+        .env("GIT_CONFIG_VALUE_0", &setting)
+        .args(["run", REQUEST])
+        .output()
+        .unwrap();
+    passed(&output);
+    // Each folder is empty.
+    let empty: String = folders
+        .iter()
+        .map(|folder| format!("{}: \n", folder.display()))
+        .collect();
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("agent-stores")).unwrap(),
+        empty
+    );
+    assert_eq!(
+        fs::read_to_string(repository.harness.join("reviewer-stores")).unwrap(),
+        empty
+    );
+    // The logins of the host are as they were.
+    for folder in &folders {
+        assert_eq!(
+            fs::read_to_string(folder.join("login")).unwrap(),
+            "secret\n"
+        );
+    }
+}
+
 #[test]
 fn with_no_home_an_agent_and_a_reviewer_have_no_login_in_the_home_folder_of_the_system() {
     let repository = Repository::new("system-home", CHECK, "");

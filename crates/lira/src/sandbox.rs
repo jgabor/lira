@@ -222,7 +222,9 @@ fn homes() -> Vec<PathBuf> {
 /// from `gh` too. ssh keeps its keys in `~/.ssh`. `git credential-cache`
 /// keeps its socket in `~/.git-credential-cache`, or in `git/credential`
 /// in `XDG_CACHE_HOME` or `~/.cache`. Git Credential Manager keeps its
-/// plain store in `~/.gcm/store`.
+/// plain store in `~/.gcm/store`, or in the folder that
+/// `GCM_PLAINTEXT_STORE_PATH` or the git setting
+/// `credential.plaintextStorePath` names.
 ///
 /// gpg keeps its keys in `GNUPGHOME`, or in `~/.gnupg`. gpg-agent answers
 /// at its sockets, and with its ssh support on, one of them leads to the
@@ -238,6 +240,10 @@ fn login_folders() -> Vec<PathBuf> {
     if let Some(folder) = set("GNUPGHOME") {
         folders.push(PathBuf::from(folder));
     }
+    if let Some(folder) = set("GCM_PLAINTEXT_STORE_PATH") {
+        folders.push(PathBuf::from(folder));
+    }
+    folders.extend(plain_store_setting());
     if let Some(folder) = set("XDG_CONFIG_HOME") {
         folders.push(Path::new(&folder).join("gh"));
     }
@@ -253,6 +259,24 @@ fn login_folders() -> Vec<PathBuf> {
         folders.push(home.join(".gnupg"));
     }
     folders
+}
+
+/// The folder that the git setting `credential.plaintextStorePath` names,
+/// as Git Credential Manager reads it: with `~` as the home folder. It is
+/// `None` when the setting is not there, or git does not run.
+fn plain_store_setting() -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args([
+            "config",
+            "--type=path",
+            "--get",
+            "credential.plaintextStorePath",
+        ])
+        .output()
+        .ok()?;
+    let value = output.stdout.strip_suffix(b"\n")?;
+    (output.status.success() && !value.is_empty())
+        .then(|| PathBuf::from(OsString::from_vec(value.to_vec())))
 }
 
 /// The files and sockets that hold or lead to a login for GitHub. `git
