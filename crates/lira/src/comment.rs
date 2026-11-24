@@ -206,14 +206,13 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Comments> {
         Some(Read::Until { time, .. }) => time.as_deref(),
         _ => None,
     };
+    // A comment that the last comment of Lira names was read, also when
+    // it comes after that comment in its second.
     let unread = |at: usize, comment: &Comment| {
-        at > until
-            || (at > first
-                && newest.is_some()
-                && comment.time.as_deref() == newest
-                && !named(comment))
+        !named(comment)
+            && (at > until || (at > first && newest.is_some() && comment.time.as_deref() == newest))
     };
-    let earlier = comments[..until + 1]
+    let earlier = comments
         .iter()
         .enumerate()
         .skip(first + 1)
@@ -504,6 +503,33 @@ mod tests {
         let read = read(&comments, "you").unwrap();
         assert_eq!(read.answer, ["While the agent worked."]);
         assert_eq!(read.earlier, ["Before the agent started.", "In a review."]);
+    }
+
+    #[test]
+    fn a_review_that_the_agent_read_stays_read_when_lira_wrote_in_its_second() {
+        let at = |id: &str, time: &str, body: &str| Comment {
+            id: Some(id.to_string()),
+            time: Some(time.to_string()),
+            ..of("you", body)
+        };
+        let second = "2026-11-01T10:05:00Z";
+        let until = Read::Until {
+            ids: vec!["review 1".to_string()],
+            time: Some(second.to_string()),
+        };
+        // The comment of Lira is listed before the review of its second.
+        let comments = [
+            at(
+                "comment 1",
+                "2026-11-01T10:00:00Z",
+                &request("Do it.", BRANCH),
+            ),
+            at("comment 2", second, &passed(Some(&until))),
+            at("review 1", second, "In a review."),
+        ];
+        let read = read(&comments, "you").unwrap();
+        assert!(read.answer.is_empty(), "{:?}", read.answer);
+        assert_eq!(read.earlier, ["In a review."]);
     }
 
     #[test]
