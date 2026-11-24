@@ -364,21 +364,20 @@ fn tests_folder() -> PathBuf {
             .filter(|folder| folder.is_absolute())
             .and_then(|folder| folder.canonicalize().ok()),
     );
-    // The folder is made first, so that a link in its path counts.
-    let hidden_in = |folder: &Path| {
+    // The folder has no link in its path: the sandbox hides a link in a
+    // hidden folder, also when it leads out of it. So the folder is made,
+    // and the tests use the path with each link followed.
+    let real = |folder: &Path| {
         fs::create_dir_all(folder).unwrap();
-        let folder = folder.canonicalize().unwrap();
-        hidden
-            .iter()
-            .find(|place| folder.starts_with(place))
-            .cloned()
+        folder.canonicalize().unwrap()
     };
-    let cargo = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    if hidden_in(cargo).is_none() {
-        return cargo.to_path_buf();
+    let hidden_in = |folder: &Path| hidden.iter().find(|place| folder.starts_with(place));
+    let cargo = real(Path::new(env!("CARGO_TARGET_TMPDIR")));
+    if hidden_in(&cargo).is_none() {
+        return cargo;
     }
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let folder = workspace.canonicalize().unwrap().join("target").join("tmp");
+    let folder = real(&workspace.join("target").join("tmp"));
     if let Some(place) = hidden_in(&folder) {
         panic!(
             "the tests of the sandbox need a folder that the sandbox shows, and `{}` is in `{}`",
