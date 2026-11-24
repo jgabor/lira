@@ -6089,6 +6089,7 @@ fn a_copy_that_a_killed_reviewer_left_does_not_stop_the_next_review() {
     }
 }
 
+// spec(lira continue): When something that is no copy of a Reviewer is in the folder of that copy, `lira continue` fails, names the folder, and leaves what is there as it is.
 #[test]
 fn a_folder_in_the_place_of_the_copy_that_is_no_copy_stays() {
     // A worktree of another branch can be in the place of the copy: the
