@@ -2082,6 +2082,12 @@ fn with_home(lira: &Command, home: &Path, passwd: &Path) -> Command {
     if Path::new("/run/nscd").is_dir() {
         command.args(["--tmpfs", "/run/nscd"]);
     }
+    within(command, lira)
+}
+
+/// `bwrap` with what it was given, which runs `lira` with its folder and
+/// its variables.
+fn within(mut command: Command, lira: &Command) -> Command {
     command
         .arg("--")
         .arg(lira.get_program())
@@ -6463,4 +6469,61 @@ fn a_setup_command_that_fails_in_a_new_worktree_of_a_branch_keeps_the_branch() {
     let full = format!("refs/heads/{branch}");
     assert_eq!(git_ok(&repository.root, &["rev-parse", &full]), head);
     assert_eq!(repository.as_it_is(&repository.root), before);
+}
+
+// spec(Steps): An agent can't see the locks that Lira takes on the work of agents.
+#[test]
+fn an_agent_can_not_lock_the_work_on_another_pull_request_through_a_second_path() {
+    let repository = Repository::stopped("lock-at-second-path");
+    let data = repository.top.join("xdg");
+    let lock = Path::new("lira")
+        .join("locks")
+        .join("owner")
+        .join("name")
+        .join(format!("{}.lock", repository.pull_request_branch()));
+    assert!(data.join(&lock).is_file());
+    // The host shows the folder of the data folder at a second path too,
+    // as a bind mount does. The agent of a new run tries to lock the work
+    // on the pull request there, and holds the lock while it works. The
+    // next start is the agent of `lira continue`, on the host.
+    let second = repository.top.join("second");
+    fs::create_dir_all(&second).unwrap();
+    let lock = second.join(lock);
+    let work = format!(
+        r#"if [ ! -e "$here/tried" ]; then
+  echo tried > "$here/tried"
+  [ -e '{lock}' ] && echo seen > "$here/lock-seen"
+  export here
+  if flock --nonblock '{lock}' sh -c 'echo locked > "$here/locked"; {HOLD}'; then :; else
+    echo failed > "$here/lock-failed"
+    {HOLD}
+  fi
+  reply 'I did nothing.'
+  exit 0
+fi
+{CONTINUE}"#,
+        lock = lock.display(),
+    );
+    program(&repository.harness.join("agent"), &format!("{START}{work}"));
+    let mut lira = repository.lira();
+    lira.args(["run", REQUEST]);
+    let mut outer = Command::new("bwrap");
+    outer
+        .args(["--dev-bind", "/", "/", "--bind"])
+        .arg(&data)
+        .arg(&second);
+    let mut run = within(outer, &lira).spawn().unwrap();
+    wait_for("the work of the agent", || {
+        repository.harness.join("working").exists()
+    });
+    let starts = repository.starts();
+
+    let continued = repository.continue_work();
+    fs::write(repository.harness.join("go"), "").unwrap();
+    let _ = run.wait();
+    passed(&continued);
+    assert!(repository.starts() > starts);
+    assert!(!repository.harness.join("lock-seen").exists());
+    assert!(!repository.harness.join("locked").exists());
+    assert!(repository.harness.join("lock-failed").exists());
 }
