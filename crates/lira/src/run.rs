@@ -196,8 +196,19 @@ pub fn continue_command(folder: &Path, number: &str) -> Result<(), String> {
         pull_request,
         continued: Some(Continued {
             read: comments.last().and_then(|newest| {
+                newest.id.as_ref()?;
+                // GitHub gives a time in seconds, so Lira names each comment
+                // of the second of the newest one.
+                let ids = match &newest.time {
+                    None => vec![newest.id.clone()?],
+                    Some(time) => comments
+                        .iter()
+                        .filter(|comment| comment.time.as_ref() == Some(time))
+                        .filter_map(|comment| comment.id.clone())
+                        .collect(),
+                };
                 Some(comment::Read::Until {
-                    id: newest.id.clone()?,
+                    ids,
                     time: newest.time.clone(),
                 })
             }),
