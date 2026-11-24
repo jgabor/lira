@@ -348,12 +348,14 @@ fn user_folder() -> Option<PathBuf> {
     let metadata = fs::metadata(&folder).ok()?;
     // SAFETY: `getuid` takes nothing, and it can't fail.
     let mine = metadata.uid() == unsafe { getuid() };
+    // The path of a home folder leads through `folder` when the path, or a
+    // folder above it, is in `folder`, also by a link.
     let has_home = homes().iter().any(|home| {
-        home.canonicalize()
-            .is_ok_and(|home| home.starts_with(&folder))
-            || home
-                .ancestors()
-                .any(|above| above.canonicalize().is_ok_and(|above| above == folder))
+        home.ancestors().any(|above| {
+            above
+                .canonicalize()
+                .is_ok_and(|above| above.starts_with(&folder))
+        })
     });
     let own = OWN.iter().any(|path| folder.starts_with(path));
     (metadata.is_dir() && mine && !has_home && !own).then_some(folder)

@@ -2244,23 +2244,37 @@ fn an_xdg_runtime_dir_with_the_home_folder_in_it_hides_nothing() {
 fn an_xdg_runtime_dir_with_a_link_to_the_home_folder_in_it_hides_nothing() {
     // `HOME` names a link in the folder of `XDG_RUNTIME_DIR`, and the link
     // leads to a home folder outside it. An empty folder would have no
-    // link, and the agent would find no home folder at `HOME`.
+    // link, and the agent would find no home folder at `HOME`. In the
+    // second test, `HOME` comes to the link through another link, which
+    // leads to a folder in the folder of `XDG_RUNTIME_DIR`.
     let work = format!("cat \"$HOME/note\" > \"$here/note\"\n{WORK}");
-    let repository = Repository::new("linked-home-user-folder", CHECK, &work);
-    let home = repository.top.join("home");
-    fs::write(home.join("note"), "kept\n").unwrap();
-    let user_folder = repository.top.join("xdg-user");
-    fs::create_dir_all(&user_folder).unwrap();
-    std::os::unix::fs::symlink(&home, user_folder.join("home")).unwrap();
-    let output = repository
-        .lira()
-        .env("HOME", user_folder.join("home"))
-        .env("XDG_RUNTIME_DIR", &user_folder)
-        .args(["run", REQUEST])
-        .output()
-        .unwrap();
-    passed(&output);
-    assert_eq!(repository.kept("note"), "kept");
+    for (test, inside) in [
+        ("linked-home-user-folder", ""),
+        ("linked-twice-home-user-folder", "sub"),
+    ] {
+        let repository = Repository::new(test, CHECK, &work);
+        let home = repository.top.join("home");
+        fs::write(home.join("note"), "kept\n").unwrap();
+        let user_folder = repository.top.join("xdg-user");
+        let link = user_folder.join(inside);
+        fs::create_dir_all(&link).unwrap();
+        std::os::unix::fs::symlink(&home, link.join("home")).unwrap();
+        let named = if inside.is_empty() {
+            link.join("home")
+        } else {
+            std::os::unix::fs::symlink(&link, repository.top.join("link")).unwrap();
+            repository.top.join("link").join("home")
+        };
+        let output = repository
+            .lira()
+            .env("HOME", named)
+            .env("XDG_RUNTIME_DIR", &user_folder)
+            .args(["run", REQUEST])
+            .output()
+            .unwrap();
+        passed(&output);
+        assert_eq!(repository.kept("note"), "kept", "{test}");
+    }
 }
 
 // spec(Steps): In the sandbox, the folder of `XDG_RUNTIME_DIR` has no file of the host, other than the paths that Lira gives the sandbox.
