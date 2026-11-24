@@ -2230,10 +2230,13 @@ const OWN_FOLDERS: &str = r#"own_folders() {
 "#;
 
 // spec(Steps): In the sandbox, `/tmp` and `/run` are empty folders of its own, other than the paths that Lira gives the sandbox.
-// spec(Steps): So an agent and its check see no temporary file of the host and no socket of a service of the host, such as `/run/docker.sock`.
+// spec(Steps): So an agent and its check see no temporary file of the host and no socket of a service of the host there, such as `/run/docker.sock`.
 #[test]
 fn an_agent_and_its_check_see_no_temporary_file_and_no_socket_of_the_host() {
-    let work = format!("{OWN_FOLDERS}own_folders > \"$here/agent-folders\"\n{WORK}");
+    // The agent writes a file in its own `/tmp`.
+    let work = format!(
+        "{OWN_FOLDERS}own_folders > \"$here/agent-folders\"\necho written > /tmp/lira-own-written\ncat /tmp/lira-own-written > \"$here/agent-written\"\n{WORK}"
+    );
     let check = format!(
         "{OWN_FOLDERS}root=\"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")\"\nown_folders > \"$root/../stand-in/check-folders\"\n"
     );
@@ -2263,7 +2266,6 @@ fn an_agent_and_its_check_see_no_temporary_file_and_no_socket_of_the_host() {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect()
     };
-    assert!(!names("/run").is_empty());
     // The sandbox keeps the file of the name servers when it is in `/run`.
     let run: Vec<String> = Path::new("/etc/resolv.conf")
         .canonicalize()
@@ -2274,6 +2276,15 @@ fn an_agent_and_its_check_see_no_temporary_file_and_no_socket_of_the_host() {
         })
         .into_iter()
         .collect();
+    assert!(
+        names("/run")
+            .iter()
+            .any(|name| !run.contains(&format!("/run: {name}"))),
+        "{run:?}"
+    );
+    // What the agent wrote in its `/tmp` is not on the host.
+    assert_eq!(repository.kept("agent-written"), "written");
+    assert!(!Path::new("/tmp/lira-own-written").exists());
     let seen = |kept: &str| -> (String, Vec<String>, Vec<String>) {
         let mut lines = kept.lines();
         let scores = lines.next().unwrap().to_string();
