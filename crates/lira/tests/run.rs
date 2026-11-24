@@ -5546,6 +5546,47 @@ fn a_second_continue_gets_only_the_answer_that_you_wrote_after_the_first() {
     assert!(earlier < newest, "{review}");
 }
 
+// spec(lira continue): A comment that you write in the same second as the newest comment that the agent read is part of your next answer too.
+#[test]
+fn a_comment_in_the_same_second_as_what_the_agent_read_is_part_of_your_answer() {
+    let repository = Repository::stopped("same-second");
+    // The newest comment that the next agent reads is a review. It has the
+    // time of the comments of the conversation.
+    let review = Json::List(vec![
+        Json::Text(TIME.to_string()),
+        Json::Text("you".to_string()),
+        Json::Text(ANSWER.to_string()),
+        Json::number(1),
+    ]);
+    let bin = repository.shared.join("bin");
+    fs::write(bin.join("reviews"), format!("{review}\n")).unwrap();
+    passed(&repository.continue_work());
+    // Lira wrote that the work passed later than the review.
+    let listed = bin.join("listed");
+    let text = fs::read_to_string(&listed).unwrap();
+    let later: Vec<String> = text
+        .lines()
+        .map(|line| match line.contains("<!-- lira passed -->") {
+            true => line.replacen(TIME, "2026-11-01T11:00:00Z", 1),
+            false => line.to_string(),
+        })
+        .collect();
+    fs::write(&listed, later.join("\n") + "\n").unwrap();
+    // You send the pull request back with a comment of the conversation,
+    // in the same second as the review.
+    repository.view(false, &[]);
+    repository.comment("you", "Make it louder.");
+    program(
+        &repository.harness.join("agent"),
+        &format!("{START}commit louder 'Make it louder'\nreply 'It is louder.'\n"),
+    );
+    passed(&repository.continue_work());
+    let message = repository.message();
+    let answer = message.find("The answer of the user:").expect(&message);
+    assert!(message[answer..].contains("Make it louder."), "{message}");
+    assert!(!message[answer..].contains(ANSWER), "{message}");
+}
+
 // spec(lira continue): When you wrote no answer, the agent is told so, and is told to read the newest commits of the branch.
 #[test]
 fn after_a_pass_and_no_new_comment_the_agent_is_not_told_to_try_again() {

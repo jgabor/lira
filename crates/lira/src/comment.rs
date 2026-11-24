@@ -25,8 +25,11 @@ const STARTED: (&str, &str) = ("<!-- lira started on ", " -->");
 /// show that line.
 const READ: (&str, &str) = ("<!-- lira read until ", " -->");
 
-/// What is between the comment and its time in the line `READ`.
+/// What is between the comments and their time in the line `READ`.
 const AT: &str = " at ";
+
+/// What is between two comments in the line `READ`.
+const AND: &str = ", ";
 
 /// What the line `READ` names when the agent read only the request.
 const THE_REQUEST: &str = "the request";
@@ -51,11 +54,16 @@ pub struct Comment {
 pub enum Read {
     /// The request only: the agent of `lira run` reads no comment.
     Request,
-    /// Each comment until the one that `id` names: the comments that were
-    /// there when the agent of `lira continue` started. `time` is the time
-    /// of that comment, so that Lira finds the place also when the comment
-    /// is gone.
-    Until { id: String, time: Option<String> },
+    /// Each comment until the last one that `ids` names: the comments
+    /// that were there when the agent of `lira continue` started. `time`
+    /// is the time of the newest comment, so that Lira finds the place also
+    /// when the comment is gone. GitHub gives a time in seconds, so `ids`
+    /// names each comment of that second that the agent read, the newest
+    /// last. A comment of that second that `ids` does not name is newer.
+    Until {
+        ids: Vec<String>,
+        time: Option<String>,
+    },
 }
 
 /// The line that says what the agent read.
@@ -64,11 +72,11 @@ fn read_line(read: Option<&Read>) -> String {
     match read {
         None => String::new(),
         Some(Read::Request) => format!("{start}{THE_REQUEST}{end}\n"),
-        Some(Read::Until { id, time: None }) => format!("{start}{id}{end}\n"),
+        Some(Read::Until { ids, time: None }) => format!("{start}{}{end}\n", ids.join(AND)),
         Some(Read::Until {
-            id,
+            ids,
             time: Some(time),
-        }) => format!("{start}{id}{AT}{time}{end}\n"),
+        }) => format!("{start}{}{AT}{time}{end}\n", ids.join(AND)),
     }
 }
 
@@ -148,7 +156,9 @@ pub struct Comments {
 /// Your answer starts after what the agent of the last comment of Lira
 /// read. So a comment that you wrote while that agent worked is part of
 /// it. When the comment that it names is gone, your answer starts after
-/// the last comment that is not newer than it. When the last comment of
+/// the last comment that is not newer than it. A comment with the time of
+/// the newest comment that the agent read, and that the last comment of
+/// Lira does not name, is part of your answer too. When the last comment of
 /// Lira does not say what its agent read, your answer starts after that
 /// comment.
 pub fn read(comments: &[Comment], login: &str) -> Option<Comments> {
@@ -164,15 +174,19 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Comments> {
         Some((_, rest)) => (None, rest),
         None => (None, ""),
     };
+    let named = |comment: &Comment| match &read {
+        Some(Read::Until { ids, .. }) => comment.id.as_ref().is_some_and(|id| ids.contains(id)),
+        _ => false,
+    };
     // The last comment that the agent read. When it is gone, the last one
     // that is not newer than it.
-    let until = match read {
+    let until = match &read {
         Some(Read::Request) => first,
-        Some(Read::Until { id, time }) => {
+        Some(Read::Until { time, .. }) => {
             let before = &comments[..last];
             before
                 .iter()
-                .rposition(|comment| comment.id.as_deref() == Some(id.as_str()))
+                .rposition(named)
                 .or_else(|| {
                     let time = time.as_deref()?;
                     let not_newer =
@@ -184,17 +198,41 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Comments> {
         None => last,
     };
     let until = until.max(first);
-    let earlier = comments[first + 1..until + 1]
+    // Comments of one second can be in another order than the one in which
+    // they were written. So a comment of the second of the newest one that
+    // the agent read, and that the last comment of Lira does not name, is
+    // newer, also when it comes before.
+    let newest = match &read {
+        Some(Read::Until { time, .. }) => time.as_deref(),
+        _ => None,
+    };
+    let unread = |at: usize, comment: &Comment| {
+        at > until
+            || (at > first
+                && newest.is_some()
+                && comment.time.as_deref() == newest
+                && !named(comment))
+    };
+    let earlier = comments[..until + 1]
         .iter()
-        .filter(|comment| comment.author == login && !of_lira(comment))
-        .map(|comment| comment.body.trim().to_string())
+        .enumerate()
+        .skip(first + 1)
+        .filter(|(at, comment)| {
+            !unread(*at, comment) && comment.author == login && !of_lira(comment)
+        })
+        .map(|(_, comment)| comment.body.trim().to_string())
         .collect();
     let (stopped, passed) = match marker(&comments[last].body) {
         Some((QUESTION, _)) => (Some(said.trim().to_string()), false),
         Some((PASSED, _)) => (None, true),
         _ => (None, false),
     };
-    let after = &comments[until + 1..];
+    let after: Vec<&Comment> = comments
+        .iter()
+        .enumerate()
+        .filter(|(at, comment)| unread(*at, comment))
+        .map(|(_, comment)| comment)
+        .collect();
     let answer = after
         .iter()
         .filter(|comment| comment.author == login && !of_lira(comment))
@@ -203,7 +241,7 @@ pub fn read(comments: &[Comment], login: &str) -> Option<Comments> {
     let others = after
         .iter()
         .filter(|comment| comment.author != login)
-        .cloned()
+        .map(|comment| (*comment).clone())
         .collect();
     Some(Comments {
         request,
@@ -238,13 +276,13 @@ fn read_in(rest: &str) -> (Option<Read>, &str) {
     {
         Some(THE_REQUEST) => (Some(Read::Request), after),
         Some(read) if !read.is_empty() => {
-            let (id, time) = match read.rsplit_once(AT) {
-                Some((id, time)) => (id, Some(time.to_string())),
+            let (ids, time) = match read.rsplit_once(AT) {
+                Some((ids, time)) => (ids, Some(time.to_string())),
                 None => (read, None),
             };
             (
                 Some(Read::Until {
-                    id: id.to_string(),
+                    ids: ids.split(AND).map(str::to_string).collect(),
                     time,
                 }),
                 after,
@@ -399,7 +437,7 @@ mod tests {
         assert!(read.earlier.is_empty());
         // The agent of `lira continue` read each comment until the answer.
         let until = Read::Until {
-            id: "comment 5".to_string(),
+            ids: vec!["comment 5".to_string()],
             time: Some("2026-11-01T10:05:00Z".to_string()),
         };
         let mut more = comments.to_vec();
@@ -436,6 +474,36 @@ mod tests {
         more[5].body = line;
         let read = super::read(&more, "you").unwrap();
         assert_eq!(read.answer, ["Later."]);
+    }
+
+    #[test]
+    fn a_comment_of_the_newest_second_that_the_agent_read_and_that_lira_does_not_name_is_new() {
+        let at = |id: &str, time: &str, body: &str| Comment {
+            id: Some(id.to_string()),
+            time: Some(time.to_string()),
+            ..of("you", body)
+        };
+        let second = "2026-11-01T10:05:00Z";
+        let until = Read::Until {
+            ids: vec!["comment 2".to_string(), "review 1".to_string()],
+            time: Some(second.to_string()),
+        };
+        // The comment of the conversation is listed before the review of
+        // the same second, and was written after it.
+        let comments = [
+            at(
+                "comment 1",
+                "2026-11-01T10:00:00Z",
+                &request("Do it.", BRANCH),
+            ),
+            at("comment 2", second, "Before the agent started."),
+            at("comment 3", second, "While the agent worked."),
+            at("review 1", second, "In a review."),
+            at("comment 4", "2026-11-01T10:30:00Z", &passed(Some(&until))),
+        ];
+        let read = read(&comments, "you").unwrap();
+        assert_eq!(read.answer, ["While the agent worked."]);
+        assert_eq!(read.earlier, ["Before the agent started.", "In a review."]);
     }
 
     #[test]
